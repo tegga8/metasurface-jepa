@@ -1,0 +1,62 @@
+# Milestone B — vanilla deterministic JEPA (§7 Phase 2 / §7.2 minimal experiment first).
+# Canonical sizes from design doc §11; run via
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml --experiment sweep
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml --model-variant direct
+experiment: minimal            # minimal: §7.2 fixed 50% block-mask, random placement only
+                               # sweep:   §7 Phase 2 full training at 20/40/60/80/100%
+minimal:
+  mask_ratio: 0.5
+  mask_placement: random       # §7.2 step 1: "blocks placed uniformly at random for this first test"
+sweep:
+  mask_ratios: [0.2, 0.4, 0.6, 0.8, 1.0]   # 0% excluded from the main analysis per §7 Phase 2
+  mask_placement: half_sensitivity         # §2: half random / half resonance-relevant
+
+model:
+  variant: jepa                # jepa (GoalConditionedJEPA) | direct (Baseline 2)
+  patch_size: 4                # §11
+  token_grid: 16               # 64 / 4 -> block masks operate here (§2)
+  hidden: 384                  # §11 geometry encoder / predictor
+  num_heads: 6                 # §11 geometry encoder
+  num_predictor_heads: 6
+  geo_depth: 6                 # §11 geometry encoder blocks
+  predictor_depth: 8           # §11 predictor blocks (dense attention only this milestone)
+  bottleneck_tokens: 64        # §3.2 Perceiver-IO bottleneck
+  goal_tokens: 16              # §3.4 / §11 physics bottleneck
+  num_goal_heads: 4
+  ema_momentum_start: 0.996    # §3.3 Variant A
+  ema_momentum_end: 0.999      # "schedule toward 0.999 if stable" (linear ramp)
+
+mask:
+  min_side: 3                  # §2 minimum block side length in tokens
+  k_range: [1, 4]              # §2 "Sample 1-4 axis-aligned rectangular blocks"
+
+data:
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
+  max_train_samples: 8192      # minimal experiment uses a subset (fast §7.2 sanity run);
+                               # set 0 for the full 139,906-sample sweep
+  num_workers: 0               # keep 0: loadmat arrays are big; per-item build is fast
+
+weights:
+  metadit: data/metadit/weights/metadit-small.bin
+  spectrum: data/metadit/weights/spec_encoder.pth
+  surrogate: data/metadit/weights/surrogate_model.bin
+
+train:
+  batch_size: 64
+  grad_accum: 2                # effective batch 128
+  epochs: 30
+  lr: 0.0001
+  wd: 0.05
+  warmup_steps: 1000
+  clip_grad_norm: 1.0
+  save_optimizer: true         # false on Kaggle if checkpoint push size matters
+  ckpt_every_steps: 0          # 0 = every epoch
+  val_every_steps: 2000
+  val_batches: 50
+  log_every_steps: 25
+  seed: 0
+  device: cuda
+
+out_dir: checkpoints/milestone_b

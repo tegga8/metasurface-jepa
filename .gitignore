@@ -1,11 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Dataset cache (staged on cloud per CLOUD_TRAINING.md)
 data/metadit/*
 !data/metadit/.gitkeep
+
+# Checkpoint artifacts — keep only REPORT.md records
 checkpoints/*
 !checkpoints/.gitkeep
 !checkpoints/*/
 !checkpoints/*/REPORT.md
-checkpoints/*/*.pt
-checkpoints/*/*.json
-__pycache__/
-*.pyc
-.venv/
+checkpoints/**/*.pt
+checkpoints/**/*.pth
+checkpoints/**/*.ckpt
+checkpoints/**/*.json
+checkpoints/**/*.jsonl
+!checkpoints/**/REPORT.md
+
+# Root-level probe/debug scratch files (out_*.py/.json/.txt)
+/out_*
+
+# Model weights anywhere
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# Misc
+*.log
+.env
+.DS_Store
+logs/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/

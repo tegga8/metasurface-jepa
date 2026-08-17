@@ -59,11 +59,11 @@ class _JEPAForwardMixin:
         kv = torch.cat([z_xb, a_goal], dim=1)               # (B, 80, 384)
         delta, weights = self.predictor(queries, kv, c_physics, need_weights=need_attn)
         base = torch.where(mask.unsqueeze(-1), mask_token, z_x)
-        z_hat = base + delta
-        return z_hat, z_x, mask, weights
+        return base, delta, z_x, mask, weights
 
     def query_predictions(self, G, S, M, goal_mode="real"):
-        return self._encode(G, S, M, goal_mode, need_attn=False)[0]
+        base, delta, *_ = self._encode(G, S, M, goal_mode, need_attn=False)
+        return base + delta
 
 
 class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
@@ -84,8 +84,8 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
 
     def forward(self, G, S, M, goal_mode="real", need_attn=False, with_target=True):
         """Returns dict: z_hat (B,256,384), mask (B,256) bool, target z_y (B,256,384)."""
-        z_hat, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
-        out = dict(z_hat=z_hat, mask=mask, attn_weights=weights)
+        base, delta, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
+        out = dict(z_hat=base + delta, mask=mask, attn_weights=weights)
         if with_target:
             out["z_y"] = self.ema(G)
         return out
@@ -110,15 +110,17 @@ class DirectMaskedGenerator(_JEPAForwardMixin, nn.Module):
         self.geometry_encoder = geo
 
     def forward(self, G, S, M, goal_mode="real", need_attn=False):
-        z_latent, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
-        g_hat = _unpatchify(z_latent)
-        return dict(g_hat=g_hat, z_latent=z_latent, mask=mask, attn_weights=weights)
+        _, delta, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
+        g_hat = _unpatchify(delta)
+        return dict(g_hat=g_hat, z_latent=delta, mask=mask, attn_weights=weights)
 
     def loss(self, G, S, M, goal_mode="real"):
         out = self.forward(G, S, M, goal_mode=goal_mode)
-        up = M.repeat_interleave(4, dim=1).repeat_interleave(4, dim=2).unsqueeze(1)
+        pmask = M.repeat_interleave(4, dim=1).repeat_interleave(4, dim=2)
+        ub = (pmask == 0).unsqueeze(1)
+        ub = ub.expand_as(out["g_hat"])
         diff = (out["g_hat"] - G).abs()
-        masked = diff[up == 0]
+        masked = diff[ub]
         full = diff.mean()
         return (masked.mean() if masked.numel() else full), out
 

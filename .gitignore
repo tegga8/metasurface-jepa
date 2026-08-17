@@ -2,6 +2,10 @@ data/metadit/*
 !data/metadit/.gitkeep
 checkpoints/*
 !checkpoints/.gitkeep
+!checkpoints/*/
+!checkpoints/*/REPORT.md
+checkpoints/*/*.pt
+checkpoints/*/*.json
 __pycache__/
 *.pyc
 .venv/

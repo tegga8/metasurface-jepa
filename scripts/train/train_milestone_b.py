@@ -194,10 +194,11 @@ def evaluate_direct(model, loader, masker, ratios, val_batches, device, surrogat
                 break
             G, S = G.to(device), S.to(device)
             for ratio in ratios:
-                M = _eval_ratio_masks(masker, 1, G.shape[0], ratio, device)[0]
+                M = _eval_ratio_masks(1, G.shape[0], ratio, device)[0]
                 out = model(G, S, M)
                 g_hat = out["g_hat"]
-                up = M.repeat_interleave(4, dim=1).repeat_interleave(4, dim=2).unsqueeze(1)
+                pmask = M.repeat_interleave(4, dim=1).repeat_interleave(4, dim=2)
+                up = pmask.unsqueeze(1).expand_as(g_hat)
                 diff = (g_hat - G).abs()
                 agg[ratio]["px_masked"] += diff[up == 0].mean().item()
                 agg[ratio]["px_full"] += diff.mean().item()
@@ -211,9 +212,7 @@ def evaluate_direct(model, loader, masker, ratios, val_batches, device, surrogat
                         torch.nn.functional.normalize(z_hat, dim=-1),
                         torch.nn.functional.normalize(z_ref, dim=-1), dim=-1)
                     agg[ratio]["vit_global"] += (1.0 - sim).clamp(min=0).mean().item()
-                    rmask = (M[:, None, None, :, :] == 0).expand(
-                        -1, 2, 2, -1, -1).reshape(G.shape[0], PIXEL_GRID, PIXEL_GRID)
-                    rmask = rmask.reshape(G.shape[0], -1)
+                    rmask = (M == 0).reshape(G.shape[0], -1)
                     d = (1.0 - sim).clamp(min=0)
                     agg[ratio]["vit_masked"] += d[rmask].mean().item()
                 agg[ratio]["count"] += 1
@@ -455,7 +454,9 @@ def main():
         final.update(run_eval(model, val_loader, masker, surrogate, released_dit, ratios,
                               cfg["train"]["val_batches"], device, null_goal=True,
                               variant=variant))
-        final["null_gap"] = final.get("null_gap_r0.5", float("nan"))
+        gaps = [final[k] for k in final if k.startswith("null_gap_r")
+                and isinstance(final[k], float)]
+        final["null_gap"] = sum(gaps) / len(gaps) if gaps else float("nan")
     final_path = os.path.join(out_dir, f"{run_tag}_final_metrics.json")
     with open(final_path, "w") as f:
         json.dump({"config": cfg, "metrics": final, "best": best}, f, indent=2)

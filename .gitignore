@@ -1,0 +1,7 @@
+data/metadit/*
+!data/metadit/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+__pycache__/
+*.pyc
+.venv/

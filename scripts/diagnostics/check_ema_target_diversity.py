@@ -48,106 +48,11 @@ from assembly import build_model, load_into_model
 from data.dataset import MetaDiTDataset, collate_batch
 from encoders.geometry_encoder import GeometryEncoder
 
-COLLAPSED_ANCHOR = {
-    "pairwise_cos": 0.999870,
-    "pairwise_p05": 0.999601,
-    "same_token_cos": 0.999266,
-    "eff_rank_unnorm": 2.5986,
-    "eff_rank_frac": 2.5986 / 384.0,
-    "participation": 2.10,
-    "top_eig_frac": 0.6307,
-}
-
-MILESTONE_A_ANCHOR = {
-    "zS_cross_sample_mean_cos": 0.184,
-    "block11_clustering_ari": 0.397,
-}
-
-
-def eff_ranks(X):
-    """Entropy effective rank (fraction + unnormalized), participation ratio, top
-    eigenvalue fraction, over centered embeddings (B, D)."""
-    Xc = X - X.mean(0, keepdim=True)
-    s = torch.linalg.svdvals(Xc)
-    e = (s ** 2).clamp(min=0.0)
-    total = e.sum().item()
-    if total <= 0.0:
-        return {"eff_rank_unnorm": 0.0, "eff_rank_frac": 0.0,
-                "participation": 0.0, "top_eig_frac": 0.0}
-    p = e / e.sum()
-    ent = -(p * torch.log(p + 1e-12)).sum().item()
-    n = p.numel()
-    part = total ** 2 / (e ** 2).sum().item()
-    top = e.max().item() / total
-    return {"eff_rank_unnorm": ent, "eff_rank_frac": ent / math.log(n),
-            "participation": part, "top_eig_frac": top}
-
-
-def pairwise_cos_stats(X_mean):
-    """Different-sample pairwise cosine on mean-pooled (B, D) embeddings."""
-    Xn = F.normalize(X_mean, dim=-1)
-    G = Xn @ Xn.T
-    idx = torch.triu_indices(Xn.shape[0], Xn.shape[0], offset=1)
-    v = G[idx[0], idx[1]]
-    return {"mean": v.mean().item(), "median": v.median().item(),
-            "p05": v.quantile(0.05).item(), "min": v.min().item()}
-
-
-def same_token_cos(X):
-    """Per-token-position cross-sample pairwise cosine, averaged (B, T, D)."""
-    Xn = F.normalize(X, dim=-1)
-    G = torch.einsum("btd,bsd->tbs", Xn, Xn)
-    idx = torch.triu_indices(Xn.shape[0], Xn.shape[0], offset=1)
-    return G[:, idx[0], idx[1]].mean().item()
-
-
-def var_stats(X):
-    return {"token_var": X.var(dim=0).mean().item(),
-            "token_std": X.var(dim=0).sqrt().mean().item(),
-            "sample_var": X.var(dim=1).mean().item(),
-            "sample_std": X.var(dim=1).sqrt().mean().item()}
-
-
-def encoder_stats(encoder, geoms, device, max_geoms):
-    stats = {}
-    with torch.no_grad():
-        embs = []
-        for G in geoms:
-            G = G.to(device)
-            x = encoder(G)
-            embs.append(x.cpu())
-            if sum(e.shape[0] for e in embs) >= max_geoms:
-                break
-        X = torch.cat(embs, dim=0)[:max_geoms]
-    stats.update(var_stats(X))
-    stats["pairwise_cos"] = pairwise_cos_stats(X.mean(dim=1))
-    stats["same_token_cos"] = same_token_cos(X)
-    stats.update(eff_ranks(X.mean(dim=1)))
-    stats["n_geoms"] = X.shape[0]
-    return stats
-
-
-def verdict(target, collapsed, refs):
-    """Reference-relative, not absolute-cutoff: the target is non-degenerate when it
-    behaves like the healthy released-ViT reference AND is far from the collapsed
-    anchor on the sharp discriminators (effective-rank fraction, p05 cosine tail,
-    same-token cosine)."""
-    rel = refs["released_vit"]
-    d_rank = abs(target["eff_rank_frac"] - rel["eff_rank_frac"])
-    d_cos = abs(target["pairwise_cos"]["p05"] - rel["pairwise_cos"]["p05"])
-    d_token = abs(target["same_token_cos"] - rel["same_token_cos"])
-    near_released = d_rank <= 0.05 and d_cos <= 0.02 and d_token <= 0.05
-    far_rank = target["eff_rank_frac"] / max(collapsed["eff_rank_frac"], 1e-9)
-    far_cos = collapsed["pairwise_p05"] - target["pairwise_cos"]["p05"]
-    non_deg = bool(near_released and far_rank > 5.0 and far_cos > 0.0)
-    return {
-        "clearly_non_degenerate": non_deg,
-        "dist_to_released_vit": {"eff_rank_frac": d_rank, "p05_cos": d_cos,
-                                 "same_token_cos": d_token},
-        "near_released_vit": bool(near_released),
-        "ratio_eff_rank_vs_collapsed": far_rank,
-        "margin_p05_cos_vs_collapsed": far_cos,
-    }
+from diagnostics.representation_health import (  # noqa: E402
+    COLLAPSED_ANCHOR, MILESTONE_A_ANCHOR,
+    eff_ranks, pairwise_cos_stats, same_token_cos, var_stats,
+    encoder_stats, verdict,
+)
 
 
 def build_fresh_model(cfg, device, spec_path, metadit_path, init_from_metadit=True):

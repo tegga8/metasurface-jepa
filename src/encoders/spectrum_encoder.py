@@ -5,6 +5,7 @@ Loads the released `spec_encoder.pth` (prefix `context_encoder.` stripped, match
 No MetaDiT weights are modified. Forward: (B, 2, 301) -> (B, 301, 256).
 """
 
+import math
 import os
 import sys
 
@@ -68,8 +69,15 @@ class SpectrumPath(nn.Module):
         self.proj_g = nn.Linear(spec_dim, hidden)
         self.proj_goal = nn.Linear(spec_dim, hidden)
 
-    def _pool_goal(self, a_local):
-        """16 learned queries cross-attend over A_local (B, 301, 256) -> (B, 16, 256)."""
+    def _pool_goal(self, a_local, need_weights=False):
+        """16 learned queries cross-attend over A_local (B, 301, 256) -> (B, 16, 256).
+
+        need_weights=True additionally returns the attention weights (B, H, 16, 301)
+        computed with the SAME math as SDPA (softmax(q·k^T / sqrt(head_dim)), q/k
+        LayerNorm'd) but under no_grad and WITHOUT affecting the output path — the
+        output tensor is always produced by SDPA, so requesting weights never changes
+        model outputs (checked by unit test).
+        """
         b = a_local.shape[0]
         nq = self.goal_queries.shape[1]
         nk = a_local.shape[1]
@@ -79,12 +87,18 @@ class SpectrumPath(nn.Module):
         k = k.reshape(b, nk, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.reshape(b, nk, self.num_heads, self.head_dim).transpose(1, 2)
         q, k = self.q_norm(q), self.k_norm(k)
+        if need_weights:
+            with torch.no_grad():
+                w = torch.softmax((q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim),
+                                  dim=-1)                    # (B, H, 16, 301)
         out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).reshape(b, nq, self.num_heads * self.head_dim)
-        return self.proj(out)
+        return self.proj(out), (w if need_weights else None)
 
-    def forward(self, S, goal_mode="real"):
-        """S: (B, 2, 301) -> (c_physics (B, 384), A_goal (B, 16, 384))."""
+    def forward(self, S, goal_mode="real", need_weights=False):
+        """S: (B, 2, 301) -> (c_physics (B, 384), A_goal (B, 16, 384)) — or a third
+        element, the goal->spectrum attention weights (B, H, 16, 301), when
+        need_weights=True."""
         with torch.no_grad():
             a_local = self.released(S)                       # (B, 301, 256)
         if goal_mode == "null":
@@ -92,5 +106,8 @@ class SpectrumPath(nn.Module):
             zeros = a_local.new_zeros(b, self.hidden)
             return zeros, zeros.unsqueeze(1).expand(b, self.goal_queries.shape[1], -1)
         a_g = self.proj_g(a_local.mean(dim=1))               # (B, 384)
-        a_goal = self.proj_goal(self._pool_goal(a_local))    # (B, 16, 384)
+        a_goal, w = self._pool_goal(a_local, need_weights=need_weights)  # (B, 16, 384)
+        a_goal = self.proj_goal(a_goal)
+        if need_weights:
+            return a_g, a_goal, w
         return a_g, a_goal

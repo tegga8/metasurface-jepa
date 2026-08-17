@@ -275,3 +275,79 @@ its diversity check. The collapsed checkpoint is not reused. Direct baseline,
 null-goal evaluation, and the mask sweep remain deferred. Next step (operator
 confirmation): fresh cloud run per CLOUD_TRAINING.md, then the diversity gate against
 both anchors, then the §7.2 gate.
+
+---
+
+## Diagnostic correctness fix — same_token_cos indexing bug (2026-08-17)
+
+### Bug (reproduced, then fixed)
+
+`same_token_cos()` in `scripts/diagnostics/check_ema_target_diversity.py` used
+
+    G = torch.einsum("btd,bsd->tbs", Xn, Xn)
+
+`b` is a shared free label in both operands, so einsum aligns the batch axes and
+emits a **single** `b` axis; the second operand's `s` then labels its dim 1 — the
+TOKEN dim (T=256), not the batch. The output is `(T, B, T)`, not `(T, B, B)`.
+`torch.triu_indices(B)` indices were then applied to a tensor whose last axis has
+size T:
+
+- B > T (e.g. `--max-geoms 512`, the default): `IndexError: index 256 is out of
+  bounds for dimension 1 with size 256` — reproduced exactly.
+- B <= T (e.g. 64 or 256 geoms): ran silently, but computed **within-sample
+  token-pair cosines** (token t vs token j of the same sample) instead of
+  cross-sample cosines at the same token — wrong semantics, no error.
+
+### Fix
+
+Explicit batched matmul keeps the two batch axes apart:
+
+    G = torch.bmm(Xn.transpose(0, 1), Xn.transpose(0, 1).transpose(1, 2))  # (T, B, B)
+
+`G[t, i, j] = cos(X[i, t], X[j, t])` — different samples i, j at the SAME spatial
+token t, averaged over tokens and sample pairs; `triu_indices` over the actual
+batch size; guard returns NaN for B < 2; shape assertion (B, T, D).
+
+### Unit tests (new: `tests/test_same_token_cos.py`, all pass, also under pytest)
+
+1. `(B=4, 256, 384)` returns a finite scalar in [-1, 1].
+2. `(B=512, 256, 384)` — the exact historical crash regime — no IndexError, finite.
+3. All-identical samples → same-token cosine == 1.0.
+4. Semantics match an independent per-pair manual loop (this is the check that
+   catches the old within-sample-token computation).
+5. Hand-computed 4-sample reconstruction (two identical + two identical groups,
+   expected value derived by hand: `(4·cos(a,b) + 2)/6`).
+
+### Impact on previously reported numbers
+
+The old same-token values were computed with the buggy metric and are invalid:
+the fix-pass verification line "same-token cos 0.946 vs 0.946 (64 geoms)" above,
+and the collapsed anchor's `same_token_cos 0.999266`. Corrected released-ViT
+reference at 512 geoms: same-token cos **0.9897**, eff_rank_frac **0.1489**,
+pairwise p05 **0.9877**. The verdicts' conclusions were NOT affected — they are
+driven by effective-rank fraction and pairwise p05 (separate, non-buggy
+functions): the smoke target still lands near released ViT with eff-rank ~23x the
+collapsed anchor and p05 margin > 0. `checkpoints/milestone_b/smoke_diversity.json`
+was regenerated with the fixed metric.
+
+### Complete diagnostic runs (3 checkpoints, 512 geoms each — the B > 256 regime), all without exceptions
+
+The original collapsed Kaggle checkpoint (.pt) is NOT on this machine — only its
+measured anchor stats. `scripts/diagnostics/make_synthetic_collapsed_ckpt.py`
+builds a transparent proxy reproducing the anchor's pairwise signatures (rank-1
+patch embed + zero pos_embed + scaled blocks, EMA re-synced per B1):
+
+| checkpoint | verdict | eff-rank vs collapsed | p05 margin vs collapsed | same-token cos |
+|---|---|---|---|---|
+| `synthetic_collapsed.pt` (proxy for step-2687 run) | STILL COLLAPSED / DEGENERATE | 0.13x | −0.0002 | 0.99955 |
+| `minimal_smoke_latest.pt` (healthy smoke) | CLEARLY NON-DEGENERATE | 22.98x | +0.0105 | 0.98967 |
+| `minimal_smoke_best_model.pt` (new best, same 3-step model) | CLEARLY NON-DEGENERATE | 22.98x | +0.0105 | 0.98967 |
+
+JSONs: `synthetic_collapsed_diversity.json`, `smoke_latest_diversity.json`,
+`smoke_best_diversity.json`. Caveats: the synthetic proxy's eff-rank entropy
+(H ≈ 0.006) is below the anchor's H = 2.5986 (the anchor's long-tail spectrum is
+not reproduced by rank-1 corruption; recorded in the checkpoint meta), and the
+anchor's `eff_rank_frac 0.0068` was computed as H/384 while the current code
+computes H/ln(384) — a normalization inconsistency in the historical anchor,
+preserved as-is for reference. The corrected stat functions are reused by the
+in-progress adaptive-ladder representation-health module.

@@ -1,0 +1,83 @@
+# Milestone B — adaptive loss-switching screening (operator spec 2026-08-17).
+# Ladder: jepa -> jepa_vicreg -> lejepa; switches ONLY on plateau/collapse/instability
+# evidence; the global step budget is a safety ceiling, never a phase-switch criterion.
+#
+# Run:
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b_adaptive.yaml --smoke
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b_adaptive.yaml
+#   ... --resume <checkpoints/milestone_b/adaptive/phase_XX_<objective>_latest.pt>
+experiment: adaptive
+
+adaptive_training:
+  enabled: true
+  objectives: [jepa, jepa_vicreg, lejepa]   # exactly this order; no additions
+  max_total_steps: 1800                     # safety ceiling across the WHOLE ladder
+  val_every_steps: 100
+  log_every_steps: 25
+  lr_warmup_steps: 200
+  warmup_steps: 200                         # per-phase, before plateau detection
+  plateau_patience: 2                       # counted in validation evaluations
+  min_delta: 1e-5
+  collapse_patience: 2
+  lr: 0.0001
+  wd: 0.05
+  grad_accum: 2
+  batch_size: 64
+  val_batch_size: 32
+  fixed_val_subset: 512
+  mask_ratio: 0.5
+  mask_seed: 12345
+  save_optimizer: true
+  objective_params:
+    jepa: {}
+    jepa_vicreg: {lambda_var: 0.1, lambda_cov: 0.04, gamma: 1.0, cov_on: true}
+    lejepa: {lambda_sigreg: 0.1, num_slices: 8, num_points: 256, seed: 0}
+
+model:
+  variant: jepa                # adaptive ladder builds the jepa variant by design
+  patch_size: 4
+  token_grid: 16
+  hidden: 384
+  num_heads: 6
+  num_predictor_heads: 6
+  geo_depth: 6
+  predictor_depth: 8
+  bottleneck_tokens: 64
+  goal_tokens: 16
+  num_goal_heads: 4
+  ema_momentum_start: 0.996
+  ema_momentum_end: 0.999
+
+mask:
+  min_side: 3                  # §2 minimum block side length in tokens
+  k_range: [1, 4]              # §2 "Sample 1-4 axis-aligned rectangular blocks"
+
+data:
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
+  max_train_samples: 8192      # screening ladder samples the same 8192-subset as the
+                               # legacy minimal config; set 0 for the full dataset
+  num_workers: 0
+
+weights:
+  metadit: data/metadit/weights/metadit-small.bin
+  spectrum: data/metadit/weights/spec_encoder.pth
+  surrogate: data/metadit/weights/surrogate_model.bin
+
+train:
+  batch_size: 64
+  grad_accum: 2
+  epochs: 30
+  lr: 0.0001
+  wd: 0.05
+  warmup_steps: 1000
+  clip_grad_norm: 1.0
+  save_optimizer: true
+  ckpt_every_steps: 0
+  val_every_steps: 2000
+  val_batches: 50
+  log_every_steps: 25
+  seed: 0
+  device: cuda
+
+out_dir: checkpoints/milestone_b

@@ -129,6 +129,15 @@ def evaluate_jepa(model, loader, masker, ratios, val_batches, device, need_null=
     """Masked-position latent cosine error vs EMA target; goal-token entropy; + null-goal
     gap (the §7.2 cheap proxy for goal-ignoring collapse)."""
     model.eval()
+    proj = getattr(model, "proj", None)
+
+    def _cos_error(z_hat, z_y):
+        if proj is not None:
+            z_hat, z_y = proj(z_hat), proj(z_y)
+        return (1.0 - torch.nn.functional.cosine_similarity(
+            torch.nn.functional.normalize(z_hat, dim=-1),
+            torch.nn.functional.normalize(z_y, dim=-1), dim=-1)).clamp(min=0)
+
     if isinstance(ratios, float):
         ratios = [ratios]
     agg = {r: {"cos_err": 0.0, "count": 0} for r in ratios}
@@ -145,9 +154,7 @@ def evaluate_jepa(model, loader, masker, ratios, val_batches, device, need_null=
                                       PIXEL_GRID, masker.min_side, masker.k_range)[0]
                 mask = (M.view(M.shape[0], -1) == 0)
                 out = model(G, S, M, need_attn=True)
-                d = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(out["z_hat"], dim=-1),
-                    torch.nn.functional.normalize(out["z_y"], dim=-1), dim=-1)).clamp(min=0)
+                d = _cos_error(out["z_hat"], out["z_y"])
                 d_masked = d[mask]
                 agg[ratio]["cos_err"] += d_masked.mean().item()
                 agg[ratio]["count"] += 1
@@ -157,9 +164,7 @@ def evaluate_jepa(model, loader, masker, ratios, val_batches, device, need_null=
                     ent_count += 1
                 if need_null:
                     out_n = model(G, S, M, goal_mode="null")
-                    d_n = (1.0 - torch.nn.functional.cosine_similarity(
-                        torch.nn.functional.normalize(out_n["z_hat"], dim=-1),
-                        torch.nn.functional.normalize(out["z_y"], dim=-1), dim=-1)).clamp(min=0)
+                    d_n = _cos_error(out_n["z_hat"], out["z_y"])
                     d_n_masked = d_n[mask]
                     gap = (out["z_hat"] - out_n["z_hat"]).norm(dim=-1)[mask].mean()
                     null_agg[ratio]["cos_err"] += d_n_masked.mean().item()

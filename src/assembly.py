@@ -29,7 +29,7 @@ from encoders.context_encoder import ContextEncoder, PerceiverBottleneck
 from encoders.geometry_encoder import GeometryEncoder
 from encoders.spectrum_encoder import ReleasedSpectrumEncoder, SpectrumPath
 from encoders.target_encoder import EMAEncoder
-from losses.jepa_loss import jepa_loss
+from losses.jepa_loss import ProjectionMLP, jepa_loss
 from predictor.gclct import GCLCT
 
 PIXEL_GRID = 16  # 64 / patch_size 4
@@ -78,6 +78,7 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
         self.spectrum_path = SpectrumPath(None, hidden=hidden, goal_tokens=goal_tokens)
         self.predictor = GCLCT(depth=predictor_depth, hidden=hidden,
                                num_heads=num_predictor_heads, head_type="latent")
+        self.proj = ProjectionMLP(hidden)
         self.ema = EMAEncoder(geo, momentum_start=momentum_start,
                               momentum_end=momentum_end)
         self.geometry_encoder = geo  # for the training script (EMA source)
@@ -92,7 +93,7 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
 
     def loss(self, G, S, M, goal_mode="real"):
         out = self.forward(G, S, M, goal_mode=goal_mode)
-        L, per_sample = jepa_loss(out["z_hat"], out["z_y"], out["mask"])
+        L, per_sample = jepa_loss(out["z_hat"], out["z_y"], out["mask"], proj=self.proj)
         return L, out
 
 
@@ -164,6 +165,8 @@ def build_model(cfg, spec_weights, device="cpu", init_from_metadit=True,
         assert metadit_weights is not None
         init_geometry_from_metadit(model, metadit_weights,
                                    blocks_to_take=cfg.get("geo_depth", 6))
+    if variant == "jepa":
+        model.ema.target.load_state_dict(model.geometry_encoder.state_dict())
     model.to(device)
     return model
 

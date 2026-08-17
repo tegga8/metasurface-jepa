@@ -54,6 +54,16 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
    should write and unit-test code locally (forward pass on tiny/toy dims, batch size 1, CPU or
    local GPU) but should not attempt full training runs locally, and should not silently shrink
    model sizes to fit local VRAM without flagging it as a deviation per Standing Rule 2/3.
+9. **Dated operator overrides.** If the human operator explicitly decides to deviate from this
+   file (e.g. pulling forward a mechanism from a later lettered milestone), that decision must be
+   recorded here with a date and a reference, so future sessions do not re-derive or reverse it.
+   - **2026-08-17 — Milestone B deliberately expanded to an adaptive `L_J -> VICReg ->
+     LeJEPA/SIGReg` screening ladder.** This overrides the normal one-milestone-at-a-time
+     sequencing for this specific experiment: the EMA-JEPA-only scope stated in the Milestone B
+     section ("do not implement LeJEPA yet, that is Milestone G") is set aside here, and
+     VICReg/LeJEPA-SIGReg objectives, phase transitions, and winner selection live inside
+     Milestone B's adaptive controller by operator decision. Tracked and worked via
+     `checkpoints/milestone_b/BUGLOG.md` (see the fix directive that originated this entry).
 
 ---
 

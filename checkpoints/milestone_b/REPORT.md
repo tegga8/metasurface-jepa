@@ -60,13 +60,26 @@ local (dev-only) smoke tests proved — it does not self-certify the research ga
 
 ## Deviations from the design doc
 
-1. **Released spec encoder output dim is 256, not 512** (design doc §1.4 says 512 for
-   the shared space). The released `spec_encoder.pth` is a frozen 256-d encoder; the
-   shared space / geometry-projector (MetaDiT's) is not part of the released files. The
-   local `a_local` branch runs at 256 and the learned MLP lifts to 384. Recorded — no
-   design-doc decision changed on our side (still frozen released encoder + local head).
-   Flagging for operator awareness since Milestone A's retrieval numbers and Milestone E's
-   L_A will depend on the actual shared-space dim.
+1. **Released spec encoder output dim is 256, not §1.4's 512 — NOT a new deviation;
+   same finding as Milestone A §1, re-recorded here with direct verification.** 256 is
+   the released encoder's intended internal embedding dim, confirmed three independent
+   ways: (a) directly from the artifact — every weight in `spec_encoder.pth`
+   (`context_encoder.*`) is 256-d end-to-end (`spec_embedding (256,2)`, `o_proj` 256×256,
+   MLP `gate/up` 768×256 / `down` 256×768, norms 256), output verified as
+   `(B, 301, 256)` in Milestone A Check 1; (b) from MetaDiT source —
+   `external/metadit/model/spec_encoder.py:117` `VanillaSpectrumEncoder(dim=256)` is the
+   encoder's own config default; (c) from `external/metadit/model/clip_model.py:127-128`
+   — the 512-d space exists only as the CLIP-side projections
+   `img_proj = nn.Linear(384, 512)` / `context_proj = nn.Linear(256, 512)`, i.e. 512 sits
+   ON TOP of the 256-d encoder and a 384-d geometry ViT, in the CLIP pretraining path
+   (`train/train_clip.py`). `train/train_metadit.py` (lines 95–97) consumes the released
+   encoder as-is (freezes it into `y_embedder.encoder`) with no dim literals — the DiT
+   pipeline itself never uses 512. The 512-d shared-space weights are the unreleased part
+   (Milestone A §1, HF dataset listing: only `metadit-small.bin`, `surrogate_model.bin`,
+   `spec_encoder.pth`, 0-byte README). Design-doc consequence unchanged: our frozen 256-d
+   encoder + locally learned 384-d lift is consistent with using the released encoder
+   "as-is"; the same Milestone A caveat will resurface at Milestone E for §4's `L_A`
+   ("pretrained aligned projectors" — only the S-side exists).
 2. **SMOKE-ONLY deviations, not in production paths:** `--smoke` switches the data splits
    to a tiny in-memory synthetic set and limits to 3 steps — no .mat I/O, no real numbers.
 3. **`lr` written as `0.0001`** in YAML (PyYAML parses bare `1e-4` as a string; code

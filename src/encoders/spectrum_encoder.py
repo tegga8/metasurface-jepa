@@ -70,7 +70,8 @@ class SpectrumPath(nn.Module):
 
     def _pool_goal(self, a_local):
         """16 learned queries cross-attend over A_local (B, 301, 256) -> (B, 16, 256)."""
-        b, nq, _ = self.goal_queries.shape
+        b = a_local.shape[0]
+        nq = self.goal_queries.shape[1]
         nk = a_local.shape[1]
         q = self.q(self.goal_queries.expand(b, -1, -1))
         k, v = torch.chunk(self.kv(a_local), 2, dim=-1)

@@ -819,9 +819,8 @@ def train_adaptive(cfg, args, device, seed):
                 torch.nn.utils.clip_grad_norm_(trainable, clip)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                objective.on_optimizer_step(model, phase_step)
                 phase_step = global_step - start_g
-
+                objective.on_optimizer_step(model, phase_step)
                 for g in optimizer.param_groups:
                     g["lr"] = scheduler.get_lr(phase_step)
 

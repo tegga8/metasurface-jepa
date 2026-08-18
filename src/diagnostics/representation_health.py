@@ -67,7 +67,14 @@ def eff_ranks(X):
 
 
 def pairwise_cos_stats(X_mean):
-    """Different-sample pairwise cosine on mean-pooled (B, D) embeddings."""
+    """Different-sample pairwise cosine on mean-pooled (B, D) embeddings.
+
+    n < 2 -> all-NaN dict (quantile of the empty pair set would raise; the NaN
+    contract keeps this callable from token_space_stats for n_geoms < 2, which
+    Bug #21 marks UNAVAILABLE downstream)."""
+    if X_mean.shape[0] < 2:
+        return {"mean": float("nan"), "median": float("nan"), "p05": float("nan"),
+                "p95": float("nan"), "min": float("nan")}
     Xn = F.normalize(X_mean, dim=-1)
     G = Xn @ Xn.T
     idx = torch.triu_indices(Xn.shape[0], Xn.shape[0], offset=1, device=Xn.device)
@@ -105,20 +112,40 @@ def same_token_cos(X):
 
 
 def var_stats(X):
-    return {"token_var": X.var(dim=0).mean().item(),
-            "token_std": X.var(dim=0).sqrt().mean().item(),
-            "sample_var": X.var(dim=1).mean().item(),
-            "sample_std": X.var(dim=1).sqrt().mean().item()}
+    """unbiased=False for n_geoms == 1: unbiased variance of a single observation
+    is NaN plus a UserWarning (both useless); n >= 2 keeps the historical
+    unbiased=True behavior bit-identical."""
+    ub = X.shape[0] >= 2
+    return {"token_var": X.var(dim=0, unbiased=ub).mean().item(),
+            "token_std": X.var(dim=0, unbiased=ub).sqrt().mean().item(),
+            "sample_var": X.var(dim=1, unbiased=ub).mean().item(),
+            "sample_std": X.var(dim=1, unbiased=ub).sqrt().mean().item()}
 
 
 def token_space_stats(X):
     """Full stats for (B, T, D) token embeddings — flat dict, same keys as the CLI's
-    encoder_stats rows."""
+    encoder_stats rows.
+
+    n_geoms < 2: pairwise/same-token/effective-rank diagnostics are undefined
+    (Bug #21) and must not emit values that could be classified — NaN markers
+    preserve the dict schema while classify_health's n_geoms guard produces the
+    explicit UNAVAILABLE verdict."""
+    n = X.shape[0]
     stats = dict(var_stats(X))
-    stats["pairwise_cos"] = pairwise_cos_stats(X.mean(dim=1))
-    stats["same_token_cos"] = same_token_cos(X)
-    stats.update(eff_ranks(X.mean(dim=1)))
-    stats["n_geoms"] = X.shape[0]
+    if n < 2:
+        stats["pairwise_cos"] = {"mean": float("nan"), "median": float("nan"),
+                                 "p05": float("nan"), "p95": float("nan"),
+                                 "min": float("nan")}
+        stats["same_token_cos"] = float("nan")
+        stats["eff_rank_unnorm"] = float("nan")
+        stats["eff_rank_frac"] = float("nan")
+        stats["participation"] = float("nan")
+        stats["top_eig_frac"] = float("nan")
+    else:
+        stats["pairwise_cos"] = pairwise_cos_stats(X.mean(dim=1))
+        stats["same_token_cos"] = same_token_cos(X)
+        stats.update(eff_ranks(X.mean(dim=1)))
+    stats["n_geoms"] = n
     return stats
 
 
@@ -202,8 +229,25 @@ def classify_health(raw, proj, healthy_raw, healthy_proj, cfg=None):
 
     Returns (status, signals) where signals maps each collapse-consistent signal to
     its boolean value and the numeric margin.
+
+    Bug #21: with n_geoms < 2 the pairwise/same-token/effective-rank diagnostics
+    are undefined (they emit NaN via empty-pairwise reductions), and NaN silently
+    flowing into this classifier would produce a WARNING/HEALTHY verdict with no
+    explanation. Any of the four stats dicts with n_geoms < 2 (or 0) instead
+    returns an explicit UNAVAILABLE status that can never classify as HEALTHY or
+    COLLAPSED.
     """
     c = dict(COLLAPSE_CFG_DEFAULTS, **(cfg or {}))
+    for tag, stats in (("raw", raw), ("proj", proj),
+                       ("healthy_raw", healthy_raw), ("healthy_proj", healthy_proj)):
+        n = stats.get("n_geoms")
+        if n is not None and n < 2:
+            return ("UNAVAILABLE",
+                    {"votes": 0, "signals": {}, "margins": {},
+                     "near_healthy": False,
+                     "reason": f"{tag} n_geoms={n} < 2: pairwise/same-token/"
+                               "effective-rank diagnostics undefined — refusing "
+                               "a NaN-based health verdict"})
     near_healthy = (
         abs(raw["eff_rank_frac"] - healthy_raw["eff_rank_frac"]) <= c["near_rank"]
         and abs(raw["pairwise_cos"]["p05"] - healthy_raw["pairwise_cos"]["p05"]) <= c["near_p05"]

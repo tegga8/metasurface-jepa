@@ -187,6 +187,9 @@ def save_checkpoint(path, model, optimizer, step, epoch, cfg, best, extra=None):
         "optimizer": optimizer.state_dict() if optimizer else None,
         "torch_rng": torch.get_rng_state(),
         "numpy_rng": np.random.get_state(),
+        # Bug #17: CUDA RNG saved too (None on CPU-only machines, skipped safely)
+        "torch_cuda_rng": (torch.cuda.get_rng_state_all()
+                           if torch.cuda.is_available() else None),
     }
     if extra:
         obj.update(extra)
@@ -206,6 +209,9 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
         torch.set_rng_state(obj["torch_rng"].cpu())
     if obj.get("numpy_rng") is not None:
         np.random.set_state(obj["numpy_rng"])
+    cuda = obj.get("torch_cuda_rng")
+    if cuda is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([s.cpu() for s in cuda])
     return obj
 
 
@@ -305,7 +311,7 @@ def main():
         model.ema.set_total_steps(total_steps)
         fixed_vals, refs = _build_legacy_fixed_vals(
             cfg, device, val_ds, cfg["train"]["val_batches"], cfg["train"]["batch_size"],
-            ratios, mask_seed=cfg["mask"].get("mask_seed", 12345))
+            ratios, model, mask_seed=cfg["mask"].get("mask_seed", 12345))
     else:
         fixed_vals, refs = None, None
 
@@ -464,9 +470,14 @@ def _jepa_fixed_val_metrics(model, fixed_vals, refs, need_null=False):
 
 
 def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratios,
-                             mask_seed=12345):
+                             model, mask_seed=12345):
     """Per-ratio FixedValidation sets for the legacy (non-adaptive) JEPA path, plus the
-    corresponding healthy released-init references on the SAME masks/batches."""
+    corresponding healthy released-init references on the SAME masks/batches.
+
+    model is the TRAINING candidate: its trainable proj head defines the
+    projection-space coordinate system the healthy references are measured in
+    (Bug #14 — the released-init reference's own proj is a different random
+    initialization and must not be the comparison head)."""
     from train.engine import fixed_validation_from_loader, healthy_references
     n = max(1, min(val_batches * batch_size, len(val_ds)))
     ratios_list = ratios if isinstance(ratios, list) else [ratios]
@@ -484,7 +495,7 @@ def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratio
                                                                   cfg["weights"]["metadit"]))
             refs_model.eval()
         fixed_vals[r] = fv
-        refs[r] = healthy_references(refs_model, fv)
+        refs[r] = healthy_references(refs_model, fv, proj_source=model)
     return fixed_vals, refs
 
 
@@ -540,30 +551,15 @@ def _normalized_repr_dist(health, refs, cfg):
             + abs(raw["same_token_cos"] - hr["same_token_cos"]) / c["near_same"])
 
 
-def _phase_ok(r):
-    """Winner eligibility: HEALTHY representation status only (COLLAPSED AND WARNING
-    excluded — audit fix 2026-08-17: previously only COLLAPSED was excluded, letting
-    a degraded-but-not-collapsed phase be crowned), no unstable steps, and a finite
-    best metric recorded."""
-    return bool(r.get("representation_status") == "HEALTHY" and
-                not r.get("unstable_steps") and r.get("best_cos_err") is not None)
-
-
-def _goal_score(r):
-    g = (r.get("goal_token_health") or {}).get("goal_token_pairwise_cosine_mean")
-    return 0.0 if g is None else -float(g)
-
-
 def train_adaptive(cfg, args, device, seed):
     """Run the adaptive loss ladder: jepa -> jepa_vicreg -> lejepa, switching only on
     plateau / collapse / instability evidence, within a global step budget."""
-    from itertools import cycle
-
     from losses.objectives import OBJECTIVES
-    from train.adaptive import AdaptiveController
+    from train.adaptive import AdaptiveController, select_winner
     from train.engine import (fixed_validation_from_loader, healthy_references,
-                              load_phase_checkpoint, save_phase_checkpoint,
-                              write_ladder_summary, write_phase_report)
+                              IntervalLossAccumulator, load_phase_checkpoint,
+                              save_phase_checkpoint, write_ladder_summary,
+                              write_phase_report)
     acfg = dict(cfg["adaptive_training"])
     if args.smoke:
         acfg = _adaptive_smoke_overrides(acfg)
@@ -617,7 +613,10 @@ def train_adaptive(cfg, args, device, seed):
                                              ratio=ratio, mask_seed=mask_seed,
                                              collapse_cfg=collapse_cfg)
 
-    # healthy released-init references on the SAME fixed validation set
+    # healthy released-init references on the SAME fixed validation set.
+    # Bug #14: projected through the CANDIDATE model's proj head (proj_source),
+    # never refs_model.proj — the released-init reference's own head is a separate
+    # random initialization, i.e. a different learned coordinate system.
     refs_model = build_model(cfg["model"],
                              os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
                              device=device,
@@ -625,7 +624,7 @@ def train_adaptive(cfg, args, device, seed):
                              metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]))
     refs_model.ema.set_total_steps(int(acfg["max_total_steps"]))
     refs_model.eval()
-    refs = healthy_references(refs_model, fixed_val)
+    refs = healthy_references(refs_model, fixed_val, proj_source=model)
 
     ds = MetaDiTDataset(os.path.join(REPO_ROOT, cfg["data"]["train_split"]),
                         max_samples=cfg["data"].get("max_train_samples", 0), seed=seed)
@@ -692,9 +691,21 @@ def train_adaptive(cfg, args, device, seed):
             resumed = None  # resume consumed
             print(f"[adaptive] phase {phase.idx} resumed at global step {global_step}")
 
-        guide = iter(cycle(loader))
+        # Bug #16: iterate the loader with explicit epochs, NEVER via
+        # itertools.cycle: the cycle-wrapper caches and replays the FIRST
+        # iteration's batches, so shuffle=True shuffled once and then never
+        # again. A fresh `for G, S in loader:` per pass gives DataLoader its
+        # normal per-epoch reshuffle. Budget checks at the top
+        # of each epoch AND inside the epoch give exact global-step termination at
+        # any budget (phase_done exits both loops).
         optimizer.zero_grad(set_to_none=True)
-        loss_accum = 0.0
+        # Bug #18: exact per-interval training-loss means — two independent
+        # accumulators so a log report and a val record never steal each other's
+        # interval; each is reset after its own report. Counts micro-batches, so
+        # the mean is exact under grad_accum=1, grad_accum=2, and phase boundaries
+        # (fresh instances per phase drop a partial interval cleanly).
+        log_loss = IntervalLossAccumulator()
+        val_loss = IntervalLossAccumulator()
         comp_sums = {}
         comp_counts = {}
         t_start = time.time()
@@ -706,101 +717,118 @@ def train_adaptive(cfg, args, device, seed):
         lr_history, ema_history = [], []
         mb = 0  # micro-batch counter; accum micro-batches == 1 optimizer step
 
-        while controller.enough_budget(global_step):
-            G, S = next(guide)
-            G, S = G.to(device), S.to(device)
-            M = masker.sample(G, ratio).to(device)
-            res = objective(model, G, S, M)
-            total = res["total_loss"]
-            if not torch.isfinite(total):
-                unstable_steps += 1
-                print(f"  [adaptive] NON-FINITE loss at step {global_step} "
-                      f"({objective_name})")
-                save_phase_checkpoint(
-                    os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
-                    model, optimizer if acfg.get("save_optimizer", True) else None,
-                    cfg, controller, phase, global_step, {"cos_err_r0.5": float("nan")},
-                    {"status": "UNSTABLE"})
-                decision = controller.on_unstable(global_step)
-                break
-            total = total / accum
-            total.backward()
-            mb += 1
-            loss_accum += total.item() * accum
-            for k, v in res["components"].items():
-                if isinstance(v, torch.Tensor):
-                    comp_sums[k] = comp_sums.get(k, 0.0) + v.item()
-                    comp_counts[k] = comp_counts.get(k, 0) + 1
-
-            if mb % accum != 0:
-                continue  # still accumulating this optimizer step (Bug #10: global
-                          # step counts optimizer steps, not micro-batches)
-            torch.nn.utils.clip_grad_norm_(trainable, clip)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            objective.on_optimizer_step(model, global_step)
-            for g in optimizer.param_groups:
-                g["lr"] = scheduler.get_lr(global_step)
-
-            if global_step % log_every == 0:
-                print(f"  [adaptive {objective_name} step {global_step}] "
-                      f"loss={loss_accum / max(1, log_every):.4f} "
-                      f"lr={scheduler.get_lr(global_step):.2e} "
-                      f"({(time.time() - t_start) / max(1, global_step + 1 - start_g):.2f} s/step)")
-                loss_accum = 0.0
-
-            if global_step % val_every == 0:
-                metrics, health = fixed_val.evaluate(model, refs["raw"], refs["proj"])
-                decision = controller.on_validation(metrics["cos_err_r0.5"],
-                                                    health["status"], global_step)
-                if phase.best_step == global_step:
-                    best_health = health
-                    phase.best_health = health  # survive checkpoint/resume (Bug #12)
-                d_repr = _normalized_repr_dist(health, refs, collapse_cfg)
-                lr_history.append(scheduler.get_lr(global_step))
-                ema_history.append(model.ema.current_momentum(global_step))
-                record = {"step": global_step,
-                          "train_loss": loss_accum / max(1, val_every),
-                          **metrics,
-                          "target_effective_rank": health["raw"]["eff_rank_unnorm"],
-                          "target_effective_rank_fraction": health["raw"]["eff_rank_frac"],
-                          "target_mean_std": health["raw"]["token_std"],
-                          "target_pairwise_cosine_mean": health["raw"]["pairwise_cos"]["mean"],
-                          "target_pairwise_cosine_p05": health["raw"]["pairwise_cos"]["p05"],
-                          "target_pairwise_cosine_median": health["raw"]["pairwise_cos"]["median"],
-                          "target_pairwise_cosine_p95": health["raw"]["pairwise_cos"]["p95"],
-                          "target_same_position_cosine_mean": health["raw"]["same_token_cos"],
-                          **{k: v for k, v in health["goal"].items()},
-                          **{k: v for k, v in health["attention"].items()},
-                          "objective": objective_name,
-                          "representation_status": health["status"]}
-                jf.write(json.dumps(record) + "\n")
-                jf.flush()
-                print(f"  [adaptive val @ {global_step}] cos_err={metrics['cos_err_r0.5']:.6g} "
-                      f"status={health['status']} votes={health['signals']['votes']}")
-
-                if phase.best_step == global_step:  # controller just recorded a new best
-                    best_path = os.path.join(
-                        out_dir, f"phase_{phase.idx:02d}_{objective_name}_best.pt")
+        phase_done = False
+        while controller.enough_budget(global_step) and not phase_done:
+            for G, S in loader:
+                if not controller.enough_budget(global_step):
+                    phase_done = True
+                    break
+                G, S = G.to(device), S.to(device)
+                M = masker.sample(G, ratio).to(device)
+                res = objective(model, G, S, M)
+                total = res["total_loss"]
+                if not torch.isfinite(total):
+                    unstable_steps += 1
+                    print(f"  [adaptive] NON-FINITE loss at step {global_step} "
+                          f"({objective_name})")
                     save_phase_checkpoint(
-                        best_path,
-                        model, optimizer, cfg, controller, phase, global_step,
-                        metrics, health)
-                    print(f"    [best] saved phase {phase.idx} best ckpt (cos_err "
-                          f"{phase.best_metric:.6g})")
-                if d_repr < best_repr_d:
-                    best_repr_d = d_repr
+                        os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
+                        model, optimizer if acfg.get("save_optimizer", True) else None,
+                        cfg, controller, phase, global_step, {"cos_err_r0.5": float("nan")},
+                        {"status": "UNSTABLE"})
+                    decision = controller.on_unstable(global_step)
+                    phase_done = True
+                    break
+                total = total / accum
+                total.backward()
+                mb += 1
+                log_loss.add(total.item() * accum)
+                val_loss.add(total.item() * accum)
+                for k, v in res["components"].items():
+                    if isinstance(v, torch.Tensor):
+                        comp_sums[k] = comp_sums.get(k, 0.0) + v.item()
+                        comp_counts[k] = comp_counts.get(k, 0) + 1
+
+                if mb % accum != 0:
+                    continue  # still accumulating this optimizer step (Bug #10: global
+                              # step counts optimizer steps, not micro-batches)
+                torch.nn.utils.clip_grad_norm_(trainable, clip)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                objective.on_optimizer_step(model, global_step)
+                for g in optimizer.param_groups:
+                    g["lr"] = scheduler.get_lr(global_step)
+
+                if global_step % log_every == 0:
+                    print(f"  [adaptive {objective_name} step {global_step}] "
+                          f"loss={log_loss.report():.4f} "
+                          f"lr={scheduler.get_lr(global_step):.2e} "
+                          f"({(time.time() - t_start) / max(1, global_step + 1 - start_g):.2f} s/step)")
+
+                if global_step % val_every == 0:
+                    metrics, health = fixed_val.evaluate(model, refs["raw"], refs["proj"])
+                    decision = controller.on_validation(metrics["cos_err_r0.5"],
+                                                        health["status"], global_step)
+                    if phase.best_step == global_step:
+                        best_health = health
+                        phase.best_health = health  # survive checkpoint/resume (Bug #12)
+                    if phase.best_healthy_step == global_step:
+                        # Bug #15: HEALTHY-gated checkpoints are the only ones a
+                        # plateau transition (or the final winner) may load.
+                        phase.best_healthy_health = health
+                        phase.best_healthy_path = os.path.join(
+                            out_dir, f"phase_{phase.idx:02d}_{objective_name}_best_healthy.pt")
+                        save_phase_checkpoint(
+                            phase.best_healthy_path, model, optimizer, cfg, controller,
+                            phase, global_step, metrics, health)
+                        print(f"    [best-healthy] saved {phase.best_healthy_path} "
+                              f"(cos_err {phase.best_healthy_metric:.6g})")
+                    d_repr = _normalized_repr_dist(health, refs, collapse_cfg)
+                    lr_history.append(scheduler.get_lr(global_step))
+                    ema_history.append(model.ema.current_momentum(global_step))
+                    record = {"step": global_step,
+                              "train_loss": val_loss.report(),
+                              **metrics,
+                              "target_effective_rank": health["raw"]["eff_rank_unnorm"],
+                              "target_effective_rank_fraction": health["raw"]["eff_rank_frac"],
+                              "target_mean_std": health["raw"]["token_std"],
+                              "target_pairwise_cosine_mean": health["raw"]["pairwise_cos"]["mean"],
+                              "target_pairwise_cosine_p05": health["raw"]["pairwise_cos"]["p05"],
+                              "target_pairwise_cosine_median": health["raw"]["pairwise_cos"]["median"],
+                              "target_pairwise_cosine_p95": health["raw"]["pairwise_cos"]["p95"],
+                              "target_same_position_cosine_mean": health["raw"]["same_token_cos"],
+                              **{k: v for k, v in health["goal"].items()},
+                              **{k: v for k, v in health["attention"].items()},
+                              "objective": objective_name,
+                              "representation_status": health["status"]}
+                    jf.write(json.dumps(record) + "\n")
+                    jf.flush()
+                    print(f"  [adaptive val @ {global_step}] cos_err={metrics['cos_err_r0.5']:.6g} "
+                          f"status={health['status']} votes={health['signals']['votes']}")
+
+                    if phase.best_step == global_step:  # controller just recorded a new best
+                        best_path = os.path.join(
+                            out_dir, f"phase_{phase.idx:02d}_{objective_name}_best.pt")
+                        save_phase_checkpoint(
+                            best_path,
+                            model, optimizer, cfg, controller, phase, global_step,
+                            metrics, health)
+                        print(f"    [best] saved phase {phase.idx} best ckpt (cos_err "
+                              f"{phase.best_metric:.6g})")
+                    if d_repr < best_repr_d:
+                        best_repr_d = d_repr
+                        save_phase_checkpoint(
+                            os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_best_repr.pt"),
+                            model, optimizer, cfg, controller, phase, global_step,
+                            metrics, health)
                     save_phase_checkpoint(
-                        os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_best_repr.pt"),
-                        model, optimizer, cfg, controller, phase, global_step,
-                        metrics, health)
-                save_phase_checkpoint(
-                    os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
-                    model, optimizer if acfg.get("save_optimizer", True) else None,
-                    cfg, controller, phase, global_step, metrics, health)
-            global_step += 1   # Bug #10: one optimizer step == one global step
-            if decision is not None and decision["action"] in ("switch", "stop"):
-                break
+                        os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
+                        model, optimizer if acfg.get("save_optimizer", True) else None,
+                        cfg, controller, phase, global_step, metrics, health)
+                global_step += 1   # Bug #10: one optimizer step == one global step
+                if decision is not None and decision["action"] in ("switch", "stop"):
+                    phase_done = True
+                    break
 
         # phase teardown
         phase.phase_step = global_step - start_g
@@ -823,6 +851,19 @@ def train_adaptive(cfg, args, device, seed):
             "best_cos_err": phase.best_metric if math.isfinite(phase.best_metric)
             else None,
             "step_of_best_cos_err": phase.best_step,
+            # Bug #15: best-HEALTHY fields (deployment candidates) vs prediction
+            # best (diagnostic only). best_healthy_cos_err is the ONLY metric the
+            # final winner selection may use; None = no HEALTHY checkpoint existed.
+            "best_healthy_cos_err": (phase.best_healthy_metric
+                                     if math.isfinite(phase.best_healthy_metric)
+                                     else None),
+            "step_of_best_healthy": phase.best_healthy_step,
+            "best_healthy_health": phase.best_healthy_health,
+            "best_healthy_checkpoint": (
+                phase.best_healthy_path
+                or (os.path.join(out_dir,
+                                 f"phase_{phase.idx:02d}_{objective_name}_best_healthy.pt")
+                    if phase.best_healthy_step is not None else None)),
             "raw_target_health_at_best": best_health["raw"] if best_health else None,
             "projected_target_health_at_best": best_health["proj"] if best_health else None,
             "prediction_health_at_best": best_health["pred"] if best_health else None,
@@ -853,30 +894,39 @@ def train_adaptive(cfg, args, device, seed):
             print(f"  [adaptive] reset to base init for {trans['next']} "
                   f"(reason {trans['reason']})")
         else:
-            best_path = os.path.join(out_dir,
-                                     f"phase_{finishing_idx:02d}_{finishing_name}_best.pt")
+            # Bug #15: a healthy-plateau transition may ONLY load the best-HEALTHY
+            # checkpoint, never the prediction-best (that may be a WARNING/COLLAPSED
+            # step). If no HEALTHY checkpoint exists, do NOT silently fall back:
+            # report explicitly and stop the ladder instead of transitioning.
+            best_path = phase.best_healthy_path or os.path.join(
+                out_dir, f"phase_{finishing_idx:02d}_{finishing_name}_best_healthy.pt")
             if os.path.exists(best_path):
                 obj = load_phase_checkpoint(best_path, model, None, None, device)
                 print(f"  [adaptive] load best healthy ckpt {best_path} for "
                       f"{trans['next']} (optimizer/scheduler reset, EMA preserved)")
             else:
-                print(f"  [adaptive] WARNING: no best ckpt at {best_path}; "
-                      f"continuing with current weights for {trans['next']}")
+                report["transition_blocked"] = "no_healthy_checkpoint"
+                write_phase_report(phase_report_json(finishing_idx, finishing_name),
+                                   report)
+                print(f"  [adaptive] NO HEALTHY CHECKPOINT available at {best_path} - "
+                      f"stopping the ladder instead of transitioning to "
+                      f"{trans['next']} (no silent fallback to best-prediction)")
+                keep_running = False
+                break
 
     jf.close()
 
     # ---- final method selection + summary (§22) ----
     improved = "improved" if any(r.get("step_of_best_cos_err") is not None for r in phase_reports) else "n/a"
-    winner = None
-    ranked = [r for r in phase_reports]
-
-    ranked.sort(key=lambda r: (0 if _phase_ok(r) else 1,
-                               _goal_score(r),
-                               float(r.get("best_cos_err") or float("inf"))))
-    if ranked:
-        winner = {"objective": ranked[0]["objective"], "phase": ranked[0]["phase"],
-                  "best_cos_err": ranked[0]["best_cos_err"],
-                  "representation_status": ranked[0]["representation_status"],
+    # Bug #15: winner comes ONLY from a HEALTHY-gated checkpoint; if no phase
+    # produced one, report no-clean-winner — never the best WARNING/COLLAPSED
+    # prediction-best result.
+    winner = select_winner(phase_reports)
+    if winner is None:
+        winner = {"no_clean_winner": True,
+                  "reason": "no HEALTHY checkpoint across all phases; "
+                            "best-prediction results are diagnostic-only, "
+                            "not deployment candidates",
                   "selection_priority": "healthy-only>stable>improvement>goal-conditioning>lower-error"}
     write_ladder_summary(out_dir, phase_reports, controller.summary(),
                          fixed_val.mask_statistics, winner)
@@ -893,10 +943,14 @@ def train_adaptive(cfg, args, device, seed):
     print(f"collapse_detected: {any(r['representation_status'] == 'COLLAPSED' for r in phase_reports)}")
     print(f"summary -> {out_dir}/LOSS_LADDER_SUMMARY.md / .json")
 
-    # final eval with null-goal gap on the winner's weights
-    obj_path = (os.path.join(out_dir, f"phase_{winner['phase']:02d}_{winner['objective']}_best.pt")
-                if winner else None)
-    if obj_path and os.path.exists(obj_path):
+    # final eval with null-goal gap on the winner's weights (only a real
+    # HEALTHY-gated winner checkpoint; a no-clean-winner cannot be evaluated)
+    obj_path = (winner.get("checkpoint") if winner and not winner.get("no_clean_winner")
+                else None)
+    if obj_path is None and winner is not None and winner.get("no_clean_winner"):
+        print("NO CLEAN WINNER: no HEALTHY checkpoint across all phases - "
+              "skipping final winner eval")
+    if obj_path:
         load_phase_checkpoint(obj_path, model, None, None, device)
         model.eval()
         real, null, gaps = fixed_val.null_gap(model)

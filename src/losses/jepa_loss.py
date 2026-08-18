@@ -53,5 +53,14 @@ def jepa_loss(pred, target, mask, proj=None, stop_grad_target=True):
     d = cosine_distance(pred, target)
     mask = mask.bool()
     if mask.sum() == 0:
-        return d.mean(), d.mean(dim=1)
+        # Bug #20: the strict masked-only objective (§3.5) has no defined value for
+        # a mask containing no masked tokens. The old silent d.mean() fallback
+        # (full-token mean) contradicts the masked-only contract and would hide
+        # upstream mask bugs (bad mask tensor, wrong axis) as plausible-looking
+        # training losses. Raise instead: every call site in this project
+        # (objectives, assembly loss) is guaranteed a nonzero mask — block masking
+        # (§2) always produces >= 1 block with min_side >= 3 — so a zero-mask here
+        # is a real bug that must surface, not be smoothed over.
+        raise ValueError("JEPA mask contains no masked tokens (masked-only "
+                         "objective is undefined on an empty mask)")
     return d[mask].mean(), d.mean(dim=1)

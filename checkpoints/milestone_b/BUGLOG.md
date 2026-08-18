@@ -20,6 +20,15 @@ already-FIXED rows unless something looks inconsistent.
 | 10 | global_step increments per micro-batch, not per optimizer.step() (breaks under grad_accum>1) | 2 | scripts/train/train_milestone_b.py | FIXED (one optimizer step == one global step; micro-batch counter gates stepping; log/val once per optimizer step — verified by integration runs, see Tier 2 verification below) |
 | 11 | Checkpoint loading uses strict=False silently | 2 | src/assembly.py (load_into_model) | FIXED (strict=True default; released keys filtered on BOTH sides; loud RuntimeError listing missing/unexpected keys — tests/test_tier2_fixes.py) |
 | 12 | Adaptive resume incomplete (only restores phase/objective/global_step/best_metric/best_step, not plateau/collapse counters, health history, scheduler state) | 2 | resume path | FIXED (full controller state_dict/load_state_dict: counters, histories, transitions, phase bookkeeping, best_health; python RNG saved too; verified by unit + integration resume runs — tests/test_tier2_fixes.py) |
+| 13 | Prediction-health stats built from raw z_hat, not projected ph_ | 3 | src/train/engine.py (_pooled_pred_stats caller, zh_pooled population) | FIXED (tests/test_tier3_fixes.py — pooled pred mean_std scales with proj k; same convention in healthy_references) |
+| 14 | healthy_references uses a separately-initialized refs_model's own proj head, not the candidate model's — different coordinate systems | 3 | src/train/engine.py (healthy_references), scripts/train/train_milestone_b.py (refs_model construction) | FIXED (proj_source param; candidate's head defines the coordinate system; legacy default kept — tests/test_tier3_fixes.py, test_tier2_fixes.py #7 identity contract extended) |
+| 15 | No separation between best-prediction and best-healthy checkpoints; WARNING/COLLAPSED can become best_metric | 3 | adaptive controller / winner selection | FIXED (best_healthy is HEALTHY-gated only; phase_ok requires a HEALTHY-gated best AND HEALTHY provenance; select_winner returns explicit no-clean-winner — tests/test_tier3_fixes.py + tests/test_winner_phase_ok.py) |
+| 16 | itertools.cycle(loader) used for adaptive training data iteration | 3 | scripts/train/train_milestone_b.py | FIXED (explicit `while enough_budget: for G, S in loader:` epochs; budget checks at epoch AND step; regression test asserts no cycle in code lines — tests/test_tier3_fixes.py) |
+| 17 | Checkpoint resume does not save/restore CUDA RNG state | 3 | checkpoint save/load path | FIXED (collect_rng_state/restore_rng_state: torch+numpy+python, CUDA optional, CPU-safe skip; saved via save_phase_checkpoint, restored in load — tests/test_tier3_fixes.py) |
+| 18 | Adaptive train-loss logging divides accumulated loss by val_every, not actual interval count | 3 | scripts/train/train_milestone_b.py | FIXED (IntervalLossAccumulator sum/count exact means; two independent instances for log vs val records; empty interval reports 0.0 — tests/test_tier3_fixes.py) |
+| 19 | FixedValidation._acc_stats averages per-batch means instead of aggregating globally — not invariant to batch partitioning | 3 | src/train/engine.py | FIXED (global float64 loss_sum/mask_count in _acc_stats and null_gap, identical rule both paths; partition-invariance unit-tested — tests/test_tier3_fixes.py) |
+| 20 | jepa_loss() silently falls back to full-token mean when zero masked tokens, contradicting strict masked-only objective | 3 | src/losses/jepa_loss.py | FIXED (explicit ValueError "mask contains no masked tokens"; also under proj — tests/test_tier3_fixes.py) |
+| 21 | No explicit handling for n_samples < 2 in health diagnostics — can silently emit NaN into classification | 3 | representation_health.py / classify_health | FIXED (token_space_stats/_pooled_pred_stats emit NaN markers for n<2; classify_health returns UNAVAILABLE with reason; pairwise_cos_stats guards empty pair set; var_stats unbiased=False at n=1 — tests/test_tier3_fixes.py) |
 
 ## DEFERRED — needs operator decision (do NOT act without explicit go-ahead)
 
@@ -67,6 +76,21 @@ outputs in `checkpoints/milestone_b/adaptive/`; the canonical `--smoke` was also
   decision-continuation proven by `test_restored_counters_drive_future_decisions`).
 - **strict-load compatibility**: legacy `synthetic_collapsed.pt` still loads under
   strict=True and the collapse diagnostic reproduces the same STILL COLLAPSED verdict.
+
+## Tier 3 — suite result (2026-08-18)
+
+FULL SUITE PASS **after all Tier 3 fixes** (69 tests, 9 files, all PASS; `py_compile` clean on
+all 7 changed files): the 46 pre-Tier-3 tests remain green plus `tests/test_tier3_fixes.py`
+(21 tests covering #13-#21) and `tests/test_winner_phase_ok.py` re-worked for the #15 semantics
+(HEALTHY-gated best + HEALTHY provenance required; no-clean-winner instead of fallback).
+`tests/test_tier2_fixes.py` #7 extended: the EMA-output identity contract now coexists with the
+#13 projected-prediction path (4 proj calls for 2 batches: ema z_y + z_hat each).
+
+**Adaptive smoke re-run** (`configs/milestone_b_adaptive.yaml --smoke`, `adaptive/_smoke/`,
+budget 6, val @ 0/2/4): HEALTHY at every validation (votes=0); in-loop best (`best_healthy`)
+`0.09906762448175228` at step 4 == final winner eval `0.09906762448175228` (bit-identical);
+winner checkpoint = `phase_00_jepa_best_healthy.pt`; `null_gap=0.06618` on the winner —
+goal utilization intact; no crash, clean exit. Rows #13-#21 all FIXED above.
 
 ## Tier 1 — collapsed-checkpoint diagnostic re-run
 

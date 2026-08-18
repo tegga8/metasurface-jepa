@@ -49,7 +49,7 @@ def test_healthy_references_projects_ema_output_object():
     fv = FixedValidation([(G, S), (G, S)], ratio=0.5, mask_seed=12345, device="cpu")
 
     sentinel = torch.randn(2, 256, 3)
-    proj_seen = {"same_object": False, "cuda_called": False}
+    proj_seen = {"ema_object": False, "cuda_called": False, "calls": 0}
 
     class _Ema:
         def __call__(self, G):
@@ -57,8 +57,10 @@ def test_healthy_references_projects_ema_output_object():
 
     class _Proj:
         def __call__(self, x):
-            proj_seen["same_object"] = (x is sentinel)
-            return x * 2.0
+            proj_seen["calls"] += 1
+            if x is sentinel:
+                proj_seen["ema_object"] = True     # Bug #14: z_y must be projected
+            return x * 2.0                          # in-place, never transformed
 
     class _Model:
         def __init__(self):
@@ -89,9 +91,12 @@ def test_healthy_references_projects_ema_output_object():
     finally:
         torch.Tensor.cuda = original_cuda
 
-    assert proj_seen["same_object"], (
+    assert proj_seen["ema_object"], (
         "proj input must be the exact EMA output object — a .cpu()/transform "
         "before projection breaks the device contract on GPU")
+    # Bug #13: z_hat is also projected (for pooled pred stats in the same space).
+    assert proj_seen["calls"] == 4, (
+        "expected 2 batches x (ema z_y projection + z_hat projection)")
     assert not proj_seen["cuda_called"], "no .cuda() round-trip allowed"
     assert set(refs) == {"raw", "proj", "pred"}
 

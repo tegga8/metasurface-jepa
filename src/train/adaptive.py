@@ -32,9 +32,13 @@ class PhaseState:
         self.idx = idx
         self.start_global_step = start_global_step
         self.phase_step = 0
-        self.best_metric = float("inf")
+        self.best_metric = float("inf")          # best PREDICTION (health-blind; diagnostic)
         self.best_step = None
         self.best_health = None
+        self.best_healthy_metric = float("inf")  # best HEALTHY-gated (deployment candidate)
+        self.best_healthy_step = None
+        self.best_healthy_health = None
+        self.best_healthy_path = None
         self.plateau_bad = 0
         self.collapse_bad = 0
         self.representation_status = None
@@ -89,6 +93,13 @@ class AdaptiveController:
         else:
             ph.plateau_bad += 1
 
+        # Bug #15: best_healthy tracks ONLY HEALTHY validations — a WARNING or
+        # COLLAPSED step can never become the deployment candidate, no matter how
+        # low its cosine error. Same min_delta improvement rule for consistency.
+        if health_status == "HEALTHY" and metric < ph.best_healthy_metric - self.min_delta:
+            ph.best_healthy_metric = metric
+            ph.best_healthy_step = global_step
+
         if health_status == "COLLAPSED":
             ph.collapse_bad += 1
         else:
@@ -140,7 +151,9 @@ class AdaptiveController:
                 else {"objective": self.phase.objective, "idx": self.phase.idx,
                       "stop_reason": self.phase.stop_reason,
                       "best_metric": self.phase.best_metric,
-                      "best_step": self.phase.best_step}}
+                      "best_step": self.phase.best_step,
+                      "best_healthy_metric": self.phase.best_healthy_metric,
+                      "best_healthy_step": self.phase.best_healthy_step}}
 
     # ------------------------------------------------------------------ resume
 
@@ -155,6 +168,10 @@ class AdaptiveController:
             "phase_step": ph.phase_step,
             "best_metric": ph.best_metric, "best_step": ph.best_step,
             "best_health": ph.best_health,
+            "best_healthy_metric": ph.best_healthy_metric,
+            "best_healthy_step": ph.best_healthy_step,
+            "best_healthy_health": ph.best_healthy_health,
+            "best_healthy_path": ph.best_healthy_path,
             "plateau_bad": ph.plateau_bad, "collapse_bad": ph.collapse_bad,
             "representation_status": ph.representation_status,
             "metric_history": list(ph.metric_history),
@@ -188,6 +205,10 @@ class AdaptiveController:
             ps.best_metric = float(ph.get("best_metric", float("inf")))
             ps.best_step = ph.get("best_step")
             ps.best_health = ph.get("best_health")
+            ps.best_healthy_metric = float(ph.get("best_healthy_metric", float("inf")))
+            ps.best_healthy_step = ph.get("best_healthy_step")
+            ps.best_healthy_health = ph.get("best_healthy_health")
+            ps.best_healthy_path = ph.get("best_healthy_path")
             ps.plateau_bad = int(ph.get("plateau_bad", 0))
             ps.collapse_bad = int(ph.get("collapse_bad", 0))
             ps.representation_status = ph.get("representation_status")
@@ -197,3 +218,55 @@ class AdaptiveController:
         else:
             self.phase = None
         return self
+
+
+# ---------------------------------------------------------------------------
+# final winner selection (Bug #15 — healthy-only, no silent fallback)
+# ---------------------------------------------------------------------------
+
+def phase_ok(report):
+    """Winner eligibility: the phase has a HEALTHY-gated best (a real candidate
+    checkpoint) AND that candidate's provenance is HEALTHY, with no unstable
+    steps. The prediction-best (best_cos_err) is diagnostic-only and never makes
+    a phase eligible — a WARNING/COLLAPSED phase with a low cosine error must
+    not be crowned (Bug #15; representation_status fallback keeps Tier-1-era
+    reports with no best_healthy_health record excluded unless HEALTHY)."""
+    h = report.get("best_healthy_health") or {}
+    status = h.get("status") or report.get("representation_status")
+    return bool(report.get("best_healthy_cos_err") is not None
+                and status == "HEALTHY"
+                and not report.get("unstable_steps"))
+
+
+def goal_score(report):
+    """Tiebreak only (criteria polarity is a DEFERRED audit item): prefer the
+    goal-token pairwise cosine at the best-HEALTHY step; fall back to the
+    prediction-step goal health for older reports. Missing -> 0.0."""
+    g = (((report.get("best_healthy_health") or {}).get("goal") or {})
+         .get("goal_token_pairwise_cosine_mean"))
+    if g is None:
+        g = ((report.get("goal_token_health") or {})
+             .get("goal_token_pairwise_cosine_mean"))
+    return 0.0 if g is None else -float(g)
+
+
+def select_winner(reports):
+    """Final ladder winner: only from HEALTHY-gated phase checkpoints (Bug #15).
+    Returns a dict, or None when no phase produced a HEALTHY checkpoint — the
+    explicit no-clean-winner outcome; never the best WARNING/COLLAPSED result."""
+    eligible = [r for r in reports if phase_ok(r)]
+    if not eligible:
+        return None
+    best = min(eligible, key=lambda r: (goal_score(r),
+                                        float(r["best_healthy_cos_err"])))
+    return {
+        "objective": best["objective"],
+        "phase": best["phase"],
+        "best_cos_err": best["best_healthy_cos_err"],
+        "step": best.get("step_of_best_healthy"),
+        "checkpoint": best.get("best_healthy_checkpoint"),
+        "representation_status": "HEALTHY",
+        "selection_priority": ("healthy-only>stable>improvement>goal-conditioning"
+                               ">lower-error"),
+        "no_clean_winner": False,
+    }

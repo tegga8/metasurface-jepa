@@ -239,7 +239,10 @@ def main():
         cfg = yaml.safe_load(f)
 
     if cfg.get("adaptive_training", {}).get("enabled", False):
-        seed = args.seed or int(time.time())
+        # --seed 0 must be honored as a real seed, not treated as "unset"
+        # (the `or` form fell back to time for 0, making two "same-seed" smoke
+        # runs nondeterministic) — final pre-training pass, FIX B.
+        seed = args.seed if args.seed is not None else int(time.time())
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         train_adaptive(cfg, args, device, seed)
         return
@@ -478,7 +481,7 @@ def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratio
     projection-space coordinate system the healthy references are measured in
     (Bug #14 — the released-init reference's own proj is a different random
     initialization and must not be the comparison head)."""
-    from train.engine import fixed_validation_from_loader, healthy_references
+    from train.engine import build_deterministic_reference, fixed_validation_from_loader, healthy_references
     n = max(1, min(val_batches * batch_size, len(val_ds)))
     ratios_list = ratios if isinstance(ratios, list) else [ratios]
     fixed_vals, refs = {}, {}
@@ -487,12 +490,15 @@ def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratio
         fv = fixed_validation_from_loader(val_ds, n, batch_size, device,
                                           ratio=float(r), mask_seed=mask_seed)
         if refs_model is None:
-            refs_model = build_model(cfg["model"],
-                                     os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
-                                     device=device,
-                                     init_from_metadit=cfg["model"].get("init_from_metadit", True),
-                                     metadit_weights=os.path.join(REPO_ROOT,
-                                                                  cfg["weights"]["metadit"]))
+            # FIX B: one deterministic released-init reference state, independent
+            # of ambient RNG (same fixed seed as the adaptive path by default).
+            refs_model = build_deterministic_reference(
+                lambda: build_model(cfg["model"],
+                                    os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
+                                    device=device,
+                                    init_from_metadit=cfg["model"].get("init_from_metadit", True),
+                                    metadit_weights=os.path.join(REPO_ROOT,
+                                                                 cfg["weights"]["metadit"])))
             refs_model.eval()
         fixed_vals[r] = fv
         refs[r] = healthy_references(refs_model, fv, proj_source=model)
@@ -505,11 +511,23 @@ def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratio
 # ---------------------------------------------------------------------------
 
 def _adaptive_smoke_overrides(acfg):
-    """Tiny local crash-test config (batch 1, handful of steps, jepa only)."""
-    return {**acfg, "max_total_steps": 6, "val_every_steps": 2, "log_every_steps": 1,
+    """Tiny local crash-test config (batch 1, a few steps per objective).
+
+    The objective list comes from the config, NOT from this override — so
+    --smoke exercises every rung of the configured screening ladder.
+
+    Phase cycling is made deterministic with min_delta=1e6: a fresh phase's
+    first validation always registers as the best (best starts +inf), and no
+    later validation can beat best - 1e6, so the plateau switch fires at
+    exactly plateau_patience valuations after warmup. Without this, a released-
+    init model on the 4-sample fixed val set improves at EVERY validation and
+    the first phase can burn the whole budget (observed: jepa improved through
+    39 straight steps), starving the remaining rungs. 28 steps = 6 phases x
+    3-4 steps with margin (jepa 3 + 5 x 4 = 23)."""
+    return {**acfg, "max_total_steps": 28, "val_every_steps": 2, "log_every_steps": 1,
             "lr_warmup_steps": 0, "warmup_steps": 1, "plateau_patience": 1,
-            "min_delta": 1e-6, "collapse_patience": 2, "fixed_val_subset": 4,
-            "val_batch_size": 1, "objectives": ["jepa"], "batch_size": 1}
+            "min_delta": 1e6, "collapse_patience": 2, "fixed_val_subset": 4,
+            "val_batch_size": 1, "batch_size": 1}
 
 
 class _CosineWarmup:
@@ -530,11 +548,20 @@ class _CosineWarmup:
 
 
 def _objective_kwargs(acfg, name):
+    """Per-rung hyperparameters for the six-objective screening ladder.
+    Defaults here must match the objective class defaults in
+    src/losses/objectives.py; config values (objective_params) override them."""
     params = dict(acfg.get("objective_params", {}).get(name, {}))
-    if name == "jepa_vicreg":
+    if name == "jepa_var":
+        return {k: params.get(k, d) for k, d in
+                (("lambda_var", 1.0), ("gamma", 1.0))}
+    if name in ("jepa_vicreg", "jepa_vicreg2"):
         return {k: params.get(k, d) for k, d in
                 (("lambda_var", 0.1), ("lambda_cov", 0.04), ("gamma", 1.0),
                  ("cov_on", True))}
+    if name == "jepa_barlow":
+        return {k: params.get(k, d) for k, d in
+                (("lambda_bt", 1.0), ("alpha", 0.005))}
     if name == "lejepa":
         return {k: params.get(k, d) for k, d in
                 (("lambda_sigreg", 0.1), ("num_slices", 8), ("num_points", 256),
@@ -556,16 +583,25 @@ def train_adaptive(cfg, args, device, seed):
     plateau / collapse / instability evidence, within a global step budget."""
     from losses.objectives import OBJECTIVES
     from train.adaptive import AdaptiveController, select_winner
-    from train.engine import (fixed_validation_from_loader, healthy_references,
+    from train.engine import (build_deterministic_reference,
+                              fixed_validation_from_loader, healthy_references,
                               IntervalLossAccumulator, load_phase_checkpoint,
                               save_phase_checkpoint, write_ladder_summary,
                               write_phase_report)
+    # FIX B determinism: the whole run (model builds, loader shuffling, dropout,
+    # EMA) must be a pure function of the seed — two same-seed runs must produce
+    # identical training, health votes, and winners. Previously the adaptive
+    # path seeded only the dataset subset + masker, leaving the model builds and
+    # DataLoader shuffle on the ambient RNG stream (time-based by default).
+    set_seed(seed)
     acfg = dict(cfg["adaptive_training"])
     if args.smoke:
         acfg = _adaptive_smoke_overrides(acfg)
         cfg["data"]["max_train_samples"] = 8
         cfg["data"]["num_workers"] = 0
-    objectives_order = list(acfg.get("objectives", ["jepa", "jepa_vicreg", "lejepa"]))
+    objectives_order = list(acfg.get("objectives",
+                                     ["jepa", "jepa_var", "jepa_vicreg",
+                                      "jepa_vicreg2", "jepa_barlow", "lejepa"]))
     for o in objectives_order:
         assert o in OBJECTIVES, f"unknown objective in ladder: {o}"
     assert cfg["model"]["variant"] == "jepa", "adaptive ladder requires variant jepa"
@@ -617,11 +653,17 @@ def train_adaptive(cfg, args, device, seed):
     # Bug #14: projected through the CANDIDATE model's proj head (proj_source),
     # never refs_model.proj — the released-init reference's own head is a separate
     # random initialization, i.e. a different learned coordinate system.
-    refs_model = build_model(cfg["model"],
-                             os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
-                             device=device,
-                             init_from_metadit=cfg["model"].get("init_from_metadit", True),
-                             metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]))
+    # FIX B: refs_model is built under a FIXED RNG context (refs_seed), so the
+    # reference is ONE deterministic released-init state per config — never a
+    # fresh ambient-RNG build per run (Run A HEALTHY vs Run B WARNING flip).
+    refs_seed = int(acfg.get("refs_seed", 2026))
+    refs_model = build_deterministic_reference(
+        lambda: build_model(cfg["model"],
+                            os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
+                            device=device,
+                            init_from_metadit=cfg["model"].get("init_from_metadit", True),
+                            metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"])),
+        seed=refs_seed)
     refs_model.ema.set_total_steps(int(acfg["max_total_steps"]))
     refs_model.eval()
     refs = healthy_references(refs_model, fixed_val, proj_source=model)
@@ -712,6 +754,8 @@ def train_adaptive(cfg, args, device, seed):
         unstable_steps = 0
         decision = None
         best_health, best_repr_d = None, float("inf")
+        phase_sigreg_info = None  # FIX E: lejepa metadata (dict) rides OUTSIDE the
+                                  # tensor-only loss_components schema, per phase report
         if phase.best_health is not None:
             best_health = phase.best_health  # survive resume for the phase report (Bug #12)
         lr_history, ema_history = [], []
@@ -727,6 +771,11 @@ def train_adaptive(cfg, args, device, seed):
                 M = masker.sample(G, ratio).to(device)
                 res = objective(model, G, S, M)
                 total = res["total_loss"]
+                if isinstance(res["components"].get("sigreg_info"), dict):
+                    # FIX E: keep the LAST step's sigreg_info for the phase report
+                    # (num_slices/num_points/t_grid/seed are constants; mean_phi_dev
+                    # is the final observed value).
+                    phase_sigreg_info = res["components"]["sigreg_info"]
                 if not torch.isfinite(total):
                     unstable_steps += 1
                     print(f"  [adaptive] NON-FINITE loss at step {global_step} "
@@ -873,6 +922,7 @@ def train_adaptive(cfg, args, device, seed):
             "loss_components": {k: float(v / max(1, comp_counts.get(k, 1)))
                                 for k, v in comp_sums.items()},
             "loss_components_config": _objective_kwargs(acfg, objective_name),
+            "sigreg_info": phase_sigreg_info,
             "learning_rate_history": lr_history,
             "ema_momentum_history": ema_history,
             "representation_status": phase.representation_status,
@@ -929,7 +979,8 @@ def train_adaptive(cfg, args, device, seed):
                             "not deployment candidates",
                   "selection_priority": "healthy-only>stable>improvement>goal-conditioning>lower-error"}
     write_ladder_summary(out_dir, phase_reports, controller.summary(),
-                         fixed_val.mask_statistics, winner)
+                         fixed_val.mask_statistics, winner,
+                         healthy_references=refs)
     print("\n" + "=" * 50)
     print("MILESTONE B ADAPTIVE TRAINING SUMMARY")
     print("=" * 50)

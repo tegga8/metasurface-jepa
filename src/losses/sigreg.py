@@ -26,6 +26,12 @@ the choice can be compared against the canonical implementation later:
             N(0,1); T = fixed grid {0.25, 0.5, 1.0, 1.5, 2.0}.
 
 Every hyperparameter above is returned in `info` for the per-phase report.
+
+Bug fix (device mismatch): the slice-direction generator and the subsampling
+generator previously defaulted to CPU with no device argument, while z is CUDA
+during real training. `z @ U.T` and the resulting index operation crashed with
+a device mismatch. Both generators and tensors they produce are now created on
+z.device explicitly.
 """
 
 import torch
@@ -39,21 +45,27 @@ def sigreg_loss(z, num_slices=8, num_points=256, t_grid=DEFAULT_T_GRID, seed=0):
 
     The slice directions are drawn once per call from a fixed-seed generator and are
     identical across calls with the same seed — deterministic given the seed, which
-    is recorded in `info` for the report.
+    is recorded in `info` for the report. Generator and its outputs live on z.device.
     """
     n, d = z.shape
     if n == 0:
         return z.new_zeros(()), {"num_slices": num_slices, "num_points": 0,
                                  "t_grid": list(t_grid), "seed": seed}
-    gen = torch.Generator().manual_seed(seed)
-    U = F.normalize(torch.randn(num_slices, d, generator=gen), dim=-1)  # (S, D)
+    gen = torch.Generator(device=z.device)
+    gen.manual_seed(seed)
+    U = F.normalize(
+        torch.randn(num_slices, d, generator=gen, device=z.device, dtype=z.dtype),
+        dim=-1,
+    )  # (S, D)
     proj = z @ U.T                                                    # (N, S)
     if n > num_points:
-        idx = torch.randperm(n, generator=gen)[:num_points]
+        idx = torch.randperm(n, generator=gen, device=z.device)[:num_points]
         proj = proj[idx]
     proj = (proj - proj.mean(dim=0)) / proj.std(dim=0, unbiased=True).clamp_min(1e-6)
     t = torch.tensor(list(t_grid), dtype=z.dtype, device=z.device)    # (|T|,)
-    phi = torch.exp(1j * t[:, None] * proj.T).mean(dim=-1)            # (|T|, S)
+    phi = torch.exp(
+        1j * t[None, :, None] * proj[:, None, :]
+    ).mean(dim=0)
     target = torch.exp(-(t ** 2) / 2)[:, None]                        # (|T|, 1)
     loss = ((phi - target).abs() ** 2).mean()
     info = {"test": "sliced ECF quadratic-distance Gaussianity (EP-style family)",

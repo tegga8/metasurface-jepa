@@ -278,6 +278,36 @@ def fixed_validation_from_loader(val_ds, n_samples, batch_size, device, ratio=0.
 # healthy reference (released-init model, same fixed validation set)
 # ---------------------------------------------------------------------------
 
+REFS_SEED_DEFAULT = 2026
+
+
+def build_deterministic_reference(build_fn, seed=REFS_SEED_DEFAULT):
+    """Build the released-init healthy-reference model under a FIXED RNG context.
+
+    The healthy reference must be ONE deterministic released-init state (final
+    pre-training pass, FIX B): the released geometry encoder loads MetaDiT
+    weights (deterministic), but the reference's remaining random components
+    (context encoder, predictor, perceiver, proj) consume the ambient RNG, which
+    differs run to run (e.g. from a time-based seed). Two otherwise-identical
+    runs then measured against different references and could classify the same
+    state HEALTHY in one run and WARNING in another — a nondeterministic health
+    gate is not scientific.
+
+    The build runs inside torch.random.fork_rng() with a dedicated
+    manual_seed(seed), so the reference is a pure function of `seed` — never of
+    the ambient stream. The ambient RNG state is restored untouched afterwards:
+    the reference build never perturbs training randomness.
+
+    build_fn: zero-arg callable constructing the reference model (typically
+    assembly.build_model with released init). Returns whatever build_fn returns.
+    """
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        return build_fn()
+
+
 def healthy_references(model, fixed_val, proj_source=None):
     """Stats of a fresh released-init build on the SAME fixed validation set.
 
@@ -382,11 +412,12 @@ def write_phase_report(path, phase_report):
 
 
 def write_ladder_summary(out_dir, reports, controller_summary, mask_statistics,
-                         winner):
+                         winner, healthy_references=None):
     json_path = os.path.join(out_dir, "LOSS_LADDER_SUMMARY.json")
     with open(json_path, "w") as f:
         json.dump({"reports": reports, "controller": controller_summary,
-                   "mask_statistics": mask_statistics, "winner": winner}, f,
+                   "mask_statistics": mask_statistics, "winner": winner,
+                   "healthy_references": healthy_references}, f,
                   indent=2, default=float)
     lines = ["# LOSS_LADDER_SUMMARY — Milestone B adaptive screening",
              "",
@@ -397,15 +428,19 @@ def write_ladder_summary(out_dir, reports, controller_summary, mask_statistics,
              "goal_pairwise | stability |",
              "|---|---|---|---|---|---|---|"]
     for r in reports:
+        # Bug (Batch 4): a phase that ends before its first validation has
+        # best_cos_err None — format it, don't crash the summary table.
+        best_err = ("n/a" if r.get("best_cos_err") is None
+                    else f"{r['best_cos_err']:.6g}")
         lines.append(
             f"| {r['objective']} | {r['end_global_step'] - r['start_global_step']} | "
-            f"{r['best_cos_err']:.6g} | {r['representation_status']} | "
+            f"{best_err} | {r['representation_status']} | "
             f"{(r.get('projected_target_health_at_best') or {}).get('status', 'n/a')} | "
             f"{(r.get('goal_token_health') or {}).get('goal_token_pairwise_cosine_mean', float('nan')):.4f} | "
             f"{'stable' if not r.get('unstable_steps') else str(r['unstable_steps']) + ' unstable steps'} |")
     lines += ["", f"**Winner (priority: healthy-only > stable > meaningful improvement > "
                   f"goal conditioning > lower error):** {json.dumps(winner)}", ""]
     md_path = os.path.join(out_dir, "LOSS_LADDER_SUMMARY.md")
-    with open(md_path, "w") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     return json_path, md_path

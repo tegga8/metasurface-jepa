@@ -92,6 +92,146 @@ budget 6, val @ 0/2/4): HEALTHY at every validation (votes=0); in-loop best (`be
 winner checkpoint = `phase_00_jepa_best_healthy.pt`; `null_gap=0.06618` on the winner —
 goal utilization intact; no crash, clean exit. Rows #13-#21 all FIXED above.
 
+## Tier 4 — six-objective screening ladder, Batch 4 (2026-08-18)
+
+Batch 4 = Batch 3 approved + six-rung config + full component logging + LeJEPA smoke.
+
+**Changes.**
+- `configs/milestone_b_adaptive.yaml`: ladder now exactly `[jepa, jepa_var, jepa_vicreg,
+  jepa_vicreg2, jepa_barlow, lejepa]`; screening budget `max_total_steps: 800`,
+  `val_every_steps: 50` (per EXPERIMENT_LOG "Planned screening ladder"); per-rung
+  `objective_params` for all six.
+- `src/losses/objectives.py`: every regularized rung now reports `*_weighted`
+  (lambda-scaled regularizer) and `var_ratio`/`cov_ratio`/`barlow_ratio`/`sigreg_ratio`
+  (regularizer's share of total loss) as TENSORS so the loop's tensor-only accumulator
+  picks them up; `jepa_vicreg2` also reports combined `L_var`/`L_cov`. Plain `jepa`
+  stays L_J-only (tested).
+- Batch 4 logging fix: `barlow_twins_loss` info returns python floats, which the
+  loop's tensor-only accumulator silently dropped — `bt_diag`/`bt_off_diag` never
+  reached the phase report. `JEPABarlowObjective` now re-wraps them as 0-dim tensors
+  (`zh.new_tensor(...)`); `tests/test_ladder_ratios.py` asserts they are tensors.
+- `src/train/engine.py` `write_ladder_summary`: fixed a crash when a phase ends
+  before its first validation (`best_cos_err` None → `:.6g` TypeError; observed in
+  the smoke when jepa_var hit the global budget at 1 step, 0 vals — reachable in
+  real runs too, e.g. a phase starting at step >= 800-50). Also writes the .md with
+  `encoding="utf-8"` (was platform-default cp1252 on Windows, corrupting the em-dash).
+  Regression tests: `tests/test_ladder_summary.py`.
+- `scripts/train/train_milestone_b.py`: `_objective_kwargs` covers all six rungs
+  (defaults == class defaults; config `objective_params` overrides). `--smoke` no
+  longer forces `objectives: [jepa]` — it runs the CONFIGURED ladder, so the smoke
+  exercises all six rungs. Smoke cycling is now deterministic via `min_delta=1e6`:
+  a released-init model on the 4-sample fixed val set improves at EVERY validation
+  (jepa improved through 39 straight steps in the first attempt, burning the whole
+  budget and starving the other five rungs); with min_delta=1e6 only a phase's FIRST
+  validation can register a best, so the plateau switch always fires at
+  `plateau_patience` valuations after warmup (6 phases × 3-4 steps, budget 28).
+
+**New tests (Batch 4): `tests/test_lejepa_objective.py` (6) + `tests/test_ladder_ratios.py`
+(7) + `tests/test_ladder_summary.py` (2) = 15. LeJEPA contract verified: student
+geometry_encoder supplies z_y (forward called with `with_target=False`), `jepa_loss`
+called with `stop_grad_target=False` (backward reaches the student encoder),
+`on_optimizer_step` never touches the EMA (counting stub), `L = L_J + lambda_sigreg
+* L_SIGReg` exactly, finite loss + gradients. Weighted/ratio components verified for
+all five regularized rungs; plain `jepa` verified clean.
+
+**FULL SUITE PASS (110 tests, 13 files, all PASS; 5 skipped = CUDA-only SIGReg);
+`py_compile` clean on all changed files.**
+
+**Six-objective local smoke** (`--smoke`, `adaptive/_smoke/`, batch 1, CPU): all six
+objectives instantiated and executed (jepa 3 steps, others 4 each, budget 28), zero
+objective-specific crashes, zero unstable steps, collapse_detected=False, votes=0 at
+every validation. Two runs recorded:
+- Run A: HEALTHY at every validation; winner = lejepa (best_healthy 0.06919831360435916
+  @ step 20); final winner eval cos_err 0.06919831360435916 — **bit-identical**
+  in-loop == final eval; null_gap 0.140 on the winner (goal utilization intact).
+- Run B: same ladder, but status=WARNING at every validation (votes=0) — the health
+  status at the 4-sample smoke scale flips run-to-run because `refs_model` is freshly
+  randomly built per run (pre-existing: refs_model is NOT loaded from
+  base_initialization.pt; only the candidate is). No collapse signals either way. Run B
+  exercised the no-clean-winner path end-to-end (healthy-only winner semantics hold:
+  no HEALTHY checkpoint → no deployment candidate, correct per Bug #15).
+
+**Component logging observed (Run B phase reports, per-objective means):**
+`L_J` (all rungs); `L_var`/`L_var_weighted`/`var_ratio` (jepa_var: 0.89/0.81,
+jepa_vicreg: 0.92/0.09/0.50); `L_cov`/`L_cov_weighted`/`cov_ratio` (jepa_vicreg
+0.0003/1.2e-5/5.8e-5); `L_var_pred`/`L_var_target`/`L_cov_pred`/`L_cov_target` +
+combined + weighted + ratios (jepa_vicreg2); `L_BT`/`bt_diag`/`bt_off_diag`/
+`L_BT_weighted`/`barlow_ratio` (jepa_barlow); `L_SIGReg`/`L_SIGReg_weighted`/
+`sigreg_ratio` (lejepa 0.0093/0.00093/0.013).
+
+**Screening-relevant observation (operator decision needed before the real run):**
+with `lambda_bt=1.0`, barlow_ratio ≈ 0.9997 — the Barlow term (~200) swamps L_J
+(~0.05), i.e. the jepa_barlow phase is effectively Barlow-only training with a
+cosmetic JEPA term. Whether lambda_bt=1.0 is the intended screening configuration
+is an operator call; the ratio logging now makes this visible per phase.
+
+**Remaining risks (Batch 4):** (1) refs_model nondeterminism above — flag for a
+decided seed or base-init load for refs_model if health status at screening scale
+matters; (2) lejepa sigreg_info (dict) is not in loss_components (tensor-only
+accumulator) — hyperparameters are recorded via `loss_components_config` instead;
+(3) `objective_params` values for the real 800-step run (lambda_bt in particular)
+need operator sign-off before Kaggle.
+
+## Tier 5 — pre-training cleanup (2026-08-18, operator-directed continuation)
+
+Final cleanup pass before the 800-step global screening; everything below is verification,
+not new mechanism. Do not redo any of these fixes unless a regression is demonstrated.
+
+**Barlow dimension-normalization fixed** (`src/losses/barlow.py`): the Barlow loss is now
+dimension-normalized (off-diagonal cross-correlation terms divided by D, matching the
+diagonal/off-diagonal scale). Measured scale on identical synthetic D=384 data: NEW L_BT ≈
+0.997 — the previous D=384 raw-sum domination is gone (the old raw-sum behavior is preserved
+as the historical Batch-4 observation above: barlow_ratio ≈ 0.9997 at lambda_bt=1.0). Do NOT
+change lambda_bt again without a new demonstrated regression. Regression coverage: Barlow
+normalization/scaling tests + Barlow D=1 guard in the suite.
+
+**Healthy reference made deterministic** (`src/train/engine.py` healthy_references): the
+candidate model's own `proj` head now defines the projected-reference coordinate system
+(Bug #14 semantics), reference stats are built without perturbing the ambient RNG, and the
+reference stats are reproducible run-to-run. Regression coverage:
+`tests/test_healthy_reference_determinism.py`.
+
+**SIGReg device + phi shape verified** (`src/losses/sigreg.py`): generator, slice directions,
+and subsample indices are created on `z.device` (the Phase-2 Kaggle CPU/CUDA crash fix, see
+EXPERIMENT_LOG); ECF phi shape corrected to (num_slices, num_points) as expected by the Epps-
+Pulley machinery; mathematical formulation unchanged. CPU tests pass; CUDA-only tests skip
+cleanly when CUDA is unavailable. Regression coverage: `tests/test_sigreg.py`.
+
+**LeJEPA contract verified** (extends the Tier-4 LeJEPA verification): forward/backward
+contract tests, no-EMA-update contract (`on_optimizer_step` never touches the EMA),
+`stop_grad_target=False` contract (backward reaches the student encoder), and metadata
+coverage (sigreg hyperparameters recorded via `loss_components_config`). Regression coverage:
+`tests/test_lejepa_objective.py`.
+
+**Metadata complete**: all six objectives' loss components and ratios are logged
+(jepa_var, jepa_vicreg, jepa_vicreg2 branch-specific, jepa_barlow incl. bt_diag/bt_off_diag,
+lejepa incl. sigreg metadata); the earlier Barlow float-component logging bug was fixed by
+re-wrapping as 0-dim tensors (Tier 4 above).
+
+**FULL SUITE PASS: 121 passed, 6 skipped** (13+ test files; the 6 skips are CUDA-only SIGReg
+tests on the local CPU machine). `py_compile` clean on all changed files. The suite grew from
+the 110-pass Batch-4 state with: healthy-reference determinism tests, Barlow
+normalization/scaling tests, Barlow D=1 guard, frozen-EMA boundary tests for VICReg2 and
+Barlow, SIGReg CUDA-gradient coverage, LeJEPA metadata coverage.
+
+**Two repeated six-objective smoke runs reproducible** (`--smoke`, `adaptive/_smoke_A/` and
+`adaptive/_smoke_B/`, CPU, budget 28, six rungs each): both runs are observably identical —
+identical health classifications (HEALTHY at every validation, votes=0), identical collapse
+votes, identical objective-ladder behavior (all 5 transitions by plateau, restart
+best_healthy), identical winner (jepa_vicreg2, best_healthy 0.061089852593553255 @ step 12),
+identical final winner evaluation (cos_err_r0.5 0.061089852593553255, null_gap
+0.10827767001317802, in-loop best == final eval bit-identical). All JSON/MD/JSONL run
+artifacts are byte-identical between the two runs. All 24 .pt checkpoint pairs are
+semantically identical (top-level keys, model state dicts incl. all 438 tensors, optimizer
+state, scheduler/cfg, torch RNG, numpy RNG, best metrics, health metadata, adaptive
+metadata) with one benign exception: `python_rng` (Python `random` module state) differs
+from index 0 because `set_seed()` seeds torch+numpy only and Python's `random` is never
+drawn during training (saved/restored for completeness only, `src/train/engine.py`) — its
+state is per-process ambient entropy and training-irrelevant. base_initialization.pt is
+byte-identical. This is the determinism/objective-execution/validation-consistency
+verification for the real run; it is NOT a scientific screening result (smoke scale, 4
+samples) — the global 800-step screening on Kaggle is still the decision run.
+
 ## Tier 1 — collapsed-checkpoint diagnostic re-run
 
 DONE 2026-08-18 (no retrain; existing checkpoint `checkpoints/milestone_b/synthetic_collapsed.pt`,

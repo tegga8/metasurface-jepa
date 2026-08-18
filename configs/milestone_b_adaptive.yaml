@@ -1,6 +1,9 @@
-# Milestone B — adaptive loss-switching screening (operator spec 2026-08-17).
-# Ladder: jepa -> jepa_vicreg -> lejepa; switches ONLY on plateau/collapse/instability
+# Milestone B — adaptive loss-switching screening (operator spec 2026-08-17, expanded
+# 2026-08-18 to the six-rung ladder). Ladder: jepa -> jepa_var -> jepa_vicreg ->
+# jepa_vicreg2 -> jepa_barlow -> lejepa; switches ONLY on plateau/collapse/instability
 # evidence; the global step budget is a safety ceiling, never a phase-switch criterion.
+#
+# Screening budget (Batch 4 directive): max_total_steps 800, val @ 50.
 #
 # Run:
 #   python scripts/train/train_milestone_b.py --config configs/milestone_b_adaptive.yaml --smoke
@@ -10,9 +13,10 @@ experiment: adaptive
 
 adaptive_training:
   enabled: true
-  objectives: [jepa, jepa_vicreg, lejepa]   # exactly this order; no additions
-  max_total_steps: 1800                     # safety ceiling across the WHOLE ladder
-  val_every_steps: 100
+  objectives: [jepa, jepa_var, jepa_vicreg, jepa_vicreg2, jepa_barlow, lejepa]
+                                                # exactly this order; no additions
+  max_total_steps: 800          # screening budget across the WHOLE ladder
+  val_every_steps: 50
   log_every_steps: 25
   lr_warmup_steps: 200
   warmup_steps: 200                         # per-phase, before plateau detection
@@ -28,9 +32,15 @@ adaptive_training:
   mask_ratio: 0.5
   mask_seed: 12345
   save_optimizer: true
+  refs_seed: 2026       # FIX B: fixed-seed context for the healthy released-init
+                        # reference build — one deterministic reference state per
+                        # config, independent of ambient RNG (Run A/B health flip)
   objective_params:
     jepa: {}
+    jepa_var: {lambda_var: 1.0, gamma: 1.0}
     jepa_vicreg: {lambda_var: 0.1, lambda_cov: 0.04, gamma: 1.0, cov_on: true}
+    jepa_vicreg2: {lambda_var: 0.1, lambda_cov: 0.04, gamma: 1.0, cov_on: true}
+    jepa_barlow: {lambda_bt: 1.0, alpha: 0.005}
     lejepa: {lambda_sigreg: 0.1, num_slices: 8, num_points: 256, seed: 0}
 
 model:

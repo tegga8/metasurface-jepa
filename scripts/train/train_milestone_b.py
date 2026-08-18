@@ -577,6 +577,18 @@ def _normalized_repr_dist(health, refs, cfg):
             + abs(raw["pairwise_cos"]["p05"] - hr["pairwise_cos"]["p05"]) / c["near_p05"]
             + abs(raw["same_token_cos"] - hr["same_token_cos"]) / c["near_same"])
 
+def reset_model_to_base(model, base_checkpoint, device):
+    base_obj = torch.load(
+        base_checkpoint,
+        map_location="cpu",
+        weights_only=False,
+    )
+    load_into_model(
+        model,
+        base_obj["model"],
+        device,
+    )
+    return base_obj
 
 def train_adaptive(cfg, args, device, seed):
     """Run the adaptive loss ladder: jepa -> jepa_vicreg -> lejepa, switching only on
@@ -595,6 +607,9 @@ def train_adaptive(cfg, args, device, seed):
     # DataLoader shuffle on the ambient RNG stream (time-based by default).
     set_seed(seed)
     acfg = dict(cfg["adaptive_training"])
+    fresh_start_each_objective = bool(
+        acfg.get("fresh_start_each_objective", False)
+    )
     if args.smoke:
         acfg = _adaptive_smoke_overrides(acfg)
         cfg["data"]["max_train_samples"] = 8
@@ -804,14 +819,16 @@ def train_adaptive(cfg, args, device, seed):
                 torch.nn.utils.clip_grad_norm_(trainable, clip)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                objective.on_optimizer_step(model, global_step)
+                objective.on_optimizer_step(model, phase_step)
+                phase_step = global_step - start_g
+
                 for g in optimizer.param_groups:
-                    g["lr"] = scheduler.get_lr(global_step)
+                    g["lr"] = scheduler.get_lr(phase_step)
 
                 if global_step % log_every == 0:
                     print(f"  [adaptive {objective_name} step {global_step}] "
                           f"loss={log_loss.report():.4f} "
-                          f"lr={scheduler.get_lr(global_step):.2e} "
+                          f"lr={scheduler.get_lr(global_step-start_g):.2e} "
                           f"({(time.time() - t_start) / max(1, global_step + 1 - start_g):.2f} s/step)")
 
                 if global_step % val_every == 0:
@@ -833,8 +850,8 @@ def train_adaptive(cfg, args, device, seed):
                         print(f"    [best-healthy] saved {phase.best_healthy_path} "
                               f"(cos_err {phase.best_healthy_metric:.6g})")
                     d_repr = _normalized_repr_dist(health, refs, collapse_cfg)
-                    lr_history.append(scheduler.get_lr(global_step))
-                    ema_history.append(model.ema.current_momentum(global_step))
+                    lr_history.append(scheduler.get_lr(global_step-start_g))
+                    ema_history.append(model.ema.current_momentum(global_step-start_g))
                     record = {"step": global_step,
                               "train_loss": val_loss.report(),
                               **metrics,
@@ -938,31 +955,70 @@ def train_adaptive(cfg, args, device, seed):
             keep_running = False
             break
         trans = decision["transition"]
-        if trans["restart"] == "base_init":
-            base_obj = torch.load(base_path, map_location="cpu", weights_only=False)
-            load_into_model(model, base_obj["model"], device)
-            print(f"  [adaptive] reset to base init for {trans['next']} "
-                  f"(reason {trans['reason']})")
+        if fresh_start_each_objective:
+            base_obj = torch.load(
+                base_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            load_into_model(
+                model,
+                base_obj["model"],
+                device,
+            )
+            print(
+                f"  [adaptive] fresh start for {trans['next']} "
+                f"from base initialization "
+                f"(optimizer/scheduler/EMA reset)"
+            )
+
+        elif trans["restart"] == "base_init":
+            base_obj = torch.load(
+                base_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            load_into_model(
+                model,
+                base_obj["model"],
+                device,
+            )
+            print(
+                f"  [adaptive] reset to base init for {trans['next']} "
+                f"(reason {trans['reason']})"
+            )
+
         else:
-            # Bug #15: a healthy-plateau transition may ONLY load the best-HEALTHY
-            # checkpoint, never the prediction-best (that may be a WARNING/COLLAPSED
-            # step). If no HEALTHY checkpoint exists, do NOT silently fall back:
-            # report explicitly and stop the ladder instead of transitioning.
             best_path = phase.best_healthy_path or os.path.join(
-                out_dir, f"phase_{finishing_idx:02d}_{finishing_name}_best_healthy.pt")
+                out_dir,
+                f"phase_{finishing_idx:02d}_{finishing_name}_best_healthy.pt",
+            )
+
             if os.path.exists(best_path):
-                obj = load_phase_checkpoint(best_path, model, None, None, device)
-                print(f"  [adaptive] load best healthy ckpt {best_path} for "
-                      f"{trans['next']} (optimizer/scheduler reset, EMA preserved)")
+                load_phase_checkpoint(
+                    best_path,
+                    model,
+                    None,
+                    None,
+                    device,
+                )
+                print(
+                    f"  [adaptive] load best healthy ckpt {best_path} for "
+                    f"{trans['next']} "
+                    f"(optimizer/scheduler reset, EMA preserved)"
+                )
             else:
                 report["transition_blocked"] = "no_healthy_checkpoint"
-                write_phase_report(phase_report_json(finishing_idx, finishing_name),
-                                   report)
-                print(f"  [adaptive] NO HEALTHY CHECKPOINT available at {best_path} - "
-                      f"stopping the ladder instead of transitioning to "
-                      f"{trans['next']} (no silent fallback to best-prediction)")
+                write_phase_report(
+                    phase_report_json(finishing_idx, finishing_name),
+                    report,
+                )
+                print(
+                    f"  [adaptive] NO HEALTHY CHECKPOINT available at {best_path} - "
+                    f"stopping the ladder instead of transitioning to "
+                    f"{trans['next']}"
+                )
                 keep_running = False
-                break
 
     jf.close()
 

@@ -13,10 +13,11 @@ experiment: adaptive
 
 adaptive_training:
   enabled: true
-  objectives: [jepa, jepa_var, jepa_vicreg, jepa_vicreg2, jepa_barlow, lejepa]
+  objectives: [jepa_vicreg, jepa_vicreg2, jepa_barlow, lejepa]
                                                 # exactly this order; no additions
-  max_total_steps: 800          # screening budget across the WHOLE ladder
+  max_total_steps: 1600          # screening budget across the WHOLE ladder
   val_every_steps: 50
+  fresh_start_each_objective: true
   log_every_steps: 25
   lr_warmup_steps: 200
   warmup_steps: 200                         # per-phase, before plateau detection

@@ -35,14 +35,21 @@ def cosine_distance(pred, target):
     return (1.0 - (p * t).sum(dim=-1)).clamp(min=0.0)
 
 
-def jepa_loss(pred, target, mask, proj=None):
+def jepa_loss(pred, target, mask, proj=None, stop_grad_target=True):
     """mask: (B, 256) float/bool, 1 = masked (target). Mean cosine distance over masked.
 
     proj: optional ProjectionMLP applied to both pred and target before cosine (§4).
+    stop_grad_target=True (default): the target-side projection runs under torch.no_grad()
+    so gradients flow ONLY through ẑ (soft-JEPA target contract). The EMA objectives rely
+    on this; LeJEPA (student-as-target, no stop-grad by design) passes False explicitly.
     """
     if proj is not None:
         pred = proj(pred)
-        target = proj(target)
+        if stop_grad_target:
+            with torch.no_grad():
+                target = proj(target)
+        else:
+            target = proj(target)
     d = cosine_distance(pred, target)
     mask = mask.bool()
     if mask.sum() == 0:

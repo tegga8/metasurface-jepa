@@ -17,12 +17,10 @@ src/train/adaptive.py; the loop lives in scripts/train/train_milestone_b.py.
 """
 
 import json
-import math
 import os
 
 import torch
 
-from diagnostics.goal_token_entropy import goal_token_entropy
 from diagnostics.representation_health import (
     classify_health, eff_ranks, goal_attention_stats, goal_token_stats,
     pairwise_cos_stats, token_space_stats,
@@ -68,7 +66,8 @@ class FixedValidation:
         self.mask_statistics = {
             "requested_mask_ratio": float(ratio),
             "actual_mask_ratio_mean": float(sum(fracs) / len(fracs)),
-            "actual_mask_ratio_std": float(torch.tensor(fracs).std().item()),
+            # population std: unbiased std of a single observation is NaN (Bug #9)
+            "actual_mask_ratio_std": float(torch.tensor(fracs).std(unbiased=False).item()),
             "actual_mask_ratio_min": float(min(fracs)),
             "actual_mask_ratio_max": float(max(fracs)),
             "n_batches": len(batches),
@@ -76,21 +75,27 @@ class FixedValidation:
         }
 
     def _acc_stats(self, model, healthy_raw, healthy_proj, goal_mode="real"):
-        """Forward all batches, aggregate (cos_err, entropies, token buffers).
+        """Forward all batches, aggregate (cos_err, token buffers, goal diagnostics).
 
         Runs in eval mode (deterministic; training-mode DropPath/dropout would make
         the validation metric incomparable with the final winner eval), restoring
         the model's previous mode afterwards.
+
+        NOTE (2026-08-17, audit fix): forwards run with need_attn=False — the
+        prediction metric must not touch the predictor's attention path (the SDPA
+        path with weight extraction was a divergence source between in-loop and
+        winner eval). Goal-token utilization is monitored via the spectrum-path
+        attention weights below, which never modify model outputs.
         """
         was_training = model.training
         model.eval()
         proj = getattr(model, "proj", None)
-        cos_errs, ent_sum, ent_count = [], 0.0, 0
+        cos_errs = []
         zy_raw, zy_proj, zh_pooled = [], [], []
         goal_tokens, goal_attns = [], []
         with torch.no_grad():
             for (G, S), M in zip(self.batches, self.masks):
-                out = model(G, S, M, goal_mode=goal_mode, need_attn=True)
+                out = model(G, S, M, goal_mode=goal_mode, need_attn=False)
                 mask = out["mask"]
                 z_hat, z_y = out["z_hat"], out["z_y"]
                 if proj is not None:
@@ -101,11 +106,6 @@ class FixedValidation:
                     torch.nn.functional.normalize(ph_, dim=-1),
                     torch.nn.functional.normalize(pt_, dim=-1), dim=-1)).clamp(min=0)
                 cos_errs.append(d[mask].mean().item())
-                wts = out.get("attn_weights") or out.get("weights")
-                if wts:
-                    h, _ = goal_token_entropy(wts, mask, n_goal=self.n_goal)
-                    ent_sum += h.item()
-                    ent_count += 1
                 zy_raw.append(z_y.cpu())
                 zy_proj.append(pt_.cpu())
                 mw = mask.float()
@@ -118,8 +118,6 @@ class FixedValidation:
             model.train()
         metrics = {
             "cos_err_r0.5": float(sum(cos_errs) / len(cos_errs)),
-            "goal_token_entropy": float(ent_sum / max(1, ent_count)),
-            "goal_token_log_entropy": float(math.log(max(ent_sum / max(1, ent_count), 1e-9))),
         }
         raw = token_space_stats(torch.cat(zy_raw, dim=0))
         proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
@@ -153,13 +151,16 @@ class FixedValidation:
             for (G, S), M in zip(self.batches, self.masks):
                 o1 = model(G, S, M, goal_mode="real")
                 o2 = model(G, S, M, goal_mode="null")
-                p1, p2, pt = proj(o1["z_hat"]), proj(o2["z_hat"]), proj(o1["z_y"])
+                if proj is not None:
+                    p1, p2, pt = proj(o1["z_hat"]), proj(o2["z_hat"]), proj(o1["z_y"])
+                else:
+                    p1, p2, pt = o1["z_hat"], o2["z_hat"], o1["z_y"]
                 d1 = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(p1, -1),
-                    torch.nn.functional.normalize(pt, -1), -1)).clamp(min=0)
+                    torch.nn.functional.normalize(p1, dim=-1),
+                    torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
                 d2 = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(p2, -1),
-                    torch.nn.functional.normalize(pt, -1), -1)).clamp(min=0)
+                    torch.nn.functional.normalize(p2, dim=-1),
+                    torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
                 real.append(d1[o1["mask"]].mean().item())
                 null.append(d2[o2["mask"]].mean().item())
                 gaps.append((o1["z_hat"] - o2["z_hat"]).norm(dim=-1)[o1["mask"]].mean().item())
@@ -172,16 +173,24 @@ class FixedValidation:
 def fixed_validation_from_loader(val_ds, n_samples, batch_size, device, ratio=0.5,
                                  mask_seed=12345, **kwargs):
     """Deterministic fixed subset: the first n_samples of the val dataset (val loader
-    is shuffle=False), then FixedValidation with pre-generated masks."""
+    is shuffle=False), then FixedValidation with pre-generated masks.
+
+    Honors n_samples EXACTLY: the final batch is trimmed to the remaining count so
+    n_samples need not be a multiple of batch_size (and n_samples < batch_size
+    yields fewer than batch_size samples, not more — Bug #8).
+    """
     from torch.utils.data import DataLoader
     loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
     batches, n = [], min(n_samples, len(val_ds))
+    total = 0
     for G, S in loader:
-        batches.append((G.to(device), S.to(device)))
-        if sum(g.shape[0] for g, _ in batches) >= n:
+        want = n - total
+        if want <= 0:
             break
-    return FixedValidation(batches[:max(1, n // batch_size)], ratio=ratio,
-                           device=device, mask_seed=mask_seed, **kwargs)
+        batches.append((G[:want].to(device), S[:want].to(device)))
+        total += G.shape[0]
+    return FixedValidation(batches, ratio=ratio, device=device,
+                           mask_seed=mask_seed, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -193,15 +202,20 @@ def healthy_references(model, fixed_val):
 
     model must be in eval mode; only the EMA target (raw) and its projection are
     measured. Deterministic given the fixed validation set.
+
+    Device contract (Bug #7): z_y stays on the model's device through the
+    projection; only the recorded stats tensors move to CPU. Projecting a CPU
+    tensor with a CUDA projection head here previously crashed (or silently
+    round-tripped via a .cuda() hack).
     """
     zy_raw, zy_proj, zh_pooled = [], [], []
     proj = getattr(model, "proj", None)
     with torch.no_grad():
         for (G, S), M in zip(fixed_val.batches, fixed_val.masks):
-            z_y = model.ema(G).cpu()
-            zy_raw.append(z_y)
+            z_y = model.ema(G)
+            zy_raw.append(z_y.cpu())
             if proj is not None:
-                zy_proj.append(proj(z_y.cuda() if z_y.is_cuda else z_y).cpu())
+                zy_proj.append(proj(z_y).cpu())
             out = model(G, S, M)
             m = out["mask"].float()
             zh_pooled.append(((out["z_hat"] * m.unsqueeze(-1)).sum(1)
@@ -227,12 +241,16 @@ def save_phase_checkpoint(path, model, optimizer, cfg, controller, phase,
         "optimizer": optimizer.state_dict() if optimizer else None,
         "torch_rng": torch.get_rng_state(),
         "numpy_rng": __import__("numpy").random.get_state(),
+        "python_rng": __import__("random").getstate(),
         "adaptive_meta": {
             "objective": phase.objective, "phase": phase.idx,
             "global_step": global_step, "phase_step": phase.phase_step,
             "best_metric": phase.best_metric, "best_step": phase.best_step,
             "representation_status": health.get("status"),
             "controller": controller.summary(),
+            # full controller state for exact resume (Bug #12): counters,
+            # histories, transitions — not just the summary tuple
+            "controller_state": controller.state_dict(),
         },
     }
     if extra:
@@ -259,6 +277,8 @@ def load_phase_checkpoint(path, model, optimizer, scheduler, device):
         torch.set_rng_state(obj["torch_rng"].cpu())
     if obj.get("numpy_rng") is not None:
         __import__("numpy").random.set_state(obj["numpy_rng"])
+    if obj.get("python_rng") is not None:
+        __import__("random").setstate(obj["python_rng"])
     return obj
 
 
@@ -294,7 +314,7 @@ def write_ladder_summary(out_dir, reports, controller_summary, mask_statistics,
             f"{(r.get('projected_target_health_at_best') or {}).get('status', 'n/a')} | "
             f"{(r.get('goal_token_health') or {}).get('goal_token_pairwise_cosine_mean', float('nan')):.4f} | "
             f"{'stable' if not r.get('unstable_steps') else str(r['unstable_steps']) + ' unstable steps'} |")
-    lines += ["", f"**Winner (priority: no collapse > stable > meaningful improvement > "
+    lines += ["", f"**Winner (priority: healthy-only > stable > meaningful improvement > "
                   f"goal conditioning > lower error):** {json.dumps(winner)}", ""]
     md_path = os.path.join(out_dir, "LOSS_LADDER_SUMMARY.md")
     with open(md_path, "w") as f:

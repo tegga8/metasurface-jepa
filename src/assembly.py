@@ -180,7 +180,31 @@ def saveable_state_dict(model):
             if not any(x in k for x in SAVED_EXCLUDES)}
 
 
-def load_into_model(model, sd, device):
+def load_into_model(model, sd, device, strict=True):
+    """Load a saved state dict into a model, refusing silent mismatches.
+
+    strict=True (Bug #11): a checkpoint whose keys do not exactly match the model
+    raises instead of silently leaving parameters at init — previously strict=False
+    could load a stale/renamed checkpoint and bias every downstream result without
+    any warning. Frozen released components (SAVED_EXCLUDES) are filtered on BOTH
+    sides: they are excluded from checkpoints at save time (re-loaded from disk on
+    every build via set_spectrum_path) and therefore excluded from the strict
+    comparison here too.
+    """
     keys = [k for k in sd if not any(x in k for x in SAVED_EXCLUDES)]
-    model.load_state_dict({k: sd[k] for k in keys}, strict=False)
+    filtered = {k: sd[k] for k in keys}
+    if strict:
+        model_keys = set(model.state_dict())
+        released = {k for k in model_keys if any(x in k for x in SAVED_EXCLUDES)}
+        expected = set(filtered)
+        missing = sorted(expected - model_keys)      # ckpt keys the model lacks
+        unexpected = sorted((model_keys - expected) - released)  # model keys the ckpt lacks
+        if missing or unexpected:
+            raise RuntimeError(
+                "checkpoint/model key mismatch (refusing silent non-strict load; "
+                f"missing={missing[:8]}{'...' if len(missing) > 8 else ''} "
+                f"unexpected={unexpected[:8]}{'...' if len(unexpected) > 8 else ''})")
+    model_keys = model.state_dict()
+    model.load_state_dict({k: filtered[k] for k in filtered if k in model_keys},
+                          strict=False)
     model.to(device)

@@ -141,3 +141,59 @@ class AdaptiveController:
                       "stop_reason": self.phase.stop_reason,
                       "best_metric": self.phase.best_metric,
                       "best_step": self.phase.best_step}}
+
+    # ------------------------------------------------------------------ resume
+
+    def state_dict(self):
+        """Full controller + running-phase state for exact resume (Bug #12):
+        plateau/collapse patience counters, metric/health histories, transitions,
+        and phase bookkeeping — everything a fresh controller loses."""
+        ph = self.phase
+        phase_sd = None if ph is None else {
+            "objective": ph.objective, "idx": ph.idx,
+            "start_global_step": ph.start_global_step,
+            "phase_step": ph.phase_step,
+            "best_metric": ph.best_metric, "best_step": ph.best_step,
+            "best_health": ph.best_health,
+            "plateau_bad": ph.plateau_bad, "collapse_bad": ph.collapse_bad,
+            "representation_status": ph.representation_status,
+            "metric_history": list(ph.metric_history),
+            "health_history": list(ph.health_history),
+            "stop_reason": ph.stop_reason,
+        }
+        return {
+            "max_total_steps": self.max_total_steps,
+            "warmup_steps": self.warmup_steps,
+            "plateau_patience": self.plateau_patience,
+            "min_delta": self.min_delta,
+            "collapse_patience": self.collapse_patience,
+            "objectives": list(self.objectives),
+            "transitions": list(self.transitions),
+            "phase": phase_sd,
+        }
+
+    def load_state_dict(self, sd):
+        self.max_total_steps = int(sd.get("max_total_steps", self.max_total_steps))
+        self.warmup_steps = int(sd.get("warmup_steps", self.warmup_steps))
+        self.plateau_patience = int(sd.get("plateau_patience", self.plateau_patience))
+        self.min_delta = float(sd.get("min_delta", self.min_delta))
+        self.collapse_patience = int(sd.get("collapse_patience", self.collapse_patience))
+        self.objectives = list(sd.get("objectives", self.objectives))
+        self.transitions = list(sd.get("transitions", self.transitions))
+        ph = sd.get("phase")
+        if ph is not None:
+            self.phase = PhaseState(ph["objective"], ph["idx"], ph["start_global_step"])
+            ps = self.phase
+            ps.phase_step = int(ph.get("phase_step", 0))
+            ps.best_metric = float(ph.get("best_metric", float("inf")))
+            ps.best_step = ph.get("best_step")
+            ps.best_health = ph.get("best_health")
+            ps.plateau_bad = int(ph.get("plateau_bad", 0))
+            ps.collapse_bad = int(ph.get("collapse_bad", 0))
+            ps.representation_status = ph.get("representation_status")
+            ps.metric_history = list(ph.get("metric_history", []))
+            ps.health_history = list(ph.get("health_history", []))
+            ps.stop_reason = ph.get("stop_reason")
+        else:
+            self.phase = None
+        return self

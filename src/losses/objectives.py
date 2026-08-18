@@ -96,7 +96,8 @@ class LeJEPAObjective:
         out = model(G, S, M, with_target=False)            # student z_hat, no EMA
         z_hat = out["z_hat"]                               # (B, 256, 384)
         z_y = model.geometry_encoder(G)                     # student target, no EMA
-        L_J, _ = jepa_loss(z_hat, z_y, mask, proj=model.proj)
+        L_J, _ = jepa_loss(z_hat, z_y, mask, proj=model.proj,
+                           stop_grad_target=False)  # LeJEPA: no stop-grad by design
         zh = model.proj(z_hat)[mask]
         L_sig, info = sigreg_loss(zh, **self.sigreg_kwargs)
         total = L_J + self.lambda_sigreg * L_sig

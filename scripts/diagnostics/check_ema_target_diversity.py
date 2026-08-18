@@ -10,7 +10,8 @@ geometries, and reports input-dependence statistics:
 
 Judged against two anchors per the operator-approved fix plan:
   (a) the collapsed run (Kaggle checkpoint step 2687): cross-sample cosine ~0.99987,
-      effective rank ~2.6/384, participation 2.10, top eigenvalue fraction 0.631
+      effective rank ~13.4/384 (exp-scale, was 2.6 nats on the entropy scale),
+      participation 2.10, top eigenvalue fraction 0.631
   (b) Milestone A healthy signals: z_S cross-sample mean cosine 0.184, block-11
       clustering ARI 0.397
 plus two in-script healthy references: the released MetaDiT ViT geometry encoder and

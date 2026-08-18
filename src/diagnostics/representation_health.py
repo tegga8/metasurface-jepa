@@ -21,8 +21,8 @@ COLLAPSED_ANCHOR = {
     "pairwise_cos": 0.999870,
     "pairwise_p05": 0.999601,
     "same_token_cos": 0.999266,
-    "eff_rank_unnorm": 2.5986,
-    "eff_rank_frac": 2.5986 / 384.0,
+    "eff_rank_unnorm": 13.444902,        # exp(2.5986) — effective rank in #-of-dims units
+    "eff_rank_frac": 13.444902 / 384.0,
     "participation": 2.10,
     "top_eig_frac": 0.6307,
 }
@@ -43,8 +43,13 @@ COLLAPSE_CFG_DEFAULTS = {
 
 
 def eff_ranks(X):
-    """Entropy effective rank (fraction + unnormalized), participation ratio, top
-    eigenvalue fraction, over centered embeddings (B, D)."""
+    """Entropy effective rank (exp(H), i.e. Roy–Vetterli effective rank in #-of-dims
+    units), its fraction exp(H)/D, participation ratio, top eigenvalue fraction, over
+    centered embeddings (B, D).
+
+    NOTE (2026-08-17): previously returned the entropy H itself under the
+    "eff_rank_unnorm" name, and H/log(D) under "eff_rank_frac" — both wrong scales.
+    """
     Xc = X - X.mean(0, keepdim=True)
     s = torch.linalg.svdvals(Xc)
     e = (s ** 2).clamp(min=0.0)
@@ -57,7 +62,7 @@ def eff_ranks(X):
     n = p.numel()
     part = total ** 2 / (e ** 2).sum().item()
     top = e.max().item() / total
-    return {"eff_rank_unnorm": ent, "eff_rank_frac": ent / math.log(n),
+    return {"eff_rank_unnorm": math.exp(ent), "eff_rank_frac": math.exp(ent) / n,
             "participation": part, "top_eig_frac": top}
 
 
@@ -148,7 +153,7 @@ def goal_token_stats(a_goal):
             per_sample_rank.append(0.0)
             continue
         p = e / e.sum()
-        per_sample_rank.append(-(p * torch.log(p + 1e-12)).sum().item())
+        per_sample_rank.append(math.exp(-(p * torch.log(p + 1e-12)).sum().item()))
     return {
         "goal_token_pairwise_cosine_mean": vals.mean().item(),
         "goal_token_pairwise_cosine_min": vals.min().item(),

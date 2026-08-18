@@ -3,22 +3,32 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Dataset cache (staged on cloud per CLOUD_TRAINING.md)
 data/metadit/*
 !data/metadit/.gitkeep
 
-# Checkpoint artifacts — keep only REPORT.md records
+# Checkpoint artifacts — keep only REPORT.md/BUGLOG.md records
 checkpoints/*
 !checkpoints/.gitkeep
 !checkpoints/*/
 !checkpoints/*/REPORT.md
+!checkpoints/*/BUGLOG.md
 checkpoints/**/*.pt
 checkpoints/**/*.pth
 checkpoints/**/*.ckpt
 checkpoints/**/*.json
 checkpoints/**/*.jsonl
 !checkpoints/**/REPORT.md
+!checkpoints/**/BUGLOG.md
+checkpoints/**/adaptive/
+
+# Logs
+logs/*
+!logs/.gitkeep
 
 # Root-level probe/debug scratch files (out_*.py/.json/.txt)
 /out_*
@@ -32,8 +42,9 @@ checkpoints/**/*.jsonl
 # Misc
 *.log
 .env
+.env.*
 .DS_Store
-logs/
-.pytest_cache/
-.mypy_cache/
+Thumbs.db
+.idea/
+.vscode/
 .ipynb_checkpoints/

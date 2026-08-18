@@ -36,7 +36,6 @@ from torch.utils.data import DataLoader
 
 from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
-from diagnostics.goal_token_entropy import goal_token_entropy
 from assembly import build_model, load_into_model, saveable_state_dict
 
 METADIT_SRC = os.path.join(REPO_ROOT, "external", "metadit")
@@ -116,71 +115,19 @@ def released_vit_embeddings(dit, g_full, block=11):
 
 def _eval_ratio_masks(n_batches, batch_size, ratio, device, grid=PIXEL_GRID,
                       min_side=3, k_range=(1, 4)):
-    """Deterministic random-placement masks for reproducible eval (own RNG seed)."""
+    """Deterministic random-placement masks for the DIRECT baseline eval (own RNG seed).
+
+    NOTE (2026-08-17, audit fix): kept ONLY for the pixel-space direct baseline, where
+    there is no latent FixedValidation equivalent. The legacy JEPA evaluator that used
+    this helper has been removed — all JEPA evaluation (adaptive and legacy paths) now
+    runs through FixedValidation (see _jepa_fixed_val_metrics).
+    """
     ev = BlockMasker(placement="random", grid=grid, min_side=min_side, k_range=k_range)
     ev.rng.manual_seed(12345)
     masks = []
     for _ in range(n_batches):
         masks.append(ev.sample(torch.zeros(batch_size, 3, 64, 64), ratio).to(device))
     return masks
-
-
-def evaluate_jepa(model, loader, masker, ratios, val_batches, device, need_null=True):
-    """Masked-position latent cosine error vs EMA target; goal-token entropy; + null-goal
-    gap (the §7.2 cheap proxy for goal-ignoring collapse)."""
-    model.eval()
-    proj = getattr(model, "proj", None)
-
-    def _cos_error(z_hat, z_y):
-        if proj is not None:
-            z_hat, z_y = proj(z_hat), proj(z_y)
-        return (1.0 - torch.nn.functional.cosine_similarity(
-            torch.nn.functional.normalize(z_hat, dim=-1),
-            torch.nn.functional.normalize(z_y, dim=-1), dim=-1)).clamp(min=0)
-
-    if isinstance(ratios, float):
-        ratios = [ratios]
-    agg = {r: {"cos_err": 0.0, "count": 0} for r in ratios}
-    ent_sum, ent_count = 0.0, 0
-    null_agg = {r: {"cos_err": 0.0, "gap": 0.0, "count": 0} for r in ratios}
-    n_batches = min(val_batches, len(loader))
-    with torch.no_grad():
-        for bi, (G, S) in enumerate(loader):
-            if bi >= n_batches:
-                break
-            G, S = G.to(device), S.to(device)
-            for ratio in ratios:
-                M = _eval_ratio_masks(1, G.shape[0], ratio, device,
-                                      PIXEL_GRID, masker.min_side, masker.k_range)[0]
-                mask = (M.view(M.shape[0], -1) == 0)
-                out = model(G, S, M, need_attn=True)
-                d = _cos_error(out["z_hat"], out["z_y"])
-                d_masked = d[mask]
-                agg[ratio]["cos_err"] += d_masked.mean().item()
-                agg[ratio]["count"] += 1
-                if out["attn_weights"]:
-                    h, _ = goal_token_entropy(out["attn_weights"], mask)
-                    ent_sum += h.item()
-                    ent_count += 1
-                if need_null:
-                    out_n = model(G, S, M, goal_mode="null")
-                    d_n = _cos_error(out_n["z_hat"], out["z_y"])
-                    d_n_masked = d_n[mask]
-                    gap = (out["z_hat"] - out_n["z_hat"]).norm(dim=-1)[mask].mean()
-                    null_agg[ratio]["cos_err"] += d_n_masked.mean().item()
-                    null_agg[ratio]["gap"] += gap.item()
-                    null_agg[ratio]["count"] += 1
-    metrics = {}
-    for r in ratios:
-        c = agg[r]["count"] or 1
-        metrics[f"cos_err_r{r:g}"] = agg[r]["cos_err"] / c
-        if need_null:
-            nc = null_agg[r]["count"] or 1
-            metrics[f"null_cos_err_r{r:g}"] = null_agg[r]["cos_err"] / nc
-            metrics[f"null_gap_r{r:g}"] = null_agg[r]["gap"] / nc
-    metrics["goal_token_entropy"] = ent_sum / max(1, ent_count)
-    metrics["goal_token_log_entropy"] = math.log(max(metrics["goal_token_entropy"], 1e-9))
-    return metrics
 
 
 def evaluate_direct(model, loader, masker, ratios, val_batches, device, surrogate=None,
@@ -356,6 +303,11 @@ def main():
                         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]))
     if variant == "jepa":
         model.ema.set_total_steps(total_steps)
+        fixed_vals, refs = _build_legacy_fixed_vals(
+            cfg, device, val_ds, cfg["train"]["val_batches"], cfg["train"]["batch_size"],
+            ratios, mask_seed=cfg["mask"].get("mask_seed", 12345))
+    else:
+        fixed_vals, refs = None, None
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_param = sum(p.numel() for p in trainable)
@@ -378,9 +330,13 @@ def main():
         print(f"[milestone_b] resumed from {args.resume}: step={start_step} epoch={start_epoch}")
 
     if args.eval_only:
-        metrics = run_eval(model, val_loader, masker, surrogate, released_dit, ratios,
-                           cfg["train"]["val_batches"], device,
-                           null_goal=args.null_goal, variant=variant)
+        if variant == "jepa":
+            metrics = _jepa_fixed_val_metrics(model, fixed_vals, refs,
+                                              need_null=args.null_goal)
+        else:
+            metrics = run_eval(model, val_loader, masker, surrogate, released_dit,
+                               ratios, cfg["train"]["val_batches"], device,
+                               null_goal=args.null_goal, variant=variant)
         tag = "eval" + ("_null_goal" if args.null_goal else "")
         eval_path = os.path.join(out_dir, f"{run_tag}_{tag}_metrics.json")
         with open(eval_path, "w") as f:
@@ -428,12 +384,17 @@ def main():
                 loss_accum = 0.0
 
             if step % opt_cfg["val_every_steps"] == 0 or (
-                    cfg["train"].get("ckpt_every_steps", 0)
-                    and step % cfg["train"]["ckpt_every_steps"] == 0):
-                val_metrics = run_eval(model, val_loader, masker, surrogate, released_dit,
-                                       ratios, cfg["train"]["val_batches"], device,
-                                       null_goal=False, variant=variant)
-                primary = (val_metrics.get("cos_err_r0.5") if variant == "jepa"
+                        cfg["train"].get("ckpt_every_steps", 0)
+                        and step % cfg["train"]["ckpt_every_steps"] == 0):
+                if variant == "jepa":
+                    val_metrics = _jepa_fixed_val_metrics(model, fixed_vals, refs)
+                else:
+                    val_metrics = run_eval(model, val_loader, masker, surrogate,
+                                           released_dit, ratios,
+                                           cfg["train"]["val_batches"], device,
+                                           null_goal=False, variant=variant)
+                ratio0 = ratios[0] if isinstance(ratios, list) else ratios
+                primary = (val_metrics.get(f"cos_err_r{ratio0:g}") if variant == "jepa"
                            else val_metrics.get("px_masked_r0.5", 0.0)) or 0.0
                 if not best or primary < best.get("primary", float("inf")):
                     best = {"primary": primary, "metrics": val_metrics, "step": step}
@@ -458,16 +419,15 @@ def main():
         break  # smoke early-break
 
     # final eval
-    final = run_eval(model, val_loader, masker, surrogate, released_dit, ratios,
-                     cfg["train"]["val_batches"], device, null_goal=False,
-                     variant=variant)
     if variant == "jepa":
-        final.update(run_eval(model, val_loader, masker, surrogate, released_dit, ratios,
-                              cfg["train"]["val_batches"], device, null_goal=True,
-                              variant=variant))
+        final = _jepa_fixed_val_metrics(model, fixed_vals, refs, need_null=True)
         gaps = [final[k] for k in final if k.startswith("null_gap_r")
                 and isinstance(final[k], float)]
         final["null_gap"] = sum(gaps) / len(gaps) if gaps else float("nan")
+    else:
+        final = run_eval(model, val_loader, masker, surrogate, released_dit, ratios,
+                         cfg["train"]["val_batches"], device, null_goal=False,
+                         variant=variant)
     final_path = os.path.join(out_dir, f"{run_tag}_final_metrics.json")
     with open(final_path, "w") as f:
         json.dump({"config": cfg, "metrics": final, "best": best}, f, indent=2)
@@ -479,11 +439,53 @@ def main():
 
 def run_eval(model, val_loader, masker, surrogate, released_dit, ratios, val_batches,
              device, null_goal=False, variant="jepa"):
-    if variant == "jepa":
-        return evaluate_jepa(model, val_loader, masker, ratios, val_batches, device,
-                             need_null=null_goal)
+    """Direct-variant evaluation only (pixel-space baseline; no latent FixedValidation
+    equivalent). JEPA-variant evaluation is handled by _jepa_fixed_val_metrics — the
+    legacy own-mask/need_attn JEPA evaluator was removed (audit fix 2026-08-17)."""
+    assert variant == "direct", "JEPA evaluation must go through FixedValidation"
     return evaluate_direct(model, val_loader, masker, ratios, val_batches, device,
                            surrogate=surrogate, released_dit=released_dit)
+
+
+def _jepa_fixed_val_metrics(model, fixed_vals, refs, need_null=False):
+    """JEPA metrics via FixedValidation: one shared metric path for in-loop validation,
+    eval-only, and final eval (audit fix 2026-08-17 — removes the legacy evaluator's
+    own masks + need_attn=True divergence). fixed_vals: {ratio: FixedValidation},
+    refs: {ratio: healthy_references dict}."""
+    metrics = {}
+    for r, fv in sorted(fixed_vals.items()):
+        m, _ = fv.evaluate(model, refs[r]["raw"], refs[r]["proj"])
+        metrics[f"cos_err_r{r:g}"] = m["cos_err_r0.5"]
+        if need_null:
+            real, null, gap = fv.null_gap(model)
+            metrics[f"null_cos_err_r{r:g}"] = null
+            metrics[f"null_gap_r{r:g}"] = gap
+    return metrics
+
+
+def _build_legacy_fixed_vals(cfg, device, val_ds, val_batches, batch_size, ratios,
+                             mask_seed=12345):
+    """Per-ratio FixedValidation sets for the legacy (non-adaptive) JEPA path, plus the
+    corresponding healthy released-init references on the SAME masks/batches."""
+    from train.engine import fixed_validation_from_loader, healthy_references
+    n = max(1, min(val_batches * batch_size, len(val_ds)))
+    ratios_list = ratios if isinstance(ratios, list) else [ratios]
+    fixed_vals, refs = {}, {}
+    refs_model = None
+    for r in ratios_list:
+        fv = fixed_validation_from_loader(val_ds, n, batch_size, device,
+                                          ratio=float(r), mask_seed=mask_seed)
+        if refs_model is None:
+            refs_model = build_model(cfg["model"],
+                                     os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
+                                     device=device,
+                                     init_from_metadit=cfg["model"].get("init_from_metadit", True),
+                                     metadit_weights=os.path.join(REPO_ROOT,
+                                                                  cfg["weights"]["metadit"]))
+            refs_model.eval()
+        fixed_vals[r] = fv
+        refs[r] = healthy_references(refs_model, fv)
+    return fixed_vals, refs
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +538,20 @@ def _normalized_repr_dist(health, refs, cfg):
     return (abs(raw["eff_rank_frac"] - hr["eff_rank_frac"]) / c["near_rank"]
             + abs(raw["pairwise_cos"]["p05"] - hr["pairwise_cos"]["p05"]) / c["near_p05"]
             + abs(raw["same_token_cos"] - hr["same_token_cos"]) / c["near_same"])
+
+
+def _phase_ok(r):
+    """Winner eligibility: HEALTHY representation status only (COLLAPSED AND WARNING
+    excluded — audit fix 2026-08-17: previously only COLLAPSED was excluded, letting
+    a degraded-but-not-collapsed phase be crowned), no unstable steps, and a finite
+    best metric recorded."""
+    return bool(r.get("representation_status") == "HEALTHY" and
+                not r.get("unstable_steps") and r.get("best_cos_err") is not None)
+
+
+def _goal_score(r):
+    g = (r.get("goal_token_health") or {}).get("goal_token_pairwise_cosine_mean")
+    return 0.0 if g is None else -float(g)
 
 
 def train_adaptive(cfg, args, device, seed):
@@ -664,11 +680,15 @@ def train_adaptive(cfg, args, device, seed):
         start_g = global_step
 
         if resumed is not None and resumed["phase_idx"] == phase.idx:
-            load_phase_checkpoint(args.resume, model, optimizer, scheduler, device)
+            ckpt_obj = load_phase_checkpoint(args.resume, model, optimizer,
+                                             scheduler, device)
+            # Bug #12: restore the FULL controller state (patience counters,
+            # histories, transitions, phase bookkeeping), not just the tuple.
+            controller.load_state_dict(ckpt_obj["adaptive_meta"]["controller_state"])
+            if controller.phase is not None:
+                phase = controller.phase
             global_step = resumed["global_step"]
             start_g = global_step
-            phase.best_metric = resumed["best_metric"]
-            phase.best_step = resumed["best_step"]
             resumed = None  # resume consumed
             print(f"[adaptive] phase {phase.idx} resumed at global step {global_step}")
 
@@ -681,7 +701,10 @@ def train_adaptive(cfg, args, device, seed):
         unstable_steps = 0
         decision = None
         best_health, best_repr_d = None, float("inf")
+        if phase.best_health is not None:
+            best_health = phase.best_health  # survive resume for the phase report (Bug #12)
         lr_history, ema_history = [], []
+        mb = 0  # micro-batch counter; accum micro-batches == 1 optimizer step
 
         while controller.enough_budget(global_step):
             G, S = next(guide)
@@ -702,19 +725,22 @@ def train_adaptive(cfg, args, device, seed):
                 break
             total = total / accum
             total.backward()
+            mb += 1
             loss_accum += total.item() * accum
             for k, v in res["components"].items():
                 if isinstance(v, torch.Tensor):
                     comp_sums[k] = comp_sums.get(k, 0.0) + v.item()
                     comp_counts[k] = comp_counts.get(k, 0) + 1
 
-            if (global_step + 1) % accum == 0:
-                torch.nn.utils.clip_grad_norm_(trainable, clip)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                objective.on_optimizer_step(model, global_step)
-                for g in optimizer.param_groups:
-                    g["lr"] = scheduler.get_lr(global_step)
+            if mb % accum != 0:
+                continue  # still accumulating this optimizer step (Bug #10: global
+                          # step counts optimizer steps, not micro-batches)
+            torch.nn.utils.clip_grad_norm_(trainable, clip)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            objective.on_optimizer_step(model, global_step)
+            for g in optimizer.param_groups:
+                g["lr"] = scheduler.get_lr(global_step)
 
             if global_step % log_every == 0:
                 print(f"  [adaptive {objective_name} step {global_step}] "
@@ -727,7 +753,9 @@ def train_adaptive(cfg, args, device, seed):
                 metrics, health = fixed_val.evaluate(model, refs["raw"], refs["proj"])
                 decision = controller.on_validation(metrics["cos_err_r0.5"],
                                                     health["status"], global_step)
-                best_health = health if phase.best_step == global_step else best_health
+                if phase.best_step == global_step:
+                    best_health = health
+                    phase.best_health = health  # survive checkpoint/resume (Bug #12)
                 d_repr = _normalized_repr_dist(health, refs, collapse_cfg)
                 lr_history.append(scheduler.get_lr(global_step))
                 ema_history.append(model.ema.current_momentum(global_step))
@@ -770,7 +798,7 @@ def train_adaptive(cfg, args, device, seed):
                     os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
                     model, optimizer if acfg.get("save_optimizer", True) else None,
                     cfg, controller, phase, global_step, metrics, health)
-            global_step += 1
+            global_step += 1   # Bug #10: one optimizer step == one global step
             if decision is not None and decision["action"] in ("switch", "stop"):
                 break
 
@@ -838,16 +866,9 @@ def train_adaptive(cfg, args, device, seed):
     jf.close()
 
     # ---- final method selection + summary (§22) ----
-    def _phase_ok(r):
-        return bool(r.get("representation_status") not in ("COLLAPSED",) and
-                    not r.get("unstable_steps") and r.get("best_cos_err") is not None)
-
     improved = "improved" if any(r.get("step_of_best_cos_err") is not None for r in phase_reports) else "n/a"
     winner = None
     ranked = [r for r in phase_reports]
-    def _goal_score(r):
-        g = (r.get("goal_token_health") or {}).get("goal_token_pairwise_cosine_mean")
-        return 0.0 if g is None else -float(g)
 
     ranked.sort(key=lambda r: (0 if _phase_ok(r) else 1,
                                _goal_score(r),
@@ -856,7 +877,7 @@ def train_adaptive(cfg, args, device, seed):
         winner = {"objective": ranked[0]["objective"], "phase": ranked[0]["phase"],
                   "best_cos_err": ranked[0]["best_cos_err"],
                   "representation_status": ranked[0]["representation_status"],
-                  "selection_priority": "no-collapse>stable>improvement>goal-conditioning>lower-error"}
+                  "selection_priority": "healthy-only>stable>improvement>goal-conditioning>lower-error"}
     write_ladder_summary(out_dir, phase_reports, controller.summary(),
                          fixed_val.mask_statistics, winner)
     print("\n" + "=" * 50)

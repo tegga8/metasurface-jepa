@@ -114,8 +114,10 @@ class _JEPAForwardMixin:
         return z_hat, z_x, mask, weights
 
     def query_predictions(self, G, S, M, goal_mode="real"):
-        base, delta, *_ = self._encode(G, S, M, goal_mode, need_attn=False)
-        return base + delta
+        z_hat, *_ = self._encode(
+            G, S, M, goal_mode, need_attn=False
+        )
+        return z_hat
 
 
 class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
@@ -177,7 +179,7 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
 
     def loss(self, G, S, M, goal_mode="real"):
         out = self.forward(G, S, M, goal_mode=goal_mode)
-        L, per_sample = jepa_loss(out["z_hat"], out["z_y"], out["mask"], proj=self.proj)
+        L, per_sample = jepa_loss(out["z_hat"], out["z_y"], out["mask"], proj=None)
         return L, out
 
 
@@ -188,7 +190,6 @@ class DirectMaskedGenerator(_JEPAForwardMixin, nn.Module):
         self.hidden = hidden
         geo = GeometryEncoder(hidden=hidden, num_heads=num_heads, depth=geo_depth)
         self.context_encoder = ContextEncoder(geo, hidden=hidden)
-        self.perceiver = PerceiverBottleneck(bottleneck_tokens, hidden, num_heads)
         self.spectrum_path = SpectrumPath(None, hidden=hidden, goal_tokens=goal_tokens)
         self.predictor = GCLCT(depth=predictor_depth, hidden=hidden,
                                num_heads=num_predictor_heads, head_type="pixel")
@@ -229,7 +230,11 @@ def set_spectrum_path(model, spec_weights, device):
 def build_model(cfg, spec_weights, device="cpu", init_from_metadit=True,
                 metadit_weights=None, blocks_to_take=6):
     variant = cfg.get("variant", "jepa")
-    assert variant in ("jepa", "direct")
+
+    if variant != "jepa":
+        raise RuntimeError(
+            "Only the JEPA variant is enabled during the architecture refactor."
+        )
     kwargs = dict(hidden=cfg.get("hidden", 384),
                   num_heads=cfg.get("num_heads", 6),
                   geo_depth=cfg.get("geo_depth", 6),
@@ -237,12 +242,12 @@ def build_model(cfg, spec_weights, device="cpu", init_from_metadit=True,
                   bottleneck_tokens=cfg.get("bottleneck_tokens", 64),
                   goal_tokens=cfg.get("goal_tokens", 16),
                   num_predictor_heads=cfg.get("num_predictor_heads", 6))
-    if variant == "jepa":
-        kwargs.update(momentum_start=cfg.get("ema_momentum_start", 0.996),
-                      momentum_end=cfg.get("ema_momentum_end", 0.999))
-        model = GoalConditionedJEPA(**kwargs)
-    else:
-        model = DirectMaskedGenerator(**kwargs)
+    kwargs.update(
+        momentum_start=cfg.get("ema_momentum_start", 0.996),
+        momentum_end=cfg.get("ema_momentum_end", 0.999),
+    )
+
+    model = GoalConditionedJEPA(**kwargs)
 
     set_spectrum_path(model, spec_weights, device)
     if init_from_metadit:

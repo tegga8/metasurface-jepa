@@ -134,6 +134,20 @@ def feature_std_stats(X):
     }
 
 
+def cov_offdiag_rms(X):
+    """RMS of the OFF-DIAGONAL entries of the per-feature covariance matrix
+    (unbiased, over (N, D) rows) — the redundancy statistic of spec §26
+    ("covariance off-diagonal RMS"). NaN for N < 2 (undefined statistics)."""
+    Xr = _rows(X).double()
+    if Xr.shape[0] < 2:
+        return float("nan")
+    Zc = Xr - Xr.mean(0, keepdim=True)
+    C = (Zc.T @ Zc) / (Xr.shape[0] - 1)
+    off = C - torch.diag_embed(torch.diagonal(C))
+    d = off.shape[0]
+    return (off ** 2).sum().div(d * (d - 1)).sqrt().item()
+
+
 def space_diagnostics(X_tokens, X_pooled=None, tag="space"):
     """Full diagnostics for one space. X_tokens: (B, T, D) token embeddings;
     X_pooled: (B, D) mean-pooled per-geometry vectors (cross-geometry stats
@@ -156,6 +170,7 @@ def space_diagnostics(X_tokens, X_pooled=None, tag="space"):
         f"{tag}_top_eig_frac": er["top_eig_frac"],
         f"{tag}_participation": er["participation"],
         f"{tag}_pairwise_cos": pcos,
+        f"{tag}_cov_offdiag_rms": cov_offdiag_rms(X_tokens),
         **{f"{tag}_{k}": v for k, v in feature_std_stats(X_tokens).items()},
         f"{tag}_n_geoms": int(X_pooled.shape[0]),
     }
@@ -246,7 +261,7 @@ def validate_checkpoint(cfg, args):
 
             mask = out["mask"]
             mw = mask.float()
-zy, zh = out["z_y_raw"], out["z_hat"]
+            zy, zh = out["z_y_raw"], out["z_hat"]
             p_zy, p_zh = P(zy), P(zh)
 
             def pool(x):
@@ -376,10 +391,23 @@ zy, zh = out["z_y_raw"], out["z_hat"]
 
 
 def classify_collapse(diag):
-    """Collapse gates (spec §15). Dimensional collapse = large fraction of dims
-    with std < 0.1; sample collapse = cross-geometry pairwise p05 > 0.98 with a
-    collapsing effective rank. Projector collapse = raw representation healthy
-    while the projected representation is collapsed -> PROJECTOR_COLLAPSE."""
+    """Collapse gates (spec §15/§26). Dimensional collapse = large fraction of
+    dims with std < 0.1; sample collapse = cross-geometry pairwise p05 > 0.98
+    with a collapsing effective rank. Projector collapse = raw representation
+    healthy while the projected representation is collapsed ->
+    PROJECTOR_COLLAPSE.
+
+    Spec §26 additionally flags VARIANCE_FAILURE and COVARIANCE_FAILURE
+    SEPARATELY from the collapse verdict:
+      - variance_failure: dimensional collapse of the PROJECTED space
+        (per-feature std distribution degraded: frac_std_lt_0p1 > 0.30)
+      - covariance_failure: projected covariance off-diagonal RMS above the
+        project-chosen absolute bar 0.1 (strong cross-feature redundancy;
+        entries of order 1 correspond to ~perfectly correlated unit-variance
+        features, entries of order ~1/sqrt(N) to independent features)
+    These are absolute gates for checkpoint validation; the training-time short
+    audit gates are relative to the run's own released-init baseline (spec §15
+    philosophy — absolute thresholds would fire on a healthy init)."""
     raw_p05 = diag["raw_target_pairwise_cos"]["p05"]
     raw_frac = diag["raw_target_rank_fraction"]
     proj_p05 = diag["proj_target_pairwise_cos"]["p05"]
@@ -387,6 +415,7 @@ def classify_collapse(diag):
     raw_dim = diag["raw_target_frac_std_lt_0p1"]
     proj_dim = diag["proj_target_frac_std_lt_0p1"]
     pred_dim = diag["proj_predictor_frac_std_lt_0p1"]
+    proj_cov = diag["proj_target_cov_offdiag_rms"]
 
     raw_dimensional = raw_dim > 0.30
     proj_dimensional = (proj_dim > 0.30) or (pred_dim > 0.30)
@@ -413,6 +442,9 @@ def classify_collapse(diag):
         "proj_collapsed": proj_collapsed,
         "raw_p05": raw_p05, "raw_eff_rank_frac": raw_frac,
         "proj_p05": proj_p05, "proj_eff_rank_frac": proj_frac,
+        "variance_failure": proj_dimensional,
+        "covariance_failure": bool(proj_cov > 0.1),
+        "proj_cov_offdiag_rms": proj_cov,
     }
 
 
@@ -597,14 +629,22 @@ def _weighted_terms(comps):
 
 
 def _audit_collapse_abort(row, base):
-    """Reference-relative abort verdict for one audit report (spec §15). All
-    signals are measured against the run's own first report (released-init
+    """Reference-relative abort verdict for one audit report (spec §15/§26).
+    All signals are measured against the run's own first report (released-init
     baseline): raw collapse = raw target rank fraction halved while the
     cross-geometry p05 cosine approaches identity (past both 0.98 and the
     baseline); projector collapse = projected rank fraction halved while the
     raw space stays healthy. Absolute thresholds alone would fire on a healthy
     released-init model (its raw tokens genuinely contain low-variance dims),
-    so every gate is relative to the baseline."""
+    so every gate is relative to the baseline.
+
+    Spec §26 gates, flagged SEPARATELY (relative to the same baseline):
+      VARIANCE_FAILURE   projected mean feature std halves while raw stays
+                         healthy (projected per-dim spread collapsing)
+      COVARIANCE_FAILURE projected covariance off-diagonal RMS more than
+                         doubles its baseline AND exceeds the absolute bar 0.1
+                         (growing cross-feature redundancy — the relative gate
+                         alone would over-fire on a near-zero baseline)."""
     step = row["step"]
     rank_floor = 0.5 * max(base["raw_target_rank_frac"], 1e-6)
     p05_floor = max(0.98, base["raw_pairwise_cos_p05"] + 0.02)
@@ -627,6 +667,20 @@ def _audit_collapse_abort(row, base):
                 f"(proj rank frac {row['proj_target_rank_frac']:.4f} vs "
                 f"baseline {base['proj_target_rank_frac']:.4f}, p05 "
                 f"{row['proj_pairwise_cos_p05']:.4f}) while raw stays healthy")
+    var_fail = (
+        row["proj_mean_feature_std"]
+        < 0.5 * max(base["proj_mean_feature_std"], 1e-9))
+    if var_fail and raw_healthy:
+        return (f"VARIANCE_FAILURE at step {step}: projected mean feature std "
+                f"{row['proj_mean_feature_std']:.4f} < half the baseline "
+                f"{base['proj_mean_feature_std']:.4f} while raw stays healthy")
+    cov_fail = (
+        row["proj_cov_offdiag_rms"] > 2 * max(base["proj_cov_offdiag_rms"], 1e-6)
+        and row["proj_cov_offdiag_rms"] > 0.1)
+    if cov_fail and raw_healthy:
+        return (f"COVARIANCE_FAILURE at step {step}: projected covariance "
+                f"off-diagonal RMS {row['proj_cov_offdiag_rms']:.4f} > 2x "
+                f"baseline {base['proj_cov_offdiag_rms']:.4f} (and > 0.1)")
     return None
 
 
@@ -682,6 +736,8 @@ def _audit_row(step, model, objective, G, S, M, comps, params, args):
         "proj_min_feature_std": feature_std_stats(p_zh_m)["min_std"],
         "proj_mean_feature_std": feature_std_stats(p_zh_m)["mean_std"],
         "proj_frac_std_lt_0p1": feature_std_stats(p_zh_m)["frac_std_lt_0p1"],
+        "raw_cov_offdiag_rms": cov_offdiag_rms(zh_m),
+        "proj_cov_offdiag_rms": cov_offdiag_rms(p_zh_m),
         "projector_sv": sv_stats(p_zh_m),
     }
     for k, v in comps.items():

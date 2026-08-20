@@ -172,7 +172,8 @@ def test_token_level_stats_are_the_loss_geometry_level_is_health_only(
 
 def test_n_below_two_raises_not_silently_zeroed(tiny_batch):
     """Spec numerical rules: undefined variance/covariance statistics raise,
-    they are never silently replaced with zero during real training."""
+    they are never silently replaced with zero during real training. Plain MSE
+    invariance is defined for any N >= 1 and must NOT raise."""
     G, S, M = tiny_batch
     M = torch.ones_like(M)
     M[0, 0] = 0  # exactly ONE masked token across the batch -> N = 1
@@ -183,8 +184,8 @@ def test_n_below_two_raises_not_silently_zeroed(tiny_batch):
     with pytest.raises(ValueError, match="at least two valid samples"):
         obj(model, G, S, M)
 
-    with pytest.raises(ValueError, match="at least two valid samples"):
-        invariance_loss(torch.randn(1, 8), torch.randn(1, 8))
+    L_inv = invariance_loss(torch.randn(1, 8), torch.randn(1, 8))
+    assert torch.isfinite(L_inv), "plain MSE invariance is valid for N=1"
     with pytest.raises(ValueError, match="at least two valid samples"):
         variance_loss(torch.randn(1, 8))
     with pytest.raises(ValueError, match="at least two valid samples"):

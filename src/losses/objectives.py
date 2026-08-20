@@ -63,7 +63,12 @@ class VICRegObjective(nn.Module):
 
         L_inv = MSE(p_hat, p_y)                                   (both branches)
         L_var = 0.5 * (var_penalty(p_hat) + var_penalty(p_y))     (both branches)
-        L_cov = 0.5 * (cov_penalty(p_hat) + cov_penalty(p_y))     (both branches)
+        L_cov = cov_penalty(p_hat) + cov_penalty(p_y)             (both branches)
+
+    per-branch forms are canonical VICReg: var_penalty is the hinge
+    relu(gamma - std).mean() (NOT squared) and cov_penalty is the off-diagonal
+    squared sum / D. L_var averages the two branches (official /2 per branch);
+    L_cov SUMS them (official cov_loss = cov_x + cov_y, no 0.5 factor).
 
     computed over MASKED geometry tokens — the deliberate token-level
     adaptation (§6 of the CODEX spec; canonical VICReg is image-level). The
@@ -122,14 +127,21 @@ class VICRegObjective(nn.Module):
         # Geometry-level health (§6: "Never rely only on token-level
         # statistics"): masked tokens mean-pooled per geometry -> (B, D),
         # then the same cross-geometry statistics. Reported as components,
-        # not added to the loss.
+        # not added to the loss. With fewer than 2 geometries the pooled
+        # statistics are undefined: they are NaN-MARKED (Bug #21 convention),
+        # never silently zeroed — the hard N>=2 raise applies to the LOSS
+        # terms only.
         mw = mask.float()
         p_hat_g = (p_hat_full * mw.unsqueeze(-1)).sum(1) \
             / mw.sum(1, keepdim=True).clamp(min=1)        # (B, D)
         p_y_g = (p_y_full * mw.unsqueeze(-1)).sum(1) \
             / mw.sum(1, keepdim=True).clamp(min=1)        # (B, D)
-        geo_inv, geo_var, geo_cov = vicreg_branch_terms(
-            p_hat_g, p_y_g, gamma=self.gamma, eps=self.eps)
+        if p_hat_g.shape[0] >= 2:
+            geo_inv, geo_var, geo_cov = vicreg_branch_terms(
+                p_hat_g, p_y_g, gamma=self.gamma, eps=self.eps)
+        else:
+            nan = torch.full((), float("nan"), device=p_hat_g.device)
+            geo_inv, geo_var, geo_cov = nan, nan, nan
 
         inv_ratio = L_inv_w / total.clamp_min(1e-8)
         var_ratio = L_var_w / total.clamp_min(1e-8)

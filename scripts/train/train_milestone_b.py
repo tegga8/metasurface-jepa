@@ -564,15 +564,32 @@ class _CosineWarmup:
         return self.lr * 0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, t))))
 
 
-def _objective_kwargs(acfg, name):
-    """Per-rung hyperparameters for the six-objective screening ladder.
+def _objective_kwargs(acfg, name, vicreg_cfg=None):
+    """Per-rung hyperparameters for the screening ladder.
     Defaults here must match the objective class defaults in
-    src/losses/objectives.py; config values (objective_params) override them."""
+    src/losses/objectives.py; config values (objective_params) override them.
+
+    vicreg_cfg: the top-level `vicreg:` config section (CODEX spec §23) —
+    explicit, configurable projector/loss values for the jepa_vicreg rung;
+    per-rung objective_params.jepa_vicreg overrides them."""
+    vicreg_cfg = vicreg_cfg or {}
     params = dict(acfg.get("objective_params", {}).get(name, {}))
     if name == "jepa_var":
         return {k: params.get(k, d) for k, d in
                 (("lambda_var", 1.0), ("gamma", 1.0))}
-    if name in ("jepa_vicreg", "jepa_vicreg2"):
+    if name == "jepa_vicreg":
+        proj_cfg = dict(vicreg_cfg.get("projector", {}))
+        loss_cfg = dict(vicreg_cfg.get("loss", {}))
+        return {k: params.get(k, d) for k, d in (
+            ("lambda_inv", loss_cfg.get("lambda_inv", 25.0)),
+            ("lambda_var", loss_cfg.get("lambda_var", 25.0)),
+            ("lambda_cov", loss_cfg.get("lambda_cov", 1.0)),
+            ("gamma", loss_cfg.get("gamma", 1.0)),
+            ("eps", loss_cfg.get("eps", 1e-4)),
+            ("projector_input_dim", proj_cfg.get("input_dim", 384)),
+            ("projector_hidden_dim", proj_cfg.get("hidden_dim", 384)),
+            ("projector_output_dim", proj_cfg.get("output_dim", 384)))}
+    if name in ("jepa_vicreg2",):
         return {k: params.get(k, d) for k, d in
                 (("lambda_var", 0.1), ("lambda_cov", 0.04), ("gamma", 1.0),
                  ("cov_on", True))}
@@ -593,6 +610,29 @@ def _normalized_repr_dist(health, refs, cfg):
     return (abs(raw["eff_rank_frac"] - hr["eff_rank_frac"]) / c["near_rank"]
             + abs(raw["pairwise_cos"]["p05"] - hr["pairwise_cos"]["p05"]) / c["near_p05"]
             + abs(raw["same_token_cos"] - hr["same_token_cos"]) / c["near_same"])
+
+def _phase_ckpt_extra(objective):
+    """Checkpoint payload for the objective (CODEX spec §12): parametric
+    objectives (e.g. VICRegObjective with its owned projector) serialize their
+    full state so a resume restores the projector; non-parametric objectives
+    record only their name for provenance. The caller merges this into
+    save_phase_checkpoint's `extra`."""
+    name = getattr(objective, "name", None)
+    if isinstance(objective, torch.nn.Module) and \
+            any(p.requires_grad for p in objective.parameters()):
+        return {"objective_name": name, "objective_state": objective.state_dict()}
+    return {"objective_name": name}
+
+
+def _assert_no_ema_gradients(model, objective_name, step):
+    """Per-step EMA-frozen guard: the EMA target encoder must receive no
+    gradient through the objective (spec §9). Cheap (no compute), catches any
+    accidental re-enabling of target requires_grad early."""
+    leaked = [n for n, p in model.ema.named_parameters() if p.grad is not None]
+    assert not leaked, (
+        f"[{objective_name} step {step}] EMA target encoder received a "
+        f"gradient on: {leaked[:5]}")
+
 
 def reset_model_to_base(model, base_checkpoint, device):
     base_obj = torch.load(
@@ -632,8 +672,7 @@ def train_adaptive(cfg, args, device, seed):
         cfg["data"]["max_train_samples"] = 8
         cfg["data"]["num_workers"] = 0
     objectives_order = list(acfg.get("objectives",
-                                     ["jepa", "jepa_var", "jepa_vicreg",
-                                      "jepa_vicreg2", "jepa_barlow", "lejepa"]))
+                                     ["jepa", "jepa_vicreg"]))
     for o in objectives_order:
         assert o in OBJECTIVES, f"unknown objective in ladder: {o}"
     assert cfg["model"]["variant"] == "jepa", "adaptive ladder requires variant jepa"
@@ -747,14 +786,54 @@ def train_adaptive(cfg, args, device, seed):
             break
 
         phase = controller.start_phase(objective_name, global_step)
-        objective = OBJECTIVES[objective_name](**_objective_kwargs(acfg, objective_name))
-        optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=wd, betas=(0.9, 0.999))
+        objective = OBJECTIVES[objective_name](
+            **_objective_kwargs(acfg, objective_name, cfg.get("vicreg", {})))
+        # CODEX spec §11: the optimizer owns the student model's trainable
+        # parameters AND the objective's trainable parameters (the VICReg
+        # projector for jepa_vicreg) — and NONE of the EMA target parameters.
+        objective_params = [
+            p for p in objective.parameters() if p.requires_grad
+        ] if isinstance(objective, torch.nn.Module) else []
+        optimizer = torch.optim.AdamW(trainable + objective_params, lr=lr,
+                                      weight_decay=wd, betas=(0.9, 0.999))
+        opt_param_ids = {id(p) for g in optimizer.param_groups
+                         for p in g["params"]}
+        missing_obj = [p for p in objective_params if id(p) not in opt_param_ids]
+        assert not missing_obj, (
+            f"objective parameters missing from optimizer: "
+            f"{len(missing_obj)} params")
+        ema_param_ids = {id(p) for p in model.ema.parameters()}
+        leaked_ema = ema_param_ids & opt_param_ids
+        assert not leaked_ema, (
+            f"EMA target parameters are inside optimizer: "
+            f"{len(leaked_ema)} parameters")
         scheduler = _CosineWarmup(lr, lr_warmup, int(acfg["max_total_steps"]))
         start_g = global_step
 
         if resumed is not None and resumed["phase_idx"] == phase.idx:
             ckpt_obj = load_phase_checkpoint(args.resume, model, optimizer,
                                              scheduler, device)
+            # CODEX spec §12: a resume must restore the VICReg projector;
+            # a checkpoint missing objective state fails loudly rather than
+            # creating a fresh projector.
+            ckpt_objective = ckpt_obj.get("objective_name")
+            if ckpt_objective == objective.name:
+                if "objective_state" in ckpt_obj:
+                    objective.load_state_dict(ckpt_obj["objective_state"])
+                    print(f"  [adaptive] restored objective state "
+                          f"({objective.name}) from {args.resume}")
+                elif objective_params:
+                    raise RuntimeError(
+                        f"resume checkpoint {args.resume} for objective "
+                        f"{objective.name} is missing objective_state — "
+                        f"refusing to continue with a freshly-initialized "
+                        f"objective (spec: fail loudly)")
+            elif objective_params:
+                raise RuntimeError(
+                    f"resume checkpoint {args.resume} was saved for objective "
+                    f"{ckpt_objective!r} but the current phase is "
+                    f"{objective.name} — refusing a cross-objective resume "
+                    f"that would silently drop the projector state")
             # Bug #12: restore the FULL controller state (patience counters,
             # histories, transitions, phase bookkeeping), not just the tuple.
             controller.load_state_dict(ckpt_obj["adaptive_meta"]["controller_state"])
@@ -816,12 +895,13 @@ def train_adaptive(cfg, args, device, seed):
                         os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
                         model, optimizer if acfg.get("save_optimizer", True) else None,
                         cfg, controller, phase, global_step, {"cos_err_r0.5": float("nan")},
-                        {"status": "UNSTABLE"})
+                        {"status": "UNSTABLE"}, extra=_phase_ckpt_extra(objective))
                     decision = controller.on_unstable(global_step)
                     phase_done = True
                     break
                 total = total / accum
                 total.backward()
+                _assert_no_ema_gradients(model, objective_name, global_step)
                 mb += 1
                 log_loss.add(total.item() * accum)
                 val_loss.add(total.item() * accum)
@@ -862,7 +942,8 @@ def train_adaptive(cfg, args, device, seed):
                             out_dir, f"phase_{phase.idx:02d}_{objective_name}_best_healthy.pt")
                         save_phase_checkpoint(
                             phase.best_healthy_path, model, optimizer, cfg, controller,
-                            phase, global_step, metrics, health)
+                            phase, global_step, metrics, health,
+                            extra=_phase_ckpt_extra(objective))
                         print(f"    [best-healthy] saved {phase.best_healthy_path} "
                               f"(cos_err {phase.best_healthy_metric:.6g})")
                     d_repr = _normalized_repr_dist(health, refs, collapse_cfg)
@@ -894,7 +975,7 @@ def train_adaptive(cfg, args, device, seed):
                         save_phase_checkpoint(
                             best_path,
                             model, optimizer, cfg, controller, phase, global_step,
-                            metrics, health)
+                            metrics, health, extra=_phase_ckpt_extra(objective))
                         print(f"    [best] saved phase {phase.idx} best ckpt (cos_err "
                               f"{phase.best_metric:.6g})")
                     if d_repr < best_repr_d:
@@ -902,11 +983,12 @@ def train_adaptive(cfg, args, device, seed):
                         save_phase_checkpoint(
                             os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_best_repr.pt"),
                             model, optimizer, cfg, controller, phase, global_step,
-                            metrics, health)
+                            metrics, health, extra=_phase_ckpt_extra(objective))
                     save_phase_checkpoint(
                         os.path.join(out_dir, f"phase_{phase.idx:02d}_{objective_name}_latest.pt"),
                         model, optimizer if acfg.get("save_optimizer", True) else None,
-                        cfg, controller, phase, global_step, metrics, health)
+                        cfg, controller, phase, global_step, metrics, health,
+                        extra=_phase_ckpt_extra(objective))
                 global_step += 1   # Bug #10: one optimizer step == one global step
                 if decision is not None and decision["action"] in ("switch", "stop"):
                     phase_done = True
@@ -954,7 +1036,8 @@ def train_adaptive(cfg, args, device, seed):
             "mask_statistics": fixed_val.mask_statistics,
             "loss_components": {k: float(v / max(1, comp_counts.get(k, 1)))
                                 for k, v in comp_sums.items()},
-            "loss_components_config": _objective_kwargs(acfg, objective_name),
+            "loss_components_config": _objective_kwargs(
+                acfg, objective_name, cfg.get("vicreg", {})),
             "sigreg_info": phase_sigreg_info,
             "learning_rate_history": lr_history,
             "ema_momentum_history": ema_history,

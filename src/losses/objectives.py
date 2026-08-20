@@ -27,11 +27,14 @@ them up. The plain `jepa` rung has no regularizer and reports L_J only.
 """
 
 import torch
+from torch import nn
 
 from losses.barlow import barlow_twins_loss
 from losses.jepa_loss import jepa_loss
+from losses.objective_modules import VICRegProjector
 from losses.sigreg import sigreg_loss
-from losses.vicreg import vicreg_loss
+from losses.vicreg import (covariance_loss, invariance_loss, variance_loss,
+                           vicreg_branch_terms, vicreg_loss)
 
 
 def _mask_from_M(M):
@@ -43,6 +46,10 @@ class JEPAObjective:
 
     L_J = (1/|M|) * sum_{i in M} [1 - cos(P(z_hat_i), P(z_i^y))]
     P = projection head, z^y = EMA target (stop-gradient), masked positions only.
+
+    The corrected 256x384 architecture has NO model.proj (the refactor removed
+    the shared projection head); `proj` therefore falls back to None (raw-space
+    cosine, matching GoalConditionedJEPA.loss) when the model does not own one.
     """
 
     name = "jepa"
@@ -50,7 +57,8 @@ class JEPAObjective:
     def __call__(self, model, G, S, M):
         out = model(G, S, M)
         mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        L_J, _ = jepa_loss(out["z_hat"], out["z_y"], mask, proj=model.proj)
+        L_J, _ = jepa_loss(out["z_hat"], out["z_y"], mask,
+                           proj=getattr(model, "proj", None))
         return {"total_loss": L_J, "components": {"L_J": L_J}, "out": out}
 
     def on_optimizer_step(self, model, step):
@@ -180,6 +188,121 @@ class JEPAVICRegDualObjective:
                 "lambda_cov": self.lambda_cov,
             },
             "out": out,
+        }
+
+    def on_optimizer_step(self, model, step):
+        model.ema.update(model.geometry_encoder, step)
+
+
+class VICRegObjective(nn.Module):
+    """Faithful EMA-JEPA + VICReg-style regularization (candidate `jepa_vicreg`).
+
+    Canonical VICReg (Bardes et al. 2021) uses two trainable views through a
+    shared encoder/projector and combines invariance + variance + covariance on
+    the PROJECTED branch outputs. This project's topology is instead:
+
+        masked geometry -> context encoder -> predictor      -> z_hat
+        full geometry   -> EMA target encoder (FROZEN)       -> z_y
+
+    so the faithful adaptation is: z_hat and z_y both pass through the
+    objective-owned VICReg projector (the original implementation has a
+    dedicated projector), and
+
+        L_total = lambda_inv * L_inv + lambda_var * L_var + lambda_cov * L_cov
+
+    with
+
+        L_inv = MSE(p_hat, p_y)                                   (both branches)
+        L_var = 0.5 * (var_penalty(p_hat) + var_penalty(p_y))     (both branches)
+        L_cov = 0.5 * (cov_penalty(p_hat) + cov_penalty(p_y))     (both branches)
+
+    computed over MASKED geometry tokens — the deliberate token-level
+    adaptation (§6 of the CODEX spec; canonical VICReg is image-level). The
+    EMA target encoder stays frozen: its parameters receive no gradient and
+    are updated only through the EMA operation. The raw 384-D latent is NOT
+    the projector output; the projector defines the VICReg objective space
+    only, and raw-space health is reported separately.
+
+    Gradient boundary (tested): L_inv/L_var/L_cov each flow student ->
+    projector; the target branch reaches the objective-owned projector but
+    never the frozen EMA encoder.
+    """
+
+    name = "jepa_vicreg"
+
+    def __init__(self, lambda_inv=25.0, lambda_var=25.0, lambda_cov=1.0,
+                 gamma=1.0, eps=1e-4,
+                 projector_input_dim=384, projector_hidden_dim=384,
+                 projector_output_dim=384):
+        super().__init__()
+        self.projector = VICRegProjector(
+            input_dim=projector_input_dim,
+            hidden_dim=projector_hidden_dim,
+            output_dim=projector_output_dim,
+        )
+        self.lambda_inv = lambda_inv
+        self.lambda_var = lambda_var
+        self.lambda_cov = lambda_cov
+        self.gamma = gamma
+        self.eps = eps
+
+    def forward(self, model, G, S, M):
+        out = model(G, S, M)
+        mask = out["mask"] if "mask" in out else _mask_from_M(M)
+        z_hat, z_y = out["z_hat"], out["z_y"]
+
+        # Projector applied once per branch; masked tokens and geometry-level
+        # pooled vectors are derived from the SAME projected outputs (never
+        # re-running the projector, which would double-update BN statistics).
+        p_hat_full = self.projector(z_hat)                 # (B, 256, D)
+        p_y_full = self.projector(z_y)                     # (B, 256, D)
+        p_hat = p_hat_full[mask]                           # (N, D) masked tokens
+        p_y = p_y_full[mask]                               # (N, D) masked tokens
+
+        # Token-level statistics are the loss (deliberate adaptation, §6).
+        L_inv, L_var, L_cov = vicreg_branch_terms(
+            p_hat, p_y, gamma=self.gamma, eps=self.eps)
+
+        L_inv_w = self.lambda_inv * L_inv
+        L_var_w = self.lambda_var * L_var
+        L_cov_w = self.lambda_cov * L_cov
+        total = L_inv_w + L_var_w + L_cov_w
+
+        # Geometry-level health (§6: "Never rely only on token-level
+        # statistics"): masked tokens mean-pooled per geometry -> (B, D),
+        # then the same cross-geometry statistics. Reported as components,
+        # not added to the loss.
+        mw = mask.float()
+        p_hat_g = (p_hat_full * mw.unsqueeze(-1)).sum(1) \
+            / mw.sum(1, keepdim=True).clamp(min=1)        # (B, D)
+        p_y_g = (p_y_full * mw.unsqueeze(-1)).sum(1) \
+            / mw.sum(1, keepdim=True).clamp(min=1)        # (B, D)
+        geo_inv, geo_var, geo_cov = vicreg_branch_terms(
+            p_hat_g, p_y_g, gamma=self.gamma, eps=self.eps)
+
+        inv_ratio = L_inv_w / total.clamp_min(1e-8)
+        var_ratio = L_var_w / total.clamp_min(1e-8)
+        cov_ratio = L_cov_w / total.clamp_min(1e-8)
+
+        return {
+            "total_loss": total,
+            "components": {
+                "L_inv": L_inv, "L_var": L_var, "L_cov": L_cov,
+                "L_inv_weighted": L_inv_w,
+                "L_var_weighted": L_var_w,
+                "L_cov_weighted": L_cov_w,
+                "inv_ratio": inv_ratio,
+                "var_ratio": var_ratio,
+                "cov_ratio": cov_ratio,
+                "lambda_inv": self.lambda_inv,
+                "lambda_var": self.lambda_var,
+                "lambda_cov": self.lambda_cov,
+                # geometry-level (pooled) health statistics
+                "geo_inv": geo_inv, "geo_var": geo_var, "geo_cov": geo_cov,
+            },
+            "out": out,
+            "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
+            "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full},
         }
 
     def on_optimizer_step(self, model, step):
@@ -332,7 +455,12 @@ class JEPAVarianceObjective:
 OBJECTIVES = {
     "jepa": JEPAObjective,
     "jepa_var": JEPAVarianceObjective,
-    "jepa_vicreg": JEPAVICRegObjective,
+    # jepa_vicreg is the FAITHFUL EMA-JEPA + VICReg-style objective
+    # (VICRegObjective: objective-owned projector, invariance+variance+
+    # covariance on both projected branches). The historical single-branch
+    # JEPAVICRegObjective class remains importable for the regression tests
+    # that compare against it, but is no longer a ladder rung.
+    "jepa_vicreg": VICRegObjective,
     "jepa_vicreg2": JEPAVICRegDualObjective,
     "jepa_barlow": JEPABarlowObjective,
     "lejepa": LeJEPAObjective,

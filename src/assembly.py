@@ -25,11 +25,11 @@ import torch
 from torch import nn
 
 from data.mask import apply_mask_to_pixels
-from encoders.context_encoder import ContextEncoder, PerceiverBottleneck
+from encoders.context_encoder import ContextEncoder
 from encoders.geometry_encoder import GeometryEncoder
 from encoders.spectrum_encoder import ReleasedSpectrumEncoder, SpectrumPath
 from encoders.target_encoder import EMAEncoder
-from losses.jepa_loss import ProjectionMLP, jepa_loss
+from losses.jepa_loss import jepa_loss
 from predictor.gclct import GCLCT
 
 PIXEL_GRID = 16  # 64 / patch_size 4
@@ -49,17 +49,69 @@ class _JEPAForwardMixin:
 
     def _encode(self, G, S, M, goal_mode, need_attn):
         G_c = apply_mask_to_pixels(G, M)
-        z_x = self.context_encoder(G_c, M)                 # (B, 256, 384)
-        z_xb = self.perceiver(z_x)                          # (B, 64, 384)
-        c_physics, a_goal = self.spectrum_path(S, goal_mode=goal_mode)
-        mask = (M.view(M.shape[0], -1) == 0)                # (B, 256) bool, 1 = masked
-        mask_token = self.context_encoder.mask_token        # (1, 1, 384)
-        pos = self.context_encoder.geo.pos_embed            # (1, 256, 384)
-        queries = torch.where(mask.unsqueeze(-1), mask_token + pos, z_x)
-        kv = torch.cat([z_xb, a_goal], dim=1)               # (B, 80, 384)
-        delta, weights = self.predictor(queries, kv, c_physics, need_weights=need_attn)
-        base = torch.where(mask.unsqueeze(-1), mask_token, z_x)
-        return base, delta, z_x, mask, weights
+
+        # Full-resolution context representation.
+        z_x = self.context_encoder(G_c, M)
+
+        assert z_x.ndim == 3, (
+            f"Context encoder output must be [B,256,384], got {tuple(z_x.shape)}"
+        )
+        assert z_x.shape[1] == 256, (
+            f"Context encoder must preserve 256 tokens, got {z_x.shape[1]}"
+        )
+        assert z_x.shape[2] == 384, (
+            f"Context encoder embedding dim must be 384, got {z_x.shape[2]}"
+        )
+
+        c_physics, a_goal = self.spectrum_path(
+            S,
+            goal_mode=goal_mode,
+        )
+
+        mask = (M.view(M.shape[0], -1) == 0)
+
+        assert mask.shape[1] == 256, (
+            f"Mask must have 256 token positions, got {tuple(mask.shape)}"
+        )
+        assert mask.any(dim=1).all(), (
+            "Every sample must contain at least one masked token"
+        )
+
+        mask_token = self.context_encoder.mask_token
+        pos = self.context_encoder.geo.pos_embed
+
+        queries = torch.where(
+            mask.unsqueeze(-1),
+            mask_token + pos,
+            z_x,
+        )
+
+        # KEEP ALL 256 geometry tokens.
+        kv = torch.cat([z_x, a_goal], dim=1)
+
+        z_hat, weights = self.predictor(
+            queries,
+            kv,
+            c_physics,
+            need_weights=need_attn,
+        )
+
+        assert z_hat.ndim == 3, (
+            f"Predictor output must be [B,256,384], got {tuple(z_hat.shape)}"
+        )
+        assert z_hat.shape[1] == 256, (
+            f"Predictor must output 256 tokens, got {z_hat.shape[1]}"
+        )
+        assert z_hat.shape[2] == 384, (
+            f"Predictor output dim must be 384, got {z_hat.shape[2]}"
+        )
+
+        assert z_x.shape == z_hat.shape, (
+            f"Context/prediction mismatch: "
+            f"z_x={tuple(z_x.shape)}, z_hat={tuple(z_hat.shape)}"
+        )
+
+        return z_hat, z_x, mask, weights
 
     def query_predictions(self, G, S, M, goal_mode="real"):
         base, delta, *_ = self._encode(G, S, M, goal_mode, need_attn=False)
@@ -67,28 +119,60 @@ class _JEPAForwardMixin:
 
 
 class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
-    def __init__(self, hidden=384, num_heads=6, geo_depth=6, predictor_depth=8,
+    def __init__(self, hidden=384, num_heads=6, geo_depth=6, predictor_depth=6,
                  bottleneck_tokens=64, goal_tokens=16, num_predictor_heads=6,
                  momentum_start=0.996, momentum_end=0.999):
         super().__init__()
         self.hidden = hidden
         geo = GeometryEncoder(hidden=hidden, num_heads=num_heads, depth=geo_depth)
         self.context_encoder = ContextEncoder(geo, hidden=hidden)
-        self.perceiver = PerceiverBottleneck(bottleneck_tokens, hidden, num_heads)
         self.spectrum_path = SpectrumPath(None, hidden=hidden, goal_tokens=goal_tokens)
         self.predictor = GCLCT(depth=predictor_depth, hidden=hidden,
                                num_heads=num_predictor_heads, head_type="latent")
-        self.proj = ProjectionMLP(hidden)
-        self.ema = EMAEncoder(geo, momentum_start=momentum_start,
-                              momentum_end=momentum_end)
-        self.geometry_encoder = geo  # for the training script (EMA source)
+        self.ema = EMAEncoder(
+            geo,
+            momentum_start=momentum_start,
+            momentum_end=momentum_end
+        )
+        for name, param in self.ema.named_parameters():
+            assert not param.requires_grad, (
+                f"EMA target parameter is trainable: {name}"
+            )
 
-    def forward(self, G, S, M, goal_mode="real", need_attn=False, with_target=True):
-        """Returns dict: z_hat (B,256,384), mask (B,256) bool, target z_y (B,256,384)."""
-        base, delta, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
-        out = dict(z_hat=base + delta, mask=mask, attn_weights=weights)
+        self.geometry_encoder = geo
+
+    def forward(self, G, S, M, goal_mode="real", need_attn=False, with_target=True,):
+        z_hat, z_x, mask, weights = self._encode(
+            G, S, M, goal_mode, need_attn
+        )
+
+        out = dict(
+            z_hat=z_hat,
+            z_x=z_x,
+            mask=mask,
+            attn_weights=weights,
+        )
+
         if with_target:
-            out["z_y"] = self.ema(G)
+            z_y = self.ema(G)
+
+            assert z_y.ndim == 3, (
+                f"EMA target output must be [B,256,384], got {tuple(z_y.shape)}"
+            )
+            assert z_y.shape[1] == 256, (
+                f"EMA target must output 256 tokens, got {z_y.shape[1]}"
+            )
+            assert z_y.shape[2] == 384, (
+                f"EMA target dim must be 384, got {z_y.shape[2]}"
+            )
+
+            assert z_y.shape == z_hat.shape, (
+                f"Target/prediction mismatch: "
+                f"z_y={tuple(z_y.shape)}, z_hat={tuple(z_hat.shape)}"
+            )
+
+            out["z_y"] = z_y
+
         return out
 
     def loss(self, G, S, M, goal_mode="real"):

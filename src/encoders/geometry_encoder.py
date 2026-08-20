@@ -56,36 +56,94 @@ class Attention(nn.Module):
 
 
 class CrossAttention(nn.Module):
-    """q from x, kv from context; optional attention-weight return for diagnostics."""
+    """Standard cross-attention: Q from query tokens, K/V from context tokens."""
 
     def __init__(self, dim, num_heads, qkv_bias=True, qk_norm=True):
         super().__init__()
+
+        assert dim % num_heads == 0
+
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+
+        # Q comes ONLY from query tokens.
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+
+        # K and V come ONLY from context tokens.
+        self.k = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+
         self.q_norm = nn.LayerNorm(self.head_dim)
         self.k_norm = nn.LayerNorm(self.head_dim)
+
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x, kv, need_weights=False):
-        b, nq, _ = x.shape
-        nk = kv.shape[1]
-        qkv = self.qkv(torch.cat([x, kv], dim=1))  # (B, nq+nk, 3*dim)
-        q_all, k_all, v_all = torch.chunk(qkv, 3, dim=-1)
-        q, k, v = q_all[:, :nq], k_all[:, nq:], v_all[:, nq:]
-        q = q.reshape(b, nq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        k = k.reshape(b, nk, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = v.reshape(b, nk, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        q, k = self.q_norm(q), self.k_norm(k)
+        """
+        x  : [B, Nq, D]   query tokens
+        kv : [B, Nk, D]   context tokens
+
+        returns:
+            out     : [B, Nq, D]
+            weights : [B, H, Nq, Nk] if requested, else None
+        """
+        B, Nq, D = x.shape
+        Nk = kv.shape[1]
+
+        # --------------------------------------------------
+        # Separate Q / K / V projections
+        # --------------------------------------------------
+        q = self.q(x)       # [B, Nq, D]
+        k = self.k(kv)      # [B, Nk, D]
+        v = self.v(kv)      # [B, Nk, D]
+
+        # --------------------------------------------------
+        # Split heads
+        # --------------------------------------------------
+        q = q.reshape(
+            B, Nq, self.num_heads, self.head_dim
+        ).permute(0, 2, 1, 3)  # [B,H,Nq,d]
+
+        k = k.reshape(
+            B, Nk, self.num_heads, self.head_dim
+        ).permute(0, 2, 1, 3)  # [B,H,Nk,d]
+
+        v = v.reshape(
+            B, Nk, self.num_heads, self.head_dim
+        ).permute(0, 2, 1, 3)  # [B,H,Nk,d]
+
+        # --------------------------------------------------
+        # Q/K normalization
+        # --------------------------------------------------
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        # --------------------------------------------------
+        # Attention
+        # --------------------------------------------------
         if need_weights:
-            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            w = torch.softmax(att, dim=-1)                          # (B, H, nq, nk)
-            out = w @ v
+            scores = (
+                q @ k.transpose(-2, -1)
+            ) / math.sqrt(self.head_dim)
+
+            weights = torch.softmax(scores, dim=-1)
+            out = weights @ v
         else:
-            w = None
-            out = F.scaled_dot_product_attention(q, k, v)
-        out = self.proj(out.transpose(1, 2).reshape(b, nq, self.head_dim * self.num_heads))
-        return out, w
+            weights = None
+            out = F.scaled_dot_product_attention(
+                q, k, v
+            )
+
+        # --------------------------------------------------
+        # Merge heads
+        # --------------------------------------------------
+        out = out.permute(0, 2, 1, 3).reshape(
+            B, Nq, D
+        )
+
+        out = self.proj(out)
+
+        return out, weights
 
 
 class TransformerBlock(nn.Module):

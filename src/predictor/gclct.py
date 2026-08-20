@@ -24,35 +24,35 @@ from encoders.geometry_encoder import CrossAttention, Attention
 class GCLCTBlock(nn.Module):
     def __init__(self, hidden=384, num_heads=6, mlp_ratio=4.0):
         super().__init__()
-        self.hidden = hidden
-        self.norm1 = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
-        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(hidden, 6 * hidden, bias=True))
+
+        self.norm1 = nn.LayerNorm(hidden, eps=1e-6)
         self.self_attn = Attention(hidden, num_heads)
-        self.norm2 = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
+
+        self.norm2 = nn.LayerNorm(hidden, eps=1e-6)
         self.cross_attn = CrossAttention(hidden, num_heads)
-        self.norm3 = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
+
+        self.norm3 = nn.LayerNorm(hidden, eps=1e-6)
+
         hidden_mlp = int(hidden * mlp_ratio)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden, hidden_mlp), nn.GELU(approximate="tanh"),
-            nn.Linear(hidden_mlp, hidden))
-        nn.init.zeros_(self.adaLN[-1].weight)
-        nn.init.zeros_(self.adaLN[-1].bias)
+            nn.Linear(hidden, hidden_mlp),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(hidden_mlp, hidden),
+        )
 
-    def forward(self, x, kv, c, need_weights=False):
-        """x: queries (B, 256, 384); kv: (B, 80, 384); c: (B, 384). Returns (x, attn_w)."""
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
-            self.adaLN(c).chunk(6, dim=1)
-        b, n, d = x.shape
-        x_n = self.norm1(x)
-        x_n = x_n * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)   # AdaLN-Zero
-        x = x + gate_msa.unsqueeze(1) * self.self_attn(x_n)
-        x_n = self.norm2(x)
-        x_n = x_n * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
-        cross_out, w = self.cross_attn(x_n, kv, need_weights=need_weights)
-        x = x + gate_mlp.unsqueeze(1) * cross_out
+    def forward(self, x, kv, c=None, need_weights=False):
+        x = x + self.self_attn(self.norm1(x))
+
+        cross_out, weights = self.cross_attn(
+            self.norm2(x),
+            kv,
+            need_weights=need_weights,
+        )
+        x = x + cross_out
+
         x = x + self.mlp(self.norm3(x))
-        return x, w
 
+        return x, weights
 
 class GCLCT(nn.Module):
     def __init__(self, depth=8, hidden=384, num_heads=6, head_type="latent"):

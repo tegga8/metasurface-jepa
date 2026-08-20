@@ -328,6 +328,23 @@ def main():
     opt_cfg = cfg["train"]
     optimizer = torch.optim.AdamW(trainable, lr=float(opt_cfg["lr"]),
                                   weight_decay=float(opt_cfg["wd"]), betas=(0.9, 0.999))
+    ema_param_ids = {
+        id(p)
+        for p in model.ema.parameters()
+    }
+
+    optimizer_param_ids = {
+        id(p)
+        for group in optimizer.param_groups
+        for p in group["params"]
+    }
+
+    leaked_ema_params = ema_param_ids & optimizer_param_ids
+
+    assert not leaked_ema_params, (
+        f"EMA target parameters are inside optimizer: "
+        f"{len(leaked_ema_params)} parameters"
+    )        
     scheduler = CosineWarmup(float(opt_cfg["lr"]), int(opt_cfg["warmup_steps"]),
                              total_steps)
 

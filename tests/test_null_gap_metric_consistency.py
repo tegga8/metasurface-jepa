@@ -105,7 +105,7 @@ class _FakeModel:
         z_hat = G.view(B, 256, 3, 16).mean(dim=-1)       # (B, 256, 3)
         z_hat = z_hat * (0.5 if goal_mode == "null" else 1.0)
         z_y = G.view(B, 256, 3, 16).mean(dim=-1) * 0.9 + 0.1
-        return {"z_hat": z_hat, "z_y": z_y, "mask": mask}
+        return {"z_hat": z_hat, "z_y_raw": z_y, "mask": mask}
 
 
 def _fixed_val_and_model():

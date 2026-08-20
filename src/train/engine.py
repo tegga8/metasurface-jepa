@@ -188,7 +188,7 @@ class FixedValidation:
             for (G, S), M in zip(self.batches, self.masks):
                 out = model(G, S, M, goal_mode=goal_mode, need_attn=False)
                 mask = out["mask"]
-                z_hat, z_y = out["z_hat"], out["z_y"]
+                z_hat, z_y = out["z_hat"], out["z_y_raw"]
                 ph_ = self._project(objective, z_hat)
                 pt_ = self._project(objective, z_y)
                 d = (1.0 - torch.nn.functional.cosine_similarity(
@@ -251,7 +251,7 @@ class FixedValidation:
                 o2 = model(G, S, M, goal_mode="null")
                 p1 = self._project(objective, o1["z_hat"])
                 p2 = self._project(objective, o2["z_hat"])
-                pt = self._project(objective, o1["z_y"])
+                pt = self._project(objective, o1["z_y_raw"])
                 d1 = (1.0 - torch.nn.functional.cosine_similarity(
                     torch.nn.functional.normalize(p1, dim=-1),
                     torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)

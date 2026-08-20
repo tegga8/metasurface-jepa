@@ -67,7 +67,7 @@ class _LeJEPAStubModel(nn.Module):
         mask = (M.view(B, -1) == 0)
         out = {"z_hat": self.z_hat, "mask": mask}
         if with_target:
-            out["z_y"] = self.geometry_encoder(G)
+            out["z_y_raw"] = self.geometry_encoder(G)
         self.forward_kwargs.append(dict(with_target=with_target,
                                         goal_mode=goal_mode, need_attn=need_attn))
         return out
@@ -122,7 +122,7 @@ def test_lejepa_student_encoder_supplies_z_y(lejepa_model, tiny_batch):
                                                 need_attn=False)], (
         "LeJEPA forward must skip the EMA target path")
     expected_z_y = lejepa_model.geometry_encoder(G)
-    assert torch.allclose(result["out"]["z_y"], expected_z_y), (
+    assert torch.allclose(result["out"]["z_y_raw"], expected_z_y), (
         "objective's z_y must be the student geometry encoder's output")
     assert lejepa_model.ema.calls == [], (
         "no EMA update may occur anywhere in the LeJEPA forward path")

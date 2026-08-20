@@ -70,6 +70,23 @@ def _same_visible_diff_masked(G, M, seed=7):
     return G + delta
 
 
+def _fill_masked_with_ones(G, M):
+    """Masked pixels set to exactly 1.0 (hardening §13: sufficiently different
+    values, not a tiny perturbation)."""
+    up = M.repeat_interleave(PATCH, dim=1).repeat_interleave(PATCH, dim=2).unsqueeze(1)
+    return torch.where(up == 0.0, torch.ones_like(G), G)
+
+
+def _fill_masked_with_valid_looking(G, M, seed=9):
+    """Masked pixels set to valid-looking channel values: channel 0 = r_atom/5 in
+    [0, 1], channel 1 = h_atom in [0, 1], channel 2 = l_lattice/3 in [0, 1]
+    (uniform draws) — hardening §13."""
+    torch.manual_seed(seed)
+    up = M.repeat_interleave(PATCH, dim=1).repeat_interleave(PATCH, dim=2).unsqueeze(1)
+    fill = torch.rand_like(G)
+    return torch.where(up == 0.0, fill, G)
+
+
 def _unique_patch_geometry():
     """Each 4x4 patch holds a unique constant v[r,c] = r*16+c+1 in channel 0."""
     v = torch.arange(1, GRID * GRID + 1, dtype=torch.float32).reshape(GRID, GRID)
@@ -90,14 +107,24 @@ def test_m1_masked_value_invariance(enc):
     M = _mask_single_cell(3, 5)
     G2 = _same_visible_diff_masked(G, M, seed=11)
     G3 = _same_visible_diff_masked(G, M, seed=42)   # yet another masked content
+    G4 = _fill_masked_with_ones(G, M)               # hardening §13: ones fill
+    G5 = _fill_masked_with_valid_looking(G, M)      # hardening §13: valid-looking
+                                                    # channel values (r_atom/5,
+                                                    # h_atom, l_lattice/3 ranges)
 
     z1 = enc(G, M)
     z2 = enc(G2, M)
     z3 = enc(G3, M)
+    z4 = enc(G4, M)
+    z5 = enc(G5, M)
     assert torch.allclose(z1, z2, atol=1e-6), \
         "context encoder output must not depend on masked content (M1)"
     assert torch.allclose(z1, z3, atol=1e-6), \
         "context encoder output must not depend on masked content (M1)"
+    assert torch.allclose(z1, z4, atol=1e-6), \
+        "M1: ones-filled masked pixels must not change z_x"
+    assert torch.allclose(z1, z5, atol=1e-6), \
+        "M1: valid-looking masked pixel values must not change z_x"
 
 
 # --------------------------------------------------------------------------

@@ -246,7 +246,7 @@ def validate_checkpoint(cfg, args):
 
             mask = out["mask"]
             mw = mask.float()
-            zy, zh = out["z_y"], out["z_hat"]
+zy, zh = out["z_y_raw"], out["z_hat"]
             p_zy, p_zh = P(zy), P(zh)
 
             def pool(x):
@@ -268,8 +268,8 @@ def validate_checkpoint(cfg, args):
                 torch.cat([pool(p_zy), pool(p_zh)], 0).cpu())
 
             # physics controls (raw and projected)
-            p_n_zy = P(out_n["z_y"])
-            p_s_zy = P(out_s["z_y"])
+            p_n_zy = P(out_n["z_y_raw"])
+            p_s_zy = P(out_s["z_y_raw"])
             phys["real_raw"].append(cosine_err(zh, zy, mask))
             phys["null_raw"].append(cosine_err(out_n["z_hat"], zy, mask))
             phys["shuf_raw"].append(cosine_err(out_s["z_hat"], zy, mask))
@@ -638,7 +638,7 @@ def _audit_row(step, model, objective, G, S, M, comps, params, args):
     mask = (M.view(G.shape[0], -1) == 0)
     with torch.no_grad():
         out = model(G, S, M)
-        zy, zh = out["z_y"], out["z_hat"]
+        zy, zh = out["z_y_raw"], out["z_hat"]
         p_zy, p_zh = P(zy), P(zh)
         mw = mask.float()
         zh_pool = (zh * mw.unsqueeze(-1)).sum(1) \

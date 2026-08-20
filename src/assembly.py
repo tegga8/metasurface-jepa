@@ -140,9 +140,40 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
 
         self.geometry_encoder = geo
 
+    def enforce_frozen_reference_modes(self):
+        """Keep frozen reference modules in eval() regardless of the student's mode.
+
+        `model.train()` recursively flips children to training mode, but the EMA
+        target and the released spectrum encoder are parameter-frozen reference
+        components that must behave deterministically at inference. Called from
+        `train()` and `forward()` so every mode switch / checkpoint load / resume
+        path is covered. The released encoder may be absent in unit-test stubs.
+        """
+        self.ema.target.eval()
+        released = getattr(self.spectrum_path, "released", None)
+        if released is not None:
+            released.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.enforce_frozen_reference_modes()
+        return self
+
     def forward(self, G, S, M, goal_mode="real", need_attn=False, with_target=True,):
+        self.enforce_frozen_reference_modes()
         z_hat, z_x, mask, weights, c_physics, a_goal = self._encode(
             G, S, M, goal_mode, need_attn
+        )
+
+        b = G.shape[0]
+        assert c_physics.shape == (b, 384), (
+            f"c_physics must be [B,384], got {tuple(c_physics.shape)}"
+        )
+        assert a_goal.shape == (b, 16, 384), (
+            f"a_goal must be [B,16,384], got {tuple(a_goal.shape)}"
+        )
+        assert mask.shape == (b, 256), (
+            f"mask must be [B,256], got {tuple(mask.shape)}"
         )
 
         out = dict(
@@ -175,15 +206,17 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
             # Spec §10: expose the raw target AND an explicit feature-wise
             # normalization boundary (F.layer_norm over the 384-D feature axis,
             # per-sample per-token — no learnable weights, never overwrites raw).
-            out["z_y"] = z_y_raw            # backward-compatible raw alias
+            # `z_y` is kept ONLY as a backward-compatible raw alias; active code
+            # must consume `z_y_raw` / `z_y_normalized` explicitly (hardening §2).
             out["z_y_raw"] = z_y_raw
             out["z_y_normalized"] = F.layer_norm(z_y_raw, (z_y_raw.shape[-1],))
+            out["z_y"] = z_y_raw            # compat alias — do NOT consume
 
         return out
 
     def loss(self, G, S, M, goal_mode="real"):
         out = self.forward(G, S, M, goal_mode=goal_mode)
-        L, per_sample = jepa_loss(out["z_hat"], out["z_y"], out["mask"], proj=None)
+        L, per_sample = jepa_loss(out["z_hat"], out["z_y_raw"], out["mask"], proj=None)
         return L, out
 
 

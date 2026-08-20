@@ -100,7 +100,7 @@ class VICRegObjective(nn.Module):
     def forward(self, model, G, S, M):
         out = model(G, S, M)
         mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        z_hat, z_y = out["z_hat"], out["z_y"]
+        z_hat, z_y = out["z_hat"], out["z_y_raw"]
 
         # Projector applied once per branch; masked tokens and geometry-level
         # pooled vectors are derived from the SAME projected outputs (never
@@ -202,7 +202,7 @@ class BarlowObjective(nn.Module):
     def forward(self, model, G, S, M):
         out = model(G, S, M)
         mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        z_hat, z_y = out["z_hat"], out["z_y"]
+        z_hat, z_y = out["z_hat"], out["z_y_raw"]
 
         p_hat_full = self.projector(z_hat)                 # (B, 256, D)
         p_y_full = self.projector(z_y)                     # (B, 256, D)
@@ -307,7 +307,7 @@ class LeJEPAObjective(nn.Module):
                                "sigreg_ratio": sigreg_ratio,
                                "lambda_sigreg": self.lambda_sigreg,
                                "sigreg_info": {"pred": info_p, "target": info_t}},
-                "out": {"z_hat": z_hat, "z_y": z_y, "mask": mask},
+                "out": {"z_hat": z_hat, "z_y_raw": z_y, "mask": mask},
                 "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
                 "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full}}
 

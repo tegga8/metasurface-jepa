@@ -43,7 +43,7 @@ class _FrozenEmaModel(nn.Module):
         mask = (M.view(B, -1) == 0)
         T, H = self.z_hat.shape[1], self.z_hat.shape[2]
         z_y = self.target(G.flatten(1)).view(B, T, H)
-        return {"z_hat": self.z_hat, "z_y": z_y, "mask": mask}
+        return {"z_hat": self.z_hat, "z_y_raw": z_y, "mask": mask}
 
 
 @pytest.fixture

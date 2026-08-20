@@ -47,7 +47,7 @@ class FakeModel:
         self.calls.append({"goal_mode": goal_mode, "need_attn": need_attn})
         B = G.shape[0]
         mask = (M.view(B, -1) == 0)                      # (B, 256) bool, 1 = masked
-        return {"z_hat": torch.randn(B, 256, 3), "z_y": torch.randn(B, 256, 3),
+        return {"z_hat": torch.randn(B, 256, 3), "z_y_raw": torch.randn(B, 256, 3),
                 "mask": mask}
 
 

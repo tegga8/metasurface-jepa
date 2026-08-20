@@ -472,6 +472,353 @@ def test_a20_target_normalized_available(model):
     assert not torch.allclose(raw, out["z_y_normalized"], atol=1e-3)
 
 
+# --------------------------------------------------------------------------
+# Hardening §2 — active objective code must never consume the ambiguous alias
+# --------------------------------------------------------------------------
+
+def test_h1_active_code_never_consumes_z_y_alias():
+    """`out["z_y"]` is a compat alias only. The sole allowed occurrence in src/ is
+    the alias-creation line in assembly.py; anything consuming it in active code
+    (losses, train, eval) fails the architecture."""
+
+    import re
+
+    src_dirs = [
+        os.path.join(REPO_ROOT, "src", "losses"),
+        os.path.join(REPO_ROOT, "src", "train"),
+        os.path.join(REPO_ROOT, "src", "predictor"),
+        os.path.join(REPO_ROOT, "src", "encoders"),
+        os.path.join(REPO_ROOT, "src", "decoders"),
+        os.path.join(REPO_ROOT, "src", "surrogate"),
+        os.path.join(REPO_ROOT, "src", "data"),
+        os.path.join(REPO_ROOT, "scripts", "train"),
+        os.path.join(REPO_ROOT, "scripts", "eval"),
+        os.path.join(REPO_ROOT, "scripts", "diagnostics"),
+    ]
+    allowed = re.compile(r'out\["z_y"\] = z_y_raw\s+# compat alias')
+    offenders = []
+    for d in src_dirs:
+        for root, _, files in os.walk(d):
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                path = os.path.join(root, f)
+                with open(path, encoding="utf-8") as fh:
+                    for ln, line in enumerate(fh, 1):
+                        if '["z_y"]' in line and not allowed.search(line):
+                            offenders.append(f"{path}:{ln}: {line.strip()}")
+    assert not offenders, (
+        "active code consumes the ambiguous z_y alias — use z_y_raw / "
+        "z_y_normalized explicitly:\n" + "\n".join(offenders))
+
+
+# --------------------------------------------------------------------------
+# Hardening §5 — frozen-reference mode tests (R1–R4)
+# --------------------------------------------------------------------------
+
+def test_r1_ema_target_stays_eval_after_train(model):
+    model.train()
+    assert not model.ema.target.training, (
+        "EMA target must remain in eval mode after model.train()")
+
+
+def test_r2_released_stays_eval_after_train(model):
+    model.train()
+    released = getattr(model.spectrum_path, "released", None)
+    assert released is not None, "test requires the released module to exist"
+    assert not released.training, (
+        "released spectrum encoder must remain in eval mode after model.train()")
+
+
+def test_r3_released_params_frozen(model):
+    released = getattr(model.spectrum_path, "released", None)
+    assert released is not None, "test requires the released module to exist"
+    for name, p in released.named_parameters():
+        assert not p.requires_grad, (
+            f"released spectrum encoder parameter is trainable: {name}")
+
+
+def test_r4_frozen_modes_survive_checkpoint_and_mode_switches(model):
+    state = {k: v.clone() for k, v in model.state_dict().items()}
+    model.load_state_dict(state)          # checkpoint restore
+    model.train()
+    model.eval()
+    model.train()
+    assert not model.ema.target.training
+    released = getattr(model.spectrum_path, "released", None)
+    if released is not None:
+        assert not released.training
+    # eval() must also preserve the frozen-reference guarantee
+    model.eval()
+    assert not model.ema.target.training
+
+
+def test_enforce_frozen_reference_modes_handles_missing_released():
+    """The method must not crash when the released encoder is absent (stub)."""
+    m = GoalConditionedJEPA(hidden=8, num_heads=2, geo_depth=1,
+                            predictor_depth=1, goal_tokens=4,
+                            num_predictor_heads=2)
+    assert getattr(m.spectrum_path, "released", None) is None
+    m.enforce_frozen_reference_modes()
+    m.train()
+    assert not m.ema.target.training
+
+
+# --------------------------------------------------------------------------
+# Hardening §6 — target EMA update order is deterministic
+# --------------------------------------------------------------------------
+
+def test_ema_update_order_deterministic(model):
+    """Order: loss -> backward -> clip -> optimizer.step() -> EMA.update -> zero_grad.
+    The optimizer step must never move the target; the target must equal
+    m*target + (1-m)*student after an explicit EMA.update."""
+    G, S, M = _batch(seed=7, n=2)
+    model.ema.set_total_steps(1000)
+
+    model.train()
+    opt = torch.optim.SGD(
+        [p for p in model.geometry_encoder.parameters() if p.requires_grad],
+        lr=0.1)
+    opt.zero_grad()
+
+    student_before = {k: v.detach().clone()
+                      for k, v in model.geometry_encoder.state_dict().items()}
+    target_before = {k: v.detach().clone()
+                     for k, v in model.ema.target.state_dict().items()}
+
+    L, _ = model.loss(G, S, M)
+    L.backward()
+    torch.nn.utils.clip_grad_norm_(
+        [p for p in model.geometry_encoder.parameters() if p.requires_grad], 1.0)
+    opt.step()
+
+    student_after = model.geometry_encoder.state_dict()
+    assert any(not torch.equal(student_before[k], student_after[k])
+               for k in student_before), "optimizer step must change the student"
+
+    target_after = model.ema.target.state_dict()
+    for k in target_before:
+        assert torch.equal(target_before[k], target_after[k]), (
+            f"target changed during optimizer step, before EMA.update: {k}")
+
+    step = 500
+    model.ema.update(model.geometry_encoder, step)
+    m = model.ema.current_momentum(step)
+    for name, p_t in model.ema.target.named_parameters():
+        p_s = student_after[name]
+        expected = m * target_before[name] + (1.0 - m) * p_s
+        assert torch.allclose(p_t.detach(), expected, atol=1e-6), (
+            f"EMA update must equal m*target + (1-m)*student for {name}")
+
+
+# --------------------------------------------------------------------------
+# Hardening §12/§7 — target normalized space (T1–T5)
+# --------------------------------------------------------------------------
+
+def test_t1_zy_normalized_shape(model):
+    G, S, M = _batch(seed=11, n=3)
+    out = model(G, S, M)
+    assert tuple(out["z_y_normalized"].shape) == (3, 256, 384)
+
+
+def test_t2_zy_normalized_per_token_std_approx_one(model):
+    G, S, M = _batch(seed=11, n=3)
+    out = model(G, S, M)
+    per_token_std = out["z_y_normalized"].std(dim=-1, unbiased=False)  # (B, 256)
+    assert torch.allclose(per_token_std, torch.ones_like(per_token_std),
+                          atol=1e-4), (
+        "each token's feature dimension must have std ~ 1 after normalization")
+
+
+def test_t3_zy_normalization_does_not_mutate_raw(model):
+    G, S, M = _batch(seed=11, n=3)
+    out = model(G, S, M)
+    assert torch.equal(out["z_y_raw"], out["z_y"]), "alias must track raw"
+    assert not torch.equal(out["z_y_raw"], out["z_y_normalized"]), (
+        "normalization must produce a distinct copy")
+
+
+def test_t4_zy_normalization_has_no_parameters(model):
+    keys = list(model.state_dict())
+    assert not any("normalize" in k or "z_y_norm" in k for k in keys), (
+        "target normalization must not add trainable parameters")
+
+
+def test_t5_zy_normalization_adds_no_state_to_ema(model):
+    before = dict(model.ema.target.state_dict())
+    model.state_dict()  # normalization is a pure function; nothing to register
+    after = dict(model.ema.target.state_dict())
+    assert set(before) == set(after)
+    for k in before:
+        assert torch.equal(before[k], after[k])
+
+
+# --------------------------------------------------------------------------
+# Hardening §14 — channel-validity masking (data-interface correctness)
+# --------------------------------------------------------------------------
+
+def test_14_masking_preserves_visible_values_and_channel_order():
+    torch.manual_seed(3)
+    n = 2
+    G = torch.randn(n, 3, 64, 64)
+    # channel 0 is binary by dataset semantics — use a valid-looking 0/1 fill
+    G[:, 0] = (G[:, 0] > 0).float()
+    M = BlockMasker(seed=3, placement="random").sample(G, ratio=0.5)
+    masked = apply_mask_to_pixels(G, M)
+    M_up = M.repeat_interleave(4, dim=1).repeat_interleave(4, dim=2)  # (B,64,64)
+
+    for c in range(3):
+        # visible pixels retain EXACT original values, per channel
+        assert torch.equal(masked[:, c][M_up == 1], G[:, c][M_up == 1]), (
+            f"channel {c}: visible pixels must keep exact original values")
+        # masked pixels become exactly zero, per channel
+        assert torch.equal(masked[:, c][M_up == 0],
+                           torch.zeros_like(masked[:, c][M_up == 0])), (
+            f"channel {c}: masked pixels must be exactly zero")
+    # channel order unchanged: mask[0] still governs the binary channel
+    assert torch.equal(masked[:, 0][M_up == 1], G[:, 0][M_up == 1])
+
+
+# --------------------------------------------------------------------------
+# Hardening §17 — full-model spatial alignment (patch -> token -> query -> loss)
+# --------------------------------------------------------------------------
+
+def test_17_full_model_spatial_alignment():
+    """A synthetic geometry whose 4x4 patches carry unique encoded identifiers must
+    keep token order i <-> patch i through context/target/query/loss-mask. Ordering
+    must survive transpose/reshape/mask.view."""
+    torch.manual_seed(5)
+    n = 2
+    # 64x64 pixels = 16x16 tokens at patch size 4. Each token patch carries a
+    # unique encoded identifier (i+1)/257 in channel 0 (valid binary-material
+    # values), so patch identity is recoverable from the encoder's output order.
+    G = torch.zeros(n, 3, 64, 64)
+    for r in range(16):
+        for c in range(16):
+            i = r * 16 + c
+            G[:, 0, r * 4:(r + 1) * 4, c * 4:(c + 1) * 4] = (i + 1) / 257.0
+
+    M = BlockMasker(seed=5, placement="random").sample(G, ratio=0.5)
+    model = build_model()
+    S = torch.randn(n, 2, 301)
+    out = model(G, S, M)   # S is a dummy spectrum; geometry is the probe
+    mask = out["mask"]
+    assert mask.shape == (n, 256)
+    # mask vector must be the token-index-aligned view of M (survives mask.view)
+    assert torch.equal(mask, (M.view(n, -1) == 0))
+
+    # token i must represent patch i: perturbing a VISIBLE patch changes token i
+    # most (flipping a MASKED patch must leave z_x unchanged — §13 invariance).
+    for b in range(n):
+        visible = [i for i in range(256) if not bool(mask[b, i])]  # mask=1 -> hidden
+        assert visible, "test requires at least one visible patch per sample"
+        i = visible[0]
+        Gr = int(i // 16), int(i % 16)
+        Gi = G.clone()
+        Gi[b, 0, Gr[0] * 4:(Gr[0] + 1) * 4, Gr[1] * 4:(Gr[1] + 1) * 4] = 1.0
+        out_i = model(Gi, S, M)
+        delta = (out_i["z_x"][b] - out["z_x"][b]).norm(dim=-1)   # (256,)
+        assert delta[i].item() > 1e-8, f"sample {b}: visible flip must change token {i}"
+        assert int(delta.argmax()) == i, (
+            f"sample {b}: patch {Gr} must map to token {i}, "
+            f"got argmax {int(delta.argmax())}")
+
+        # flipping a masked patch must not move the context token at all
+        masked_i = next(k for k in range(256) if bool(mask[b, k]))  # hidden
+        Mr = int(masked_i // 16), int(masked_i % 16)
+        Gm = G.clone()
+        Gm[b, 0, Mr[0] * 4:(Mr[0] + 1) * 4, Mr[1] * 4:(Mr[1] + 1) * 4] = 1.0
+        out_m = model(Gm, S, M)
+        assert torch.equal(out_m["z_x"][b], out["z_x"][b]), (
+            f"sample {b}: masked-patch content must not reach the context "
+            "representation")
+
+        # loss mask alignment: masked query positions use mask_token+pos, so the
+        # predictor input at a masked index must differ from the context token.
+        k = masked_i
+        q_masked = out["z_hat"][b, k] - out["z_x"][b, k]
+        assert q_masked.norm().item() > 1e-6, (
+            f"sample {b}: masked query must not equal the context token at "
+            f"index {k}")
+
+
+# --------------------------------------------------------------------------
+# Hardening §20 — frozen reference modules excluded from the optimizer
+# --------------------------------------------------------------------------
+
+def test_20_released_and_ema_excluded_from_optimizer(model):
+    opt = torch.optim.SGD(
+        [p for p in model.geometry_encoder.parameters() if p.requires_grad], lr=0.01)
+    opt_params = set(opt.param_groups[0]["params"])
+    assert len(opt_params) > 0
+    for p in model.ema.parameters():
+        assert p not in opt_params, "EMA target parameter found in optimizer"
+    released = getattr(model.spectrum_path, "released", None)
+    if released is not None:
+        for p in released.parameters():
+            assert p not in opt_params, \
+                "released spectrum encoder parameter found in optimizer"
+    for p in opt_params:
+        assert p.requires_grad, "optimizer must contain only trainable params"
+
+
+# --------------------------------------------------------------------------
+# Hardening §21 — the shared architecture must not know objectives
+# --------------------------------------------------------------------------
+
+def test_21_architecture_does_not_know_objectives():
+    forbidden = ("vicreg", "barlow", "lejepa", "sigreg", "objectives")
+    dirs = [os.path.join(REPO_ROOT, "src", "encoders"),
+            os.path.join(REPO_ROOT, "src", "predictor"),
+            os.path.join(REPO_ROOT, "src", "data")]
+    offenders = []
+    for d in dirs:
+        for root, _, files in os.walk(d):
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                path = os.path.join(root, f)
+                with open(path, encoding="utf-8") as fh:
+                    for ln, line in enumerate(fh, 1):
+                        low = line.lower()
+                        if any(tok in low for tok in forbidden):
+                            offenders.append(f"{path}:{ln}: {line.strip()}")
+    assert not offenders, (
+        "shared architecture must not reference objective machinery:\n"
+        + "\n".join(offenders))
+
+
+# --------------------------------------------------------------------------
+# Hardening §22 — no hidden objective projection inside the model
+# --------------------------------------------------------------------------
+
+def test_22_no_hidden_projection():
+    import re
+    # Only representation-space objective projectors are forbidden inside the
+    # model. Attention-internal output projections (CrossAttention.proj,
+    # SpectrumPath.proj, patch projection) are ordinary network layers and are
+    # explicitly allowed (§22).
+    forbidden = re.compile(r"ProjectionMLP|model\.proj")
+    dirs = [os.path.join(REPO_ROOT, "src", "assembly.py"),
+            os.path.join(REPO_ROOT, "src", "predictor"),
+            os.path.join(REPO_ROOT, "src", "encoders")]
+    offenders = []
+    for d in dirs:
+        if d.endswith(".py"):
+            files = [d]
+        else:
+            files = []
+            for root, _, fs in os.walk(d):
+                files += [os.path.join(root, f) for f in fs if f.endswith(".py")]
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                for ln, line in enumerate(fh, 1):
+                    if forbidden.search(line):
+                        offenders.append(f"{path}:{ln}: {line.strip()}")
+    assert not offenders, (
+        "hidden objective projection inside the model:\n" + "\n".join(offenders))
+
+
 if __name__ == "__main__":
     m = build_model()
     failures = 0

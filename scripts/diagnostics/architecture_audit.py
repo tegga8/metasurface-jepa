@@ -13,6 +13,14 @@ Run (full, cloud GPU per AGENTS.md compute environment):
         --report-every 25 --device cuda
     (uses data/metadit/weights/* — the released spec encoder + MetaDiT init)
 
+Real-data mode (hardening §9): load the ACTUAL configured validation split
+(data/metadit/split_data/val_set.mat) with the configured block-mask protocol and
+audit on real metasurface geometry/spectrum statistics — reported as
+"REAL DATA ARCHITECTURE AUDIT":
+    python scripts/diagnostics/architecture_audit.py \
+        --config configs/milestone_b.yaml --steps 200 --batch 8 \
+        --report-every 25 --device cuda --real-data
+
 Local CPU crash/smoke test (no released weights required, stub spectrum path):
     python scripts/diagnostics/architecture_audit.py --smoke --steps 3
 
@@ -47,8 +55,16 @@ import torch.nn.functional as F
 import yaml
 
 from assembly import build_model
+from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
 from diagnostics.representation_health import eff_ranks, goal_token_stats
+
+
+def _rank_denominator(b, d):
+    """Hardening §8: the SVD of a per-geometry POOLED representation has at most
+    min(batch, D) singular values. Every effective-rank fraction must be read
+    against this denominator — eff_rank_frac ≈ 1/batch does NOT mean collapse."""
+    return min(b, d)
 
 
 def set_seed(seed):
@@ -128,6 +144,10 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--smoke", action="store_true",
                     help="3-step CPU crash test with a stub spectrum path")
+    ap.add_argument("--real-data", action="store_true",
+                    help="hardening §9: audit on the actual configured validation "
+                         "split instead of synthetic randn (REAL DATA ARCHITECTURE "
+                         "AUDIT)")
     args = ap.parse_args()
 
     set_seed(args.seed)
@@ -150,6 +170,48 @@ def main():
         print(f"[architecture_audit] full mode: batch={batch} steps={steps} "
               f"device={device}")
 
+    # Hardening §9/§10: real-data mode loads the ACTUAL configured validation split
+    # (no invented split) and the configured mask protocol; synthetic randn mode is
+    # kept and explicitly named "synthetic" so it can never be reported as evidence
+    # of correct behavior on the metasurface distribution.
+    data_mode = "synthetic"
+    real_G = real_S = None
+    if args.real_data and not args.smoke:
+        val_path = os.path.join(REPO_ROOT, cfg["data"]["val_split"])
+        assert os.path.exists(val_path), f"missing validation split: {val_path}"
+        ds = MetaDiTDataset(val_path)
+        assert len(ds) >= batch, (
+            f"val split has {len(ds)} samples, need >= {batch}")
+        real_G, real_S = collate_batch([ds[i] for i in range(batch)])
+        data_mode = "real"
+        print("[architecture_audit] ===== REAL DATA ARCHITECTURE AUDIT =====")
+        print(f"[architecture_audit] val split: {val_path} "
+              f"({len(ds)} samples, fixed subset 0..{batch - 1})")
+        print("[architecture_audit] geometry stats  ch0(r_atom/5) mean={:.4f} "
+              "std={:.4f} occ_frac={:.4f}".format(
+                  real_G[:, 0].mean().item(), real_G[:, 0].std().item(),
+                  (real_G[:, 0] > 0).float().mean().item()))
+        for c, name in ((1, "ch1(h_atom)"), (2, "ch2(l_lattice/3)")):
+            print(f"[architecture_audit] geometry stats  {name} mean="
+                  f"{real_G[:, c].mean().item():.4f} "
+                  f"std={real_G[:, c].std().item():.4f}")
+        print(f"[architecture_audit] spectrum stats  mean="
+              f"{real_S.mean().item():.4f} std={real_S.std().item():.4f} "
+              f"abs_max={real_S.abs().max().item():.4f}")
+
+    mcfg = cfg.get("mask", {})
+    masker = BlockMasker(seed=args.seed,
+                         placement=mcfg.get("placement", "random"),
+                         min_side=mcfg.get("min_side", 3),
+                         k_range=mcfg.get("k_range", [1, 4]))
+    mask_protocol = {
+        "placement": masker.placement,
+        "min_side_tokens": masker.min_side,
+        "k_range": list(masker.k_range),
+        "token_grid": masker.grid,
+        "ratio": args.mask_ratio,
+    }
+
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
     geo_params = [p for p in model.geometry_encoder.parameters() if p.requires_grad]
@@ -158,7 +220,6 @@ def main():
     spec_params = [p for n, p in model.spectrum_path.named_parameters()
                    if not n.startswith("released")]
     opt = torch.optim.AdamW(trainable, lr=1e-4, weight_decay=0.05)
-    masker = BlockMasker(seed=args.seed, placement="random")
     model.ema.set_total_steps(steps)
 
     rows = []
@@ -174,9 +235,14 @@ def main():
     scale_parts = []
 
     for step in range(steps):
-        torch.manual_seed(args.seed * 1000 + step)
-        G = torch.randn(batch, 3, 64, 64)
-        S = torch.randn(batch, 2, 301)
+        if real_G is not None:
+            # Fixed validation subset (hardening §9/§23: reproducibility) — the
+            # same real geometry/spectrum pair every step, masked identically.
+            G, S = real_G.to(device), real_S.to(device)
+        else:
+            torch.manual_seed(args.seed * 1000 + step)
+            G = torch.randn(batch, 3, 64, 64)
+            S = torch.randn(batch, 2, 301)
         M = masker.sample(G, args.mask_ratio).to(device)
         G, S, M = G.to(device), S.to(device), M
 
@@ -212,6 +278,8 @@ def main():
         model.train()
 
         zh, zy = out_r["z_hat"], out_r["z_y_raw"]
+        zyn = out_r["z_y_normalized"]
+        zx = out_r["z_x"]
         mask = out_r["mask"].bool()
         zhn = F.normalize(zh, dim=-1)
         cond_real = (zh - out_n["z_hat"]).norm(dim=-1)[mask].mean().item()
@@ -222,17 +290,22 @@ def main():
 
         cp_cos = _pool_cos(cp.unsqueeze(1))
         gts = goal_token_stats(ag)
+        rden = _rank_denominator(batch, zh.shape[-1])   # hardening §8
+        mask_token_pos = (model.context_encoder.mask_token
+                          + model.context_encoder.geo.pos_embed)
         row = {
             "step": step,
             "L_J": L.item(),
             "mask_frac": 1.0 - M.mean().item(),
             "z_hat_eff_rank_frac": _eff_rank_frac_meanpooled(zh),
             "z_y_eff_rank_frac": _eff_rank_frac_meanpooled(zy),
+            "rank_denominator": rden,       # §8: pooled SVD has <= min(batch, D)
             "z_hat_cross_cos": _pool_cos(zh),
             "z_y_cross_cos": _pool_cos(zy),
             "z_hat_feature_std": zh.std().item(),
             "z_y_feature_std": zy.std().item(),
             "c_physics_eff_rank_frac": eff_ranks(cp)["eff_rank_frac"],
+            "c_physics_eff_rank_denominator": _rank_denominator(batch, cp.shape[-1]),
             "c_physics_cross_cos": cp_cos,
             "goal_token_cos": gts["goal_token_pairwise_cosine_mean"],
             "goal_token_eff_rank": gts["goal_token_effective_rank"],
@@ -246,10 +319,17 @@ def main():
         }
         rows.append(row)
         scale_parts.append({
-            "z_hat_std": zh.std().item(), "z_y_std": zy.std().item(),
-            "z_x_std": out_r["z_x"].std().item(),
+            # hardening §6/§11: full scale surface — query init, prediction,
+            # raw target, normalized target, context.
+            "z_hat_std": zh.std().item(),
+            "z_y_raw_std": zy.std().item(),
+            "z_y_normalized_std": zyn.std().item(),
+            "z_x_std": zx.std().item(),
+            "mask_token_plus_pos_std": mask_token_pos.std().item(),
             "z_hat_mean_norm": zh.norm(dim=-1).mean().item(),
-            "z_y_mean_norm": zy.norm(dim=-1).mean().item(),
+            "z_y_raw_mean_norm": zy.norm(dim=-1).mean().item(),
+            "z_y_normalized_mean_norm": zyn.norm(dim=-1).mean().item(),
+            "z_x_mean_norm": zx.norm(dim=-1).mean().item(),
         })
         print(json.dumps({k: (round(v, 6) if isinstance(v, float) else v)
                           for k, v in row.items()}))
@@ -262,9 +342,21 @@ def main():
     if max(last["cond_sensitivity_real_null"], last["cond_sensitivity_real_shuf"]) < 1e-6:
         flags["PHYSICS_PATH_FAILURE"] = True
     s = scale_parts[-1]
-    stds = [s["z_hat_std"], s["z_y_std"], s["z_x_std"]]
+    stds = [s["z_hat_std"], s["z_y_raw_std"], s["z_x_std"]]
     if max(stds) > 0 and max(stds) / max(min(stds), 1e-9) > 100.0:
         flags["SCALE_PATHOLOGY"] = True
+    # Hardening §6: gross mismatch between masked-query init, prediction, and
+    # target representation scales. The normalized boundary must actually sit at
+    # std ~ 1 (feature-wise LayerNorm guarantee).
+    if not (0.9 < s["z_y_normalized_std"] < 1.1):
+        flags["SCALE_PATHOLOGY"] = True
+        print("[architecture_audit] SCALE_PATHOLOGY: z_y_normalized std "
+              f"{s['z_y_normalized_std']:.4f} != ~1")
+    q = s["mask_token_plus_pos_std"]
+    if q > 0 and max(stds) / q > 100.0:
+        flags["SCALE_PATHOLOGY"] = True
+        print("[architecture_audit] SCALE_PATHOLOGY: query init scale "
+              f"{q:.4f} vs representations {max(stds):.4f} differ by >100x")
     # Observations (reported, do NOT gate): the EMA/context representation itself
     # collapsing is architecture-level; a low-rank PREDICTOR under raw L_J is the
     # known raw-JEPA regime that the objective mechanisms exist to prevent (§32,
@@ -275,18 +367,45 @@ def main():
             last["z_hat_eff_rank_frac"] < 0.25 * last["z_y_eff_rank_frac"]:
         obs["PREDICTOR_LATENT_LOW_RANK"] = True
 
+    # Hardening §16 — physics diagnosis, kept separate from the structural flags:
+    #   CASE 1: physics embedding itself collapsed
+    #   CASE 2: embedding diverse, predictor ignores it
+    #   CASE 3: embedding diverse, predictor responds strongly
+    # NOTE: zero-initialized FiLM makes cond sensitivity ~0 at step 0 BY DESIGN
+    # (§15); classification uses the LAST report row after the training steps.
+    phys_case = None
+    if last["c_physics_eff_rank_frac"] < 0.1 or \
+            last["goal_token_eff_rank"] < 0.1:
+        phys_case = "CASE_1_PHYSICS_EMBEDDING_COLLAPSED"
+    elif last["cond_sensitivity_normed"] < 0.05:
+        phys_case = "CASE_2_EMBEDDING_DIVERSE_PREDICTOR_IGNORES"
+    else:
+        phys_case = "CASE_3_EMBEDDING_DIVERSE_PREDICTOR_RESPONDS"
+    print(f"[architecture_audit] physics diagnosis: {phys_case} "
+          f"(c_physics eff_rank_frac={last['c_physics_eff_rank_frac']:.4f} "
+          f"goal_token_eff_rank={last['goal_token_eff_rank']:.4f} "
+          f"cond_normed={last['cond_sensitivity_normed']:.4f})")
+
     out_path = args.out or str(REPO_ROOT / "checkpoints" / "milestone_b" /
                                "architecture_audit.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         json.dump({"mode": "smoke" if args.smoke else "full",
+                   "data_mode": data_mode,
                    "steps": steps, "batch": batch, "seed": args.seed,
-                   "mask_ratio": args.mask_ratio, "rows": rows,
-                   "scale": scale_parts, "flags": flags, "observations": obs},
+                   "mask_ratio": args.mask_ratio,
+                   "mask_protocol": mask_protocol,
+                   "physics_case": phys_case,
+                   "rows": rows, "scale": scale_parts,
+                   "flags": flags, "observations": obs},
                   f, indent=2)
     print(f"[architecture_audit] -> {out_path}")
+    print(f"[architecture_audit] data mode: {data_mode.upper()} "
+          f"({('REAL DATA ARCHITECTURE AUDIT' if data_mode == 'real' else 'SYNTHETIC-DATA RUN — not evidence of real-distribution behavior (hardening §10)')})")
+    print(f"[architecture_audit] mask protocol: {json.dumps(mask_protocol)}")
     print(f"[architecture_audit] structural flags: {json.dumps(flags)}")
     print(f"[architecture_audit] observations: {json.dumps(obs)}")
+    print(f"[architecture_audit] physics diagnosis: {phys_case}")
     if any(flags.values()):
         print("[architecture_audit] FAIL: structural flags raised — do NOT start "
               "objective experiments before fixing these.")

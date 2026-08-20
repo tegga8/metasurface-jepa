@@ -82,7 +82,7 @@ class FakeModel:
         z = G.view(B, 256, 3, 16).mean(dim=-1)       # (B, 256, 3), goal-dependent
         z_hat = z * (0.5 if goal_mode == "null" else 1.0)
         z_y = z * 0.9 + 0.1
-        return {"z_hat": z_hat, "z_y": z_y, "mask": mask}
+        return {"z_hat": z_hat, "z_y_raw": z_y, "mask": mask}
 
 
 class _ScaleProj(nn.Module):

@@ -199,7 +199,7 @@ def main():
             deltas["real_vs_shuffled"].append(
                 ((out_r["z_hat"] - out_s["z_hat"]).norm(dim=-1)[mask].mean().item()))
 
-            zy = out_r["z_y"]
+            zy = out_r["z_y_raw"]
             p_zy, p_nz, p_sz = P(zy), P(out_n["z_hat"]), P(out_s["z_hat"])
             phys_err["real_raw"].append(cosine_err(out_r["z_hat"], zy, mask))
             phys_err["null_raw"].append(cosine_err(out_n["z_hat"], zy, mask))

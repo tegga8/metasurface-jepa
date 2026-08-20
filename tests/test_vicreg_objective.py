@@ -61,7 +61,7 @@ class _NoProjModel(nn.Module):
     def forward(self, G, S, M):
         B = G.shape[0]
         mask = (M.view(B, -1) == 0)
-        return {"z_hat": self.z_hat, "z_y": self.z_y, "mask": mask}
+        return {"z_hat": self.z_hat, "z_y_raw": self.z_y, "mask": mask}
 
 
 @pytest.fixture

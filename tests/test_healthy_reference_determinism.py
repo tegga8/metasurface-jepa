@@ -92,7 +92,7 @@ class _RefModel(nn.Module):
         B = G.shape[0]
         mask = (M.view(B, -1) == 0)
         z = self.ema(G)
-        return {"z_hat": z, "z_y": z, "mask": mask}
+        return {"z_hat": z, "z_y_raw": z, "mask": mask}
 
 
 def _make_ref_model():

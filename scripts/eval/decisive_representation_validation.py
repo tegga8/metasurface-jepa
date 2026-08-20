@@ -355,7 +355,7 @@ def evaluate_condition(
         mask = real["mask"].bool()
         zr = real["z_hat"]
         zn = null["z_hat"]
-        zt = real["z_y"]
+        zt = real["z_y_raw"]
 
         P = objective.projector if objective is not None else None
         if P is not None:

@@ -508,7 +508,8 @@ def run_short_audit(cfg, args):
 
     objective = build_objective(
         args.objective, cfg.get("objective_params", {}).get(args.objective, {}),
-        projector_input_dim=cfg["model"].get("hidden", 384))
+        projector_input_dim=cfg["model"].get("hidden", 384)
+    ).to(device)
 
     model = build_model(
         cfg["model"],

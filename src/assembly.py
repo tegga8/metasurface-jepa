@@ -24,6 +24,7 @@ if METADIT_SRC not in sys.path:
     sys.path.insert(0, METADIT_SRC)
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from data.mask import apply_mask_to_pixels
@@ -41,6 +42,9 @@ class _JEPAForwardMixin:
     """Shared context/spectrum/predictor forward producing latent delta predictions."""
 
     def _encode(self, G, S, M, goal_mode, need_attn):
+        """Full student-side encode: masked context -> z_x; spectrum -> (c_physics,
+        a_goal); predictor -> z_hat. Returns them all so the model output contract
+        (spec §30) exposes every representation boundary explicitly."""
         G_c = apply_mask_to_pixels(G, M)
 
         # Full-resolution context representation.
@@ -104,7 +108,7 @@ class _JEPAForwardMixin:
             f"z_x={tuple(z_x.shape)}, z_hat={tuple(z_hat.shape)}"
         )
 
-        return z_hat, z_x, mask, weights
+        return z_hat, z_x, mask, weights, c_physics, a_goal
 
     def query_predictions(self, G, S, M, goal_mode="real"):
         z_hat, *_ = self._encode(
@@ -137,7 +141,7 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
         self.geometry_encoder = geo
 
     def forward(self, G, S, M, goal_mode="real", need_attn=False, with_target=True,):
-        z_hat, z_x, mask, weights = self._encode(
+        z_hat, z_x, mask, weights, c_physics, a_goal = self._encode(
             G, S, M, goal_mode, need_attn
         )
 
@@ -146,27 +150,34 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
             z_x=z_x,
             mask=mask,
             attn_weights=weights,
+            c_physics=c_physics,
+            a_goal=a_goal,
         )
 
         if with_target:
-            z_y = self.ema(G)
+            z_y_raw = self.ema(G)
 
-            assert z_y.ndim == 3, (
-                f"EMA target output must be [B,256,384], got {tuple(z_y.shape)}"
+            assert z_y_raw.ndim == 3, (
+                f"EMA target output must be [B,256,384], got {tuple(z_y_raw.shape)}"
             )
-            assert z_y.shape[1] == 256, (
-                f"EMA target must output 256 tokens, got {z_y.shape[1]}"
+            assert z_y_raw.shape[1] == 256, (
+                f"EMA target must output 256 tokens, got {z_y_raw.shape[1]}"
             )
-            assert z_y.shape[2] == 384, (
-                f"EMA target dim must be 384, got {z_y.shape[2]}"
+            assert z_y_raw.shape[2] == 384, (
+                f"EMA target dim must be 384, got {z_y_raw.shape[2]}"
             )
 
-            assert z_y.shape == z_hat.shape, (
+            assert z_y_raw.shape == z_hat.shape, (
                 f"Target/prediction mismatch: "
-                f"z_y={tuple(z_y.shape)}, z_hat={tuple(z_hat.shape)}"
+                f"z_y_raw={tuple(z_y_raw.shape)}, z_hat={tuple(z_hat.shape)}"
             )
 
-            out["z_y"] = z_y
+            # Spec §10: expose the raw target AND an explicit feature-wise
+            # normalization boundary (F.layer_norm over the 384-D feature axis,
+            # per-sample per-token — no learnable weights, never overwrites raw).
+            out["z_y"] = z_y_raw            # backward-compatible raw alias
+            out["z_y_raw"] = z_y_raw
+            out["z_y_normalized"] = F.layer_norm(z_y_raw, (z_y_raw.shape[-1],))
 
         return out
 

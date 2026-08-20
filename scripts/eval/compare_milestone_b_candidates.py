@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Post-hoc fair comparison of the four Milestone-B candidate checkpoints.
+"""Post-hoc fair comparison of the three Milestone-B candidate checkpoints.
 
 Uses the repository's existing FixedValidation and health-diagnostic path.
-Does not train.
+Does not train. Each candidate is the full §30 checkpoint produced by
+train_milestone_b.py (objective state restored so the projected-space metrics
+use the SAME projector the objective trained with).
+
+    python scripts/eval/compare_milestone_b_candidates.py \
+        --config configs/milestone_b.yaml \
+        --checkpoint-dir checkpoints/milestone_b
 """
 from __future__ import annotations
 import argparse, csv, json, math, os, sys
@@ -18,20 +24,22 @@ import numpy as np
 import torch
 import yaml
 from data.dataset import MetaDiTDataset
-from assembly import build_model, load_into_model
-from train.engine import build_deterministic_reference, fixed_validation_from_loader, healthy_references
+from assembly import build_model
+from losses.objectives import build_objective
+from train.engine import (build_deterministic_reference,
+                          fixed_validation_from_loader, healthy_references,
+                          load_checkpoint)
 
 CANDIDATES = {
-    "jepa_vicreg": "phase_00_jepa_vicreg_best_healthy.pt",
-    "jepa_vicreg2": "phase_01_jepa_vicreg2_best_healthy.pt",
-    "jepa_barlow": "phase_02_jepa_barlow_best_healthy.pt",
-    "lejepa": "phase_03_lejepa_best_healthy.pt",
+    "jepa_vicreg": "sweep_jepa_vicreg_latest.pt",
+    "jepa_barlow": "sweep_jepa_barlow_latest.pt",
+    "lejepa": "sweep_lejepa_latest.pt",
 }
 
 def args():
     p=argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    p.add_argument("--checkpoint-dir", default="checkpoints/milestone_b/adaptive")
+    p.add_argument("--checkpoint-dir", default="checkpoints/milestone_b")
     p.add_argument("--out-dir", default="checkpoints/milestone_b/posthoc_candidate_eval")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--n-samples", type=int, default=512)
@@ -66,11 +74,10 @@ def row_for(name, ckpt_path, obj, metrics, health, null_cos, gap):
     raw,proj,pred=health["raw"],health["proj"],health["pred"]
     goal,attn=health["goal"],health["attention"]
     sig=health["signals"]
-    am=obj.get("adaptive_meta",{}); best=obj.get("best",{})
+    best=obj.get("best",{})
     r={
       "objective":name,"checkpoint":str(ckpt_path),
-      "checkpoint_step":obj.get("step"),"phase":am.get("phase"),"phase_step":am.get("phase_step"),
-      "saved_representation_status":am.get("representation_status"),
+      "checkpoint_step":obj.get("step"),
       "saved_best_cos_err":best.get("primary"),
       "eval_cos_err_r0.5":metrics["cos_err_r0.5"],"eval_null_cos_err_r0.5":null_cos,"eval_null_gap":gap,
       "health_status":health["status"],"collapse_votes":sig.get("votes",0),
@@ -101,8 +108,7 @@ def main():
     cfg=yaml.safe_load(rpath(a.config).read_text(encoding="utf-8"))
     out=rpath(a.out_dir); out.mkdir(parents=True,exist_ok=True)
     val_ds=MetaDiTDataset(rpath(cfg["data"]["val_split"]))
-    fixed=fixed_validation_from_loader(val_ds,a.n_samples,a.batch_size,dev,ratio=a.mask_ratio,mask_seed=a.mask_seed,
-                                       collapse_cfg=cfg.get("adaptive_training",{}).get("collapse",{}))
+    fixed=fixed_validation_from_loader(val_ds,a.n_samples,a.batch_size,dev,ratio=a.mask_ratio,mask_seed=a.mask_seed)
     ref=build_deterministic_reference(lambda: build(cfg,dev),seed=a.refs_seed); ref.eval()
     print(f"[posthoc] fixed n={fixed.mask_statistics['n_samples']} batches={fixed.mask_statistics['n_batches']} ratio={fixed.mask_statistics['requested_mask_ratio']}")
     rows=[]
@@ -111,11 +117,13 @@ def main():
         if not path.exists(): raise FileNotFoundError(path)
         print(f"\n[posthoc] {name}: {path}")
         model=build(cfg,dev)
-        obj=torch.load(path,map_location="cpu",weights_only=False)
-        load_into_model(model,obj["model"],dev); model.eval()
-        refs=healthy_references(ref,fixed,proj_source=model)
-        metrics,health=fixed.evaluate(model,refs["raw"],refs["proj"],goal_mode="real")
-        real,null,gap=fixed.null_gap(model)
+        objective=build_objective(name, cfg.get("objective_params", {}).get(name, {}),
+                                  projector_input_dim=cfg["model"].get("hidden", 384))
+        obj=load_checkpoint(path, model, objective, None, None, dev)
+        model.eval()
+        refs=healthy_references(ref,fixed,objective=objective)
+        metrics,health=fixed.evaluate(model,objective,refs["raw"],refs["proj"],goal_mode="real")
+        real,null,gap=fixed.null_gap(model,objective)
         if abs(real-metrics["cos_err_r0.5"])>1e-10:
             raise RuntimeError(f"{name}: evaluate/null_gap mismatch: {real} vs {metrics['cos_err_r0.5']}")
         rows.append(row_for(name,path,obj,metrics,health,float(null),float(gap)))

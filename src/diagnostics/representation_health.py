@@ -8,8 +8,10 @@ by Milestone B monitoring. The stat functions were moved here from
 
 Used by:
   - scripts/diagnostics/check_ema_target_diversity.py   (offline CLI, two-anchor verdict)
-  - src/train/engine.py                                 (adaptive validation, HEALTHY/
-                                                         WARNING/COLLAPSED per validation)
+  - src/train/engine.py                                 (fixed-validation health, HEALTHY/
+                                                          WARNING/COLLAPSED per validation)
+  - scripts/eval/eval_vicreg_sanity.py                  (five-way collapse classification,
+                                                          spec §26)
 """
 
 import math
@@ -278,6 +280,132 @@ def classify_health(raw, proj, healthy_raw, healthy_proj, cfg=None):
     }
     return status, {"votes": votes, "signals": signals, "margins": margins,
                     "near_healthy": bool(near_healthy)}
+
+
+# ---------------------------------------------------------------------------
+# five-way collapse classification (architecture-repair spec §26)
+# ---------------------------------------------------------------------------
+
+def _raw_collapse_votes(raw, healthy_raw, c):
+    """Reference-relative collapse votes in the RAW EMA-target space."""
+    signals = {
+        "eff_rank_frac": raw["eff_rank_frac"] <= healthy_raw["eff_rank_frac"] / c["eff_rank_frac_div"],
+        "p05": raw["pairwise_cos"]["p05"] >= healthy_raw["pairwise_cos"]["p05"] + c["p05_plus"],
+        "same_token": raw["same_token_cos"] >= healthy_raw["same_token_cos"] + c["same_token_plus"],
+        "std": raw["token_std"] <= healthy_raw["token_std"] / c["std_div"],
+    }
+    return sum(1 for v in signals.values() if v), signals
+
+
+def _proj_collapse_votes(proj, healthy_proj, c):
+    """Reference-relative collapse votes in the PROJECTED objective space."""
+    signals = {
+        "proj_p05": proj["pairwise_cos"]["p05"] >= healthy_proj["pairwise_cos"]["p05"] + c["p05_plus"],
+        "proj_eff_rank_frac": proj["eff_rank_frac"] <= healthy_proj["eff_rank_frac"] / c["eff_rank_frac_div"],
+    }
+    return sum(1 for v in signals.values() if v), signals
+
+
+def classify_failure_mode(raw, proj, healthy_raw, healthy_proj, cfg=None,
+                          physics_gap=None, physics_shuffle_delta=None,
+                          target_gradient_leak=False, invalid_implementation=None):
+    """Five-way collapse classification (spec §26) with priority ordering.
+
+    Inputs:
+      raw/proj/healthy_*     token_space_stats dicts (as classify_health).
+      physics_gap            null_cos_err - real_cos_err; > 0 means the real goal
+                             beats the null goal (the predictor uses A_goal).
+      physics_shuffle_delta  |cos_err(real) - cos_err(shuffled-goal)|; > 0 means
+                             the predictor depends on WHICH goal, not merely on
+                             a goal existing.
+      target_gradient_leak   True if gradients reached the EMA target encoder.
+      invalid_implementation None or a reason string — if set, the verdict is
+                             INVALID_IMPLEMENTATION regardless of the numbers.
+
+    Verdicts (priority order):
+      INVALID_IMPLEMENTATION      objective/evaluator wiring broken (missing
+                                  objective state, NaN signals, no projector)
+      TARGET_GRADIENT_LEAK        gradients reached the frozen EMA target
+      RAW_COLLAPSE                the raw EMA-target representation collapsed
+      PROJECTOR_COLLAPSE          raw healthy but the projected space collapsed
+      PHYSICS_CONDITIONING_FAILURE representation healthy but the predictor does
+                                  not use the physics goal (gap ~ 0 and/or
+                                  shuffle delta ~ 0)
+      HEALTHY                     none of the above
+
+    The physics bars are "essentially zero" gates (no dependency at all), NOT
+    meaningful-improvement thresholds — the design doc does not fix those and
+    they must be human-confirmed (Standing Rule 3).
+    """
+    c = dict(COLLAPSE_CFG_DEFAULTS, **(cfg or {}))
+
+    if invalid_implementation:
+        return {"verdict": "INVALID_IMPLEMENTATION",
+                "reason": str(invalid_implementation),
+                "raw_collapsed": False, "proj_collapsed": False,
+                "physics_conditioning_failure": False,
+                "target_gradient_leak": False,
+                "raw_votes": 0, "proj_votes": 0,
+                "physics_gap": physics_gap,
+                "physics_shuffle_delta": physics_shuffle_delta}
+
+    if target_gradient_leak:
+        return {"verdict": "TARGET_GRADIENT_LEAK",
+                "reason": "gradients reached the frozen EMA target encoder",
+                "raw_collapsed": False, "proj_collapsed": False,
+                "physics_conditioning_failure": False,
+                "target_gradient_leak": True,
+                "raw_votes": 0, "proj_votes": 0,
+                "physics_gap": physics_gap,
+                "physics_shuffle_delta": physics_shuffle_delta}
+
+    raw_votes, raw_sig = _raw_collapse_votes(raw, healthy_raw, c)
+    proj_votes, proj_sig = _proj_collapse_votes(proj, healthy_proj, c)
+    raw_collapsed = raw_votes >= c.get("collapse_votes", 3)
+    proj_collapsed = (not raw_collapsed) and proj_votes >= c.get("collapse_votes", 3)
+
+    def _base(verdict, reason, flags):
+        return {"verdict": verdict, "reason": reason,
+                "raw_collapsed": bool(flags["raw_collapsed"]),
+                "proj_collapsed": bool(flags["proj_collapsed"]),
+                "physics_conditioning_failure": bool(
+                    flags["physics_conditioning_failure"]),
+                "target_gradient_leak": False,
+                "raw_votes": raw_votes, "proj_votes": proj_votes,
+                "raw_signals": raw_sig, "proj_signals": proj_sig,
+                "physics_gap": physics_gap,
+                "physics_shuffle_delta": physics_shuffle_delta}
+
+    if raw_collapsed:
+        return _base("RAW_COLLAPSE",
+                     f"raw EMA-target space collapsed ({raw_votes} votes)",
+                     {"raw_collapsed": True, "proj_collapsed": False,
+                      "physics_conditioning_failure": False})
+    if proj_collapsed:
+        return _base("PROJECTOR_COLLAPSE",
+                     f"raw healthy but projected space collapsed "
+                     f"({proj_votes} proj votes)",
+                     {"raw_collapsed": False, "proj_collapsed": True,
+                      "physics_conditioning_failure": False})
+
+    eps = 1e-6
+    no_gap = physics_gap is not None and physics_gap <= eps
+    no_shuffle = (physics_shuffle_delta is not None
+                  and physics_shuffle_delta <= eps)
+    if no_gap or no_shuffle:
+        return _base("PHYSICS_CONDITIONING_FAILURE",
+                     "representation healthy but the predictor does not use the "
+                     "physics goal "
+                     f"(physics_gap={physics_gap}, "
+                     f"physics_shuffle_delta={physics_shuffle_delta})",
+                     {"raw_collapsed": False, "proj_collapsed": False,
+                      "physics_conditioning_failure": True})
+
+    return _base("HEALTHY",
+                 "raw and projected representations healthy and the predictor "
+                 "uses the physics goal",
+                 {"raw_collapsed": False, "proj_collapsed": False,
+                  "physics_conditioning_failure": False})
 
 
 def verdict(target, collapsed, refs):

@@ -1,21 +1,30 @@
 """Goal-Conditioned Latent Completion Transformer (§3.5) — Milestone B dense-only slice.
 
-Per predictor block (dense attention; sparse top-k routing and classifier-free guidance are
+The predictor consumes exactly:
+    256 context geometry tokens (z_x)            — from the masked context encoder
+  + 16 structured physics/goal tokens (a_goal)   — retained inside kv (Route A)
+  + a global physics condition (c_physics)       — FiLM-modulates every block (Route B)
+and produces:
+    256x384 latent prediction z_hat
+
+Per block (dense attention; sparse top-k routing and classifier-free guidance are
 Milestones E/D respectively):
-    LayerNorm -> AdaLN-Zero(c_physics) -> self-attention among latent structural queries
-    -> cross-attention: q = queries, kv = [Z_x' (64 bottlenecked), A_goal (16 dense)]
-    -> MLP -> residual
 
-Queries: all 256 spatial positions — masked locations start from e_mask + pos (missing-state
-queries), visible locations from their context features. Residual future-state prediction:
-ẑ_i = base_i + Δz_i with base = z^context_i (visible) or e_mask (masked), mirroring §3.5.
+    affine-less LayerNorm -> FiLM(c_physics) -> self-attention among latent queries
+    affine-less LayerNorm -> FiLM(c_physics) -> cross-attention (q = queries,
+                                                 kv = [z_x (256), a_goal (16)])
+    affine-less LayerNorm -> FiLM(c_physics) -> MLP
 
-Two output heads: 'latent' (the JEPA prediction, Linear 384->384) and 'pixel'
-(Linear 384 -> 3*4*4 = 48, for the Baseline 2 direct masked generator, §10.1).
+with a residual sum around each sub-layer.
+
+Route A preserves detailed spectral structure as attention tokens. Route B makes
+physics an explicit computational dependency of every block: the FiLM conditioner
+is zero-initialized so the block starts as an identity modulation and must learn
+to use c_physics. There is no Perceiver bottleneck, no base+delta prediction, and
+no pixel head in this path.
 """
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from encoders.geometry_encoder import CrossAttention, Attention
@@ -25,13 +34,25 @@ class GCLCTBlock(nn.Module):
     def __init__(self, hidden=384, num_heads=6, mlp_ratio=4.0):
         super().__init__()
 
-        self.norm1 = nn.LayerNorm(hidden, eps=1e-6)
+        self.norm1 = nn.LayerNorm(
+            hidden,
+            elementwise_affine=False,
+            eps=1e-6,
+        )
         self.self_attn = Attention(hidden, num_heads)
 
-        self.norm2 = nn.LayerNorm(hidden, eps=1e-6)
+        self.norm2 = nn.LayerNorm(
+            hidden,
+            elementwise_affine=False,
+            eps=1e-6,
+        )
         self.cross_attn = CrossAttention(hidden, num_heads)
 
-        self.norm3 = nn.LayerNorm(hidden, eps=1e-6)
+        self.norm3 = nn.LayerNorm(
+            hidden,
+            elementwise_affine=False,
+            eps=1e-6,
+        )
 
         hidden_mlp = int(hidden * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -40,37 +61,58 @@ class GCLCTBlock(nn.Module):
             nn.Linear(hidden_mlp, hidden),
         )
 
-    def forward(self, x, kv, c=None, need_weights=False):
-        x = x + self.self_attn(self.norm1(x))
+        self.cond = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden, 6 * hidden),
+        )
+
+        nn.init.zeros_(self.cond[-1].weight)
+        nn.init.zeros_(self.cond[-1].bias)
+
+    def forward(self, x, kv, c_physics, need_weights=False):
+        """c_physics: (B, hidden) global physics condition — REQUIRED, no dead arg.
+
+        FiLM groups gamma1/beta1..gamma3/beta3 applied after each affine-less
+        LayerNorm; zero-initialized cond makes the modulation an identity at init.
+        """
+        gamma1, beta1, gamma2, beta2, gamma3, beta3 = \
+            self.cond(c_physics).chunk(6, dim=-1)
+
+        h = self.norm1(x)
+        h = h * (1.0 + gamma1[:, None, :]) + beta1[:, None, :]
+        x = x + self.self_attn(h)
+
+        h = self.norm2(x)
+        h = h * (1.0 + gamma2[:, None, :]) + beta2[:, None, :]
 
         cross_out, weights = self.cross_attn(
-            self.norm2(x),
+            h,
             kv,
             need_weights=need_weights,
         )
         x = x + cross_out
 
-        x = x + self.mlp(self.norm3(x))
+        h = self.norm3(x)
+        h = h * (1.0 + gamma3[:, None, :]) + beta3[:, None, :]
+        x = x + self.mlp(h)
 
         return x, weights
 
+
 class GCLCT(nn.Module):
-    def __init__(self, depth=8, hidden=384, num_heads=6, head_type="latent"):
+    def __init__(self, depth=8, hidden=384, num_heads=6):
         super().__init__()
-        assert head_type in ("latent", "pixel")
         self.depth = depth
         self.hidden = hidden
-        self.head_type = head_type
         self.blocks = nn.ModuleList([GCLCTBlock(hidden, num_heads) for _ in range(depth)])
         self.final_norm = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
-        out_dim = hidden if head_type == "latent" else 3 * 4 * 4
-        self.head = nn.Linear(hidden, out_dim, bias=True)
+        self.head = nn.Linear(hidden, hidden, bias=True)
 
     def forward(self, queries, kv, c_physics, need_weights=False):
-        """queries: (B, 256, 384); kv: (B, 64+16, 384); c_physics: (B, 384).
+        """queries: (B, 256, 384); kv: (B, 256+16, 384); c_physics: (B, 384).
 
-        Returns delta-predictions (B, 256, out_dim) and per-block cross-attention weights
-        (list of (B, H, 256, 80) tensors) when need_weights=True.
+        Returns z_hat (B, 256, 384) and per-block cross-attention weights (list of
+        (B, H, 256, 272) tensors) when need_weights=True.
         """
         x = queries
         weights = []

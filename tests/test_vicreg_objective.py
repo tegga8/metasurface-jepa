@@ -1,8 +1,8 @@
 """Objective-level tests for the faithful EMA-JEPA + VICReg-style candidate
-(`jepa_vicreg`), per the Milestone B CODEX spec.
+(`jepa_vicreg`), per the architecture-repair spec.
 
 Covers:
-  - registry placement (six-rung ladder, `jepa_vicreg` -> VICRegObjective)
+  - registry placement (final three-rung registry, `jepa_vicreg` -> VICRegObjective)
   - objective-owned projector; the refactored model has NO `model.proj` and
     must not need one
   - component/weighting contract (weighted terms sum to total, ratios to 1)
@@ -85,10 +85,9 @@ def test_jepa_vicreg_registered_as_vicreg_objective():
     assert OBJECTIVES["jepa_vicreg"] is VICRegObjective
 
 
-def test_six_rung_registry_stable():
-    assert set(OBJECTIVES.keys()) == {
-        "jepa", "jepa_var", "jepa_vicreg", "jepa_vicreg2",
-        "jepa_barlow", "lejepa"}
+def test_three_rung_registry_stable():
+    """Spec §23: exactly three research objectives, no historical ladder rungs."""
+    assert set(OBJECTIVES.keys()) == {"jepa_vicreg", "jepa_barlow", "lejepa"}
 
 
 def test_objective_owns_projector_no_model_proj_needed(no_proj_model, tiny_batch):

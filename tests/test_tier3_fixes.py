@@ -1,17 +1,17 @@
-"""Regression tests for BUGLOG Tier 3 rows #13-#21 (2026-08-18).
+"""Regression tests for BUGLOG Tier 3 rows #13-#21 (2026-08-18), minus the
+controller rows removed in the architecture repair.
 
 #13 FixedValidation prediction-health stats pool the PROJECTED prediction
-    (ph_), not raw z_hat — they change when proj weights change.
+    (ph_), not raw z_hat — they change when the objective's projector weights
+    change (spec §17: the projector lives on the objective, never model.proj).
 #14 healthy_references projects reference RAW embeddings through the CANDIDATE
-    model's proj head, never refs_model.proj (separate random init = different
-    coordinate system).
-#15 best-prediction and best-healthy are tracked independently; only HEALTHY
-    ever updates best_healthy; select_winner returns None when no phase has a
-    HEALTHY checkpoint (explicit no-clean-winner, no fallback).
-#16 no itertools.cycle(loader) anywhere in the training path; global-step
-    termination is verified by the adaptive smoke run (see BUGLOG suite note).
+    OBJECTIVE's projector, never a reference/random head (separate random init =
+    different coordinate system). objective=None keeps proj stats == raw stats.
+#16 no itertools.cycle(loader) anywhere in the training path.
 #17 CUDA RNG state is saved/restored with checkpoints; CPU-only environments
-    skip the CUDA part safely.
+    skip the CUDA part safely. (The full checkpoint save/restore round-trip now
+    lives in tests/test_checkpoint_resume.py — §30, replacing the removed
+    phase-checkpoint path.)
 #18 IntervalLossAccumulator reports exact per-interval training-loss means,
     reset after each report, correct under any grad_accum and phase boundaries.
 #19 FixedValidation metric aggregation is global (loss_sum / mask_count), so
@@ -28,7 +28,6 @@ import math
 import os
 import random
 import sys
-import tempfile
 
 import numpy as np  # noqa: E402
 
@@ -44,10 +43,9 @@ from diagnostics.representation_health import (  # noqa: E402
     classify_health, token_space_stats,
 )
 from losses.jepa_loss import jepa_loss  # noqa: E402
-from train.adaptive import AdaptiveController, select_winner  # noqa: E402
 from train.engine import (  # noqa: E402
     FixedValidation, IntervalLossAccumulator, collect_rng_state, healthy_references,
-    load_phase_checkpoint, restore_rng_state, save_phase_checkpoint,
+    restore_rng_state,
 )
 
 
@@ -63,12 +61,10 @@ class FakeSpectrumPath:
 
 class FakeModel:
     """Deterministic model-shaped object (outputs are a pure function of the
-    inputs, no RNG — required for metric-invariance tests); proj is a linear
-    scale by `proj_k` (None = no projection head)."""
+    inputs, no RNG — required for metric-invariance tests); carries NO
+    projector of its own (spec §17: the projection lives on the objective)."""
 
-    def __init__(self, proj_k=None):
-        self.proj_k = proj_k
-        self.proj = None if proj_k is None else _ScaleProj(proj_k)
+    def __init__(self):
         self.spectrum_path = FakeSpectrumPath()
         self.training = False
 
@@ -100,6 +96,17 @@ class _ScaleProj(nn.Module):
         return x * self.k
 
 
+def _objective(k):
+    """Objective-shaped carrier for the projector (spec §17: the projection
+    lives on the objective, never on the model)."""
+
+    class _Obj:
+        name = "tier3"
+        projector = None if k is None else _ScaleProj(k)
+
+    return _Obj()
+
+
 def _fixed_val(batch_sizes, seed=0, n_per=2):
     torch.manual_seed(seed)
     batches = []
@@ -123,11 +130,12 @@ def _refs_dict(seed=0, n=4):
 # --------------------------------------------------------------------------
 
 def test_prediction_health_tracks_projection_weights():
-    """Raw z_hat pooling is invariant to the proj head; projected pooling must
-    change when proj changes (linear scale k -> mean_std scales |k|)."""
+    """Raw z_hat pooling is invariant to the projector; projected pooling must
+    change when the OBJECTIVE's projector changes (linear scale k -> mean_std
+    scales |k|) — the projection belongs to the objective, not the model (§17)."""
     fv = _fixed_val([2, 2])
-    _, h1 = fv.evaluate(FakeModel(proj_k=1.0), _refs_dict(), _refs_dict())
-    _, h5 = fv.evaluate(FakeModel(proj_k=5.0), _refs_dict(), _refs_dict())
+    _, h1 = fv.evaluate(FakeModel(), _objective(1.0), _refs_dict(), _refs_dict())
+    _, h5 = fv.evaluate(FakeModel(), _objective(5.0), _refs_dict(), _refs_dict())
     s1 = h1["pred"]["mean_std"]
     s5 = h5["pred"]["mean_std"]
     assert math.isfinite(s1) and math.isfinite(s5)
@@ -141,12 +149,11 @@ def test_prediction_health_tracks_projection_weights():
 # --------------------------------------------------------------------------
 
 class _RefModel:
-    """released-init style reference: EMA returns fixed Z; own proj is `ref_k`;
-    forward returns z_hat = Z_aug (T dims must match)."""
+    """released-init style reference: EMA returns fixed Z; no own projector
+    (spec §17); forward returns z_hat = Z_aug (T dims must match)."""
 
-    def __init__(self, ref_k, ema_out):
+    def __init__(self, ema_out):
         self.ema = _EmaStub(ema_out)
-        self.proj = _ScaleProj(ref_k)
         self.training = False
 
     def __call__(self, G, S, M):
@@ -163,17 +170,11 @@ class _EmaStub:
         return self.z
 
 
-class _CandModel:
-    def __init__(self, cand_k):
-        self.proj = _ScaleProj(cand_k)
-
-
-def test_healthy_references_use_candidate_proj():
+def test_healthy_references_use_objective_projector():
     Z = torch.randn(2, 256, 8)               # T must match the 256-token mask grid
     fv = _fixed_val([2, 2], n_per=2)
-    refs_model = _RefModel(ref_k=2.0, ema_out=Z)
-    cand = _CandModel(cand_k=10.0)          # deliberately different head
-    refs = healthy_references(refs_model, fv, proj_source=cand)
+    refs_model = _RefModel(ema_out=Z)
+    refs = healthy_references(refs_model, fv, objective=_objective(10.0))
     expected = token_space_stats(torch.cat([Z * 10.0] * 4, dim=0))  # one per batch
     for k in ("eff_rank_unnorm", "eff_rank_frac", "token_std", "same_token_cos",
               "n_geoms"):
@@ -183,75 +184,19 @@ def test_healthy_references_use_candidate_proj():
                    - expected["pairwise_cos"][k]) < 1e-6, f"pairwise {k} mismatch"
     wrong = token_space_stats(torch.cat([Z * 2.0] * 4, dim=0))
     assert abs(refs["proj"]["token_std"] - wrong["token_std"]) > 1e-3, (
-        "refs proj stats must NOT use refs_model's own head")
+        "refs proj stats must be projected through the candidate objective's "
+        "projector, not a reference/other head")
 
 
-def test_healthy_references_legacy_default_still_uses_own_proj():
-    """proj_source=None keeps the old behavior (project with model.proj)."""
+def test_healthy_references_default_identity_projection():
+    """objective=None keeps proj stats == raw stats (identity projection) — the
+    only default left after the repair removed model-level projection heads."""
     Z = torch.randn(2, 256, 8)
     fv = _fixed_val([2, 2], n_per=2)
-    refs_model = _RefModel(ref_k=2.0, ema_out=Z)
+    refs_model = _RefModel(ema_out=Z)
     refs = healthy_references(refs_model, fv)
-    expected = token_space_stats(torch.cat([Z * 2.0] * 4, dim=0))
-    assert abs(refs["proj"]["pairwise_cos"]["mean"]
-               - expected["pairwise_cos"]["mean"]) < 1e-6
-
-
-# --------------------------------------------------------------------------
-# #15 — best-prediction vs best-healthy separation (controller level)
-# --------------------------------------------------------------------------
-
-def _controller():
-    c = AdaptiveController({"max_total_steps": 500, "warmup_steps": 0,
-                            "plateau_patience": 2, "min_delta": 1e-5,
-                            "collapse_patience": 2}, ["jepa", "lejepa"])
-    c.start_phase("jepa", 0)
-    return c
-
-
-def test_low_cosine_warning_is_not_best_healthy():
-    c = _controller()
-    c.on_validation(0.05, "WARNING", 10)
-    assert c.phase.best_metric == 0.05 and c.phase.best_step == 10, (
-        "prediction best still tracks it (diagnostic)")
-    assert c.phase.best_healthy_step is None and c.phase.best_healthy_metric == math.inf
-
-
-def test_lower_cosine_collapsed_is_not_best_healthy():
-    c = _controller()
-    c.on_validation(0.05, "WARNING", 10)
-    c.on_validation(0.03, "COLLAPSED", 20)
-    assert c.phase.best_metric == 0.03
-    assert c.phase.best_healthy_step is None
-
-
-def test_higher_cosine_healthy_becomes_best_healthy():
-    c = _controller()
-    c.on_validation(0.05, "WARNING", 10)
-    c.on_validation(0.03, "COLLAPSED", 20)
-    c.on_validation(0.4, "HEALTHY", 30)      # worse than prediction best, but HEALTHY
-    assert c.phase.best_healthy_metric == 0.4
-    assert c.phase.best_healthy_step == 30
-    c.on_validation(0.35, "HEALTHY", 40)     # HEALTHY improvement
-    assert c.phase.best_healthy_metric == 0.35 and c.phase.best_healthy_step == 40
-
-
-def test_healthy_plateau_transition_requests_best_healthy():
-    c = _controller()
-    c.on_validation(0.9, "HEALTHY", 10)      # improvement
-    c.on_validation(0.91, "HEALTHY", 20)     # plateau_bad = 1
-    d = c.on_validation(0.92, "HEALTHY", 30)  # plateau_bad = 2 -> switch
-    assert d["action"] == "switch"
-    assert d["transition"]["restart"] == "best_healthy", (
-        "healthy-plateau transitions must request the best-HEALTHY checkpoint")
-
-
-def test_select_winner_state_roundtrip_preserves_best_healthy():
-    c = _controller()
-    c.on_validation(0.4, "HEALTHY", 30)
-    c2 = AdaptiveController({}, ["x"])
-    c2.load_state_dict(c.state_dict())
-    assert c2.phase.best_healthy_metric == 0.4 and c2.phase.best_healthy_step == 30
+    assert refs["proj"] == refs["raw"], (
+        "objective=None must keep proj stats == raw stats (identity projection)")
 
 
 # --------------------------------------------------------------------------
@@ -265,7 +210,7 @@ def test_no_cycle_in_training_path():
     assert "from itertools import" not in src, "itertools import still present"
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
     assert "cycle(" not in code, "cycle( still present in the training path"
-    assert "for G, S in loader" in src, "explicit epoch iteration missing"
+    assert "enumerate(loader)" in src, "explicit epoch iteration missing"
 
 
 # --------------------------------------------------------------------------
@@ -328,41 +273,6 @@ def test_cuda_state_restore_skipped_safely_on_cpu():
     restore_rng_state(fake_gpu_state)        # must not raise on CPU
 
 
-def test_phase_checkpoint_roundtrip_restores_weights_optimizer_rng():
-    torch.manual_seed(3)
-    model = nn.Linear(4, 4)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    controller = AdaptiveController({"max_total_steps": 100,
-                                     "plateau_patience": 2}, ["jepa"])
-    phase = controller.start_phase("jepa", 0)
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "phase.pt")
-        save_phase_checkpoint(path, model, optimizer, {"cfg": 1}, controller,
-                              phase, 4, {"cos_err_r0.5": 0.1},
-                              {"status": "HEALTHY"})
-        w_before = {k: v.clone() for k, v in model.state_dict().items()}
-        sd_before = optimizer.state_dict()
-        # mutate everything
-        with torch.no_grad():
-            model.weight.add_(1.0)
-        torch.manual_seed(999)
-        model2 = nn.Linear(4, 4)
-        optimizer2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
-        load_phase_checkpoint(path, model2, optimizer2, None, "cpu")
-        for k in w_before:
-            assert torch.equal(model2.state_dict()[k], w_before[k]), f"{k} not restored"
-        sd2 = optimizer2.state_dict()
-        assert sd2["param_groups"] == sd_before["param_groups"]
-        assert set(sd2["state"]) == set(sd_before["state"])
-        for i in sd_before["state"]:
-            for name in sd_before["state"][i]:
-                v1, v2 = sd_before["state"][i][name], sd2["state"][i][name]
-                if torch.is_tensor(v1):
-                    assert torch.equal(v1, v2), f"optimizer state {i}.{name}"
-                else:
-                    assert v1 == v2, f"optimizer state {i}.{name}"
-
-
 # --------------------------------------------------------------------------
 # #18 — IntervalLossAccumulator exact per-interval means
 # --------------------------------------------------------------------------
@@ -408,8 +318,9 @@ def test_validation_metric_invariant_to_batch_partition():
                                 [(0, 16), (16, 56), (56, 96)])
     raw, proj = _refs_dict(n=96), _refs_dict(n=96)
     model = FakeModel()
-    m_a, _ = fv_a.evaluate(model, raw, proj)
-    m_b, _ = fv_b.evaluate(model, raw, proj)
+    obj = _objective(1.0)
+    m_a, _ = fv_a.evaluate(model, obj, raw, proj)
+    m_b, _ = fv_b.evaluate(model, obj, raw, proj)
     assert abs(m_a["cos_err_r0.5"] - m_b["cos_err_r0.5"]) < 1e-9, (
         f"metric depends on batch partitioning: {m_a['cos_err_r0.5']} vs "
         f"{m_b['cos_err_r0.5']}")
@@ -418,8 +329,9 @@ def test_validation_metric_invariant_to_batch_partition():
 def test_null_gap_invariant_to_batch_partition():
     fv_a, fv_b = _same_masks_fv([(0, 32), (32, 64), (64, 96)],
                                 [(0, 16), (16, 56), (56, 96)])
-    a = fv_a.null_gap(FakeModel())
-    b = fv_b.null_gap(FakeModel())
+    obj = _objective(1.0)
+    a = fv_a.null_gap(FakeModel(), obj)
+    b = fv_b.null_gap(FakeModel(), obj)
     for i, name in enumerate(("real", "null", "gap")):
         assert abs(a[i] - b[i]) < 1e-9, f"{name} metric depends on partitioning"
 
@@ -487,7 +399,7 @@ def test_one_sample_fixed_validation_yields_unavailable():
     S = torch.randn(1, 301)
     fv = FixedValidation([(G, S)], ratio=0.5, mask_seed=12345, device="cpu")
     model = FakeModel()
-    _, health = fv.evaluate(model, _refs_dict(), _refs_dict())
+    _, health = fv.evaluate(model, _objective(1.0), _refs_dict(), _refs_dict())
     assert health["status"] == "UNAVAILABLE", (
         f"one-sample validation must be UNAVAILABLE, got {health['status']}")
 

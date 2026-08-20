@@ -64,7 +64,7 @@ def _fixed_val_and_model():
 
 def test_evaluate_forwards_without_attention():
     fv, model, raw, proj_stats = _fixed_val_and_model()
-    metrics, health = fv.evaluate(model, raw, proj_stats)
+    metrics, health = fv.evaluate(model, None, raw, proj_stats)
     assert model.calls, "evaluate must forward the model"
     assert all(c["need_attn"] is False for c in model.calls), (
         "prediction metric must not request predictor attention "
@@ -74,7 +74,7 @@ def test_evaluate_forwards_without_attention():
 
 def test_evaluate_metrics_are_prediction_only():
     fv, model, raw, proj_stats = _fixed_val_and_model()
-    metrics, _ = fv.evaluate(model, raw, proj_stats)
+    metrics, _ = fv.evaluate(model, None, raw, proj_stats)
     assert "cos_err_r0.5" in metrics
     assert "goal_token_entropy" not in metrics
     assert "goal_token_log_entropy" not in metrics
@@ -84,7 +84,7 @@ def test_evaluate_metrics_are_prediction_only():
 def test_mode_restored_after_evaluate():
     fv, model, raw, proj_stats = _fixed_val_and_model()
     model.train()
-    fv.evaluate(model, raw, proj_stats)
+    fv.evaluate(model, None, raw, proj_stats)
     assert model.training is True
 
 
@@ -92,7 +92,7 @@ def test_health_goal_stats_still_available():
     """Goal-token utilization moves via the spectrum-path weights (never touch
     the prediction forward), so health['goal']/health['attention'] must exist."""
     fv, model, raw, proj_stats = _fixed_val_and_model()
-    _, health = fv.evaluate(model, raw, proj_stats)
+    _, health = fv.evaluate(model, None, raw, proj_stats)
     assert "goal" in health and "attention" in health
     assert "goal_token_effective_rank" in health["goal"]
 

@@ -4,10 +4,9 @@ DECISIVE JEPA REPRESENTATION + PREDICTOR AUDIT
 
 Purpose
 -------
-One clean validation run for the four trained objectives:
+One clean validation run for the three trained objectives:
 
     jepa_vicreg
-    jepa_vicreg2
     jepa_barlow
     lejepa
 
@@ -76,12 +75,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from assembly import build_model, load_into_model
+from assembly import build_model
 from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
+from losses.objectives import build_objective
+from train.engine import load_checkpoint
 
 
-MODELS = ["jepa_vicreg", "jepa_vicreg2", "jepa_barlow", "lejepa"]
+MODELS = ["jepa_vicreg", "jepa_barlow", "lejepa"]
 POOL_SEEDS = [1101, 2202, 3303, 4404]
 MASK_RATIOS = [0.25, 0.50, 0.75, 1.00]
 MASK_SEEDS = [1101, 2202, 3303, 4404]
@@ -227,8 +228,14 @@ def load_pool(ds, indices, batch_size):
 # Model
 # ---------------------------------------------------------------------------
 
-def load_model(cfg, checkpoint, device):
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+def load_model(cfg, checkpoint, device, name):
+    """Build model + objective and restore BOTH from the §30 checkpoint. The
+    objective-owned projector defines the projected comparison space — there is
+    no `model.proj` (§17), and a checkpoint missing the objective state fails
+    loudly inside load_checkpoint."""
+    objective = build_objective(
+        name, cfg.get("objective_params", {}).get(name, {}),
+        projector_input_dim=cfg["model"].get("hidden", 384))
     model = build_model(
         cfg["model"],
         os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
@@ -238,10 +245,10 @@ def load_model(cfg, checkpoint, device):
             REPO_ROOT, cfg["weights"]["metadit"]
         ),
     )
-    load_into_model(model, ckpt["model"], device)
+    load_checkpoint(checkpoint, model, objective, None, None, device)
     model.eval()
     model.ema.eval()
-    return model
+    return model, objective
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +319,7 @@ def make_masker(cfg, seed):
 
 @torch.no_grad()
 def evaluate_condition(
-    model, G, S, ratio, mask_seed, cfg, device, batch_size
+    model, objective, G, S, ratio, mask_seed, cfg, device, batch_size
 ):
     """
     Evaluate:
@@ -325,6 +332,7 @@ def evaluate_condition(
 
     The projected metric exactly mirrors the repository's JEPA objective:
       project both sides, then cosine, masked positions only.
+    P is the objective-owned projector (§17); there is no model.proj.
     """
     masker = make_masker(cfg, mask_seed)
 
@@ -349,7 +357,7 @@ def evaluate_condition(
         zn = null["z_hat"]
         zt = real["z_y"]
 
-        P = getattr(model, "proj", None)
+        P = objective.projector if objective is not None else None
         if P is not None:
             pr = P(zr)
             pn = P(zn)
@@ -566,7 +574,7 @@ def main():
             continue
 
         print(f"\n{'#' * 100}\nMODEL: {name}\n{'#' * 100}")
-        model = load_model(cfg, checkpoints[name], device)
+        model, objective = load_model(cfg, checkpoints[name], device, name)
 
         target_rows = []
 
@@ -615,7 +623,7 @@ def main():
                     cond = []
                     for mask_seed in MASK_SEEDS:
                         m = evaluate_condition(
-                            model, G, S,
+                            model, objective, G, S,
                             ratio, mask_seed,
                             cfg, device, args.batch_size
                         )
@@ -658,7 +666,7 @@ def main():
             f"proj_win={decision.get('projected_win_rate', 0):.1%}"
         )
 
-        del model
+        del model, objective
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

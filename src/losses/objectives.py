@@ -1,29 +1,32 @@
-"""Pluggable training objectives for the Milestone B adaptive loss ladder (§1–§7).
+"""Pluggable training objectives — final registry (§23 of the architecture-repair spec).
 
-One interface, one objective per ladder rung, zero objective-specific math in the
-training loop:
+Exactly three research objectives:
 
-    jepa        : L_J (masked positions only, projection applied, EMA target stop-grad)
-    jepa_var    : adds a variance floor only: L_J + lambda_var * L_var
-    jepa_vicreg : L_J + lambda_var * L_var + lambda_cov * L_cov   (projected masked preds)
-    jepa_vicreg2: same variance+covariance pressure on BOTH projected branches
-                  (masked predictions AND masked EMA targets; the target encoder is
-                  frozen, so this path intentionally trains the shared projector only)
-    jepa_barlow : L_J + lambda_bt * L_BT (Barlow cross-correlation on the same two
-                  projected branches — redundancy reduction via the off-diagonal)
-    lejepa      : L_J (student target, no EMA) + lambda_sigreg * L_SIGReg  (sliced ECF)
+    jepa_vicreg : faithful EMA-JEPA + VICReg (invariance + variance + covariance
+                  on both projected branches; EMA target frozen)
+    jepa_barlow : EMA-JEPA + Barlow Twins (projected branches, per-feature
+                  standardization, cross-correlation diagonal match + off-diagonal
+                  redundancy; EMA target frozen)
+    lejepa      : teacher-free LeJEPA (no EMA, student-as-target with NO stop-grad,
+                  SIGReg-style distributional regularization on projected features)
 
-Each objective returns, per step:
-    {"total_loss": tensor, "components": {name: tensor/float, ...}, "out": model out}
-and owns the per-step auxiliary updates via `on_optimizer_step` (EMA momentum update
-for the two EMA-based objectives; no-op for LeJEPA which has no teacher copy).
+One interface, one objective per name, zero objective-specific math in the
+training loop (§24): every objective is callable as `objective(model, G, S, M)`
+and returns:
 
-Component logging contract (screening ladder): every regularized rung reports its
-unweighted regularizer terms (L_var/L_cov split per branch for jepa_vicreg2, L_BT with
-diag/off-diag, L_SIGReg), the lambda-weighted regularizer (`*_weighted`), and the
-regularizer's share of the total loss (`var_ratio` / `cov_ratio` / `barlow_ratio` /
-`sigreg_ratio`), all as tensors so the training loop's tensor-only accumulator picks
-them up. The plain `jepa` rung has no regularizer and reports L_J only.
+    {"total_loss": tensor, "components": {name: tensor, ...}, "out": model out}
+
+plus optional `projector_inputs` / `projector_outputs` (raw vs projected spaces
+for the shared representation-health evaluator, §25/§27), and owns per-step
+auxiliary updates via `on_optimizer_step` (EMA momentum update for the two
+EMA-based objectives; no-op for LeJEPA which has no teacher copy).
+
+Every objective owns its projector. There is no `model.proj` anywhere in this
+module and no silent fallback (§17): if an objective needs projected features,
+it projects through its own head or fails loudly.
+
+No obsolete ladder rungs: `jepa`, `jepa_var`, `jepa_vicreg2` and the historical
+model.proj-dependent classes are gone.
 """
 
 import torch
@@ -31,171 +34,17 @@ from torch import nn
 
 from losses.barlow import barlow_twins_loss
 from losses.jepa_loss import jepa_loss
-from losses.objective_modules import VICRegProjector
+from losses.objective_modules import BarlowProjector, LeJEPAProjector, VICRegProjector
 from losses.sigreg import sigreg_loss
-from losses.vicreg import (covariance_loss, invariance_loss, variance_loss,
-                           vicreg_branch_terms, vicreg_loss)
+from losses.vicreg import vicreg_branch_terms
 
 
 def _mask_from_M(M):
     return (M.view(M.shape[0], -1) == 0)  # (B, 256) bool, 1 = masked
 
 
-class JEPAObjective:
-    """Phase 0 — current EMA-JEPA, exactly the approved B1+B2 objective:
-
-    L_J = (1/|M|) * sum_{i in M} [1 - cos(P(z_hat_i), P(z_i^y))]
-    P = projection head, z^y = EMA target (stop-gradient), masked positions only.
-
-    The corrected 256x384 architecture has NO model.proj (the refactor removed
-    the shared projection head); `proj` therefore falls back to None (raw-space
-    cosine, matching GoalConditionedJEPA.loss) when the model does not own one.
-    """
-
-    name = "jepa"
-
-    def __call__(self, model, G, S, M):
-        out = model(G, S, M)
-        mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        L_J, _ = jepa_loss(out["z_hat"], out["z_y"], mask,
-                           proj=getattr(model, "proj", None))
-        return {"total_loss": L_J, "components": {"L_J": L_J}, "out": out}
-
-    def on_optimizer_step(self, model, step):
-        model.ema.update(model.geometry_encoder, step)
-
-
-class JEPAVICRegObjective:
-    """Phase 1 — JEPA + small VICReg-style variance/covariance regularization.
-
-    L = L_J + lambda_var * L_var + lambda_cov * L_cov on the PROJECTED predictions
-    of masked tokens (the same features the JEPA cosine sees). The EMA target is
-    untouched (stop-gradient preserved).
-    """
-
-    name = "jepa_vicreg"
-
-    def __init__(self, lambda_var=0.1, lambda_cov=0.04, gamma=1.0, cov_on=True):
-        self.lambda_var = lambda_var
-        self.lambda_cov = lambda_cov
-        self.gamma = gamma
-        self.cov_on = cov_on
-
-    def __call__(self, model, G, S, M):
-        out = model(G, S, M)
-        mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        L_J, _ = jepa_loss(out["z_hat"], out["z_y"], mask, proj=model.proj)
-        zh = model.proj(out["z_hat"])[mask]                 # (N, D) masked predictions
-        L_var, L_cov = vicreg_loss(zh, gamma=self.gamma, cov_on=self.cov_on)
-        L_var_w = self.lambda_var * L_var
-        L_cov_w = self.lambda_cov * L_cov
-        total = L_J + L_var_w + L_cov_w
-        var_ratio = L_var_w / total.clamp_min(1e-8)
-        cov_ratio = L_cov_w / total.clamp_min(1e-8)
-        return {"total_loss": total,
-                "components": {"L_J": L_J, "L_var": L_var, "L_cov": L_cov,
-                               "L_var_weighted": L_var_w, "L_cov_weighted": L_cov_w,
-                               "var_ratio": var_ratio, "cov_ratio": cov_ratio,
-                               "lambda_var": self.lambda_var, "lambda_cov": self.lambda_cov},
-                "out": out}
-
-    def on_optimizer_step(self, model, step):
-        model.ema.update(model.geometry_encoder, step)
-
-
-class JEPAVICRegDualObjective:
-    """Corrected branch-symmetric VICReg (ladder rung `jepa_vicreg2`).
-
-    The historical jepa_vicreg (Phase 1, Kaggle: COLLAPSED at 400/500 under
-    lambda_var=0.1, lambda_cov=0.04, gamma=1.0) regularizes only the prediction
-    branch. The review's core point: the diversity pressure must be applied to
-    BOTH projected branches. Here the variance/covariance regularization is
-    computed independently on the projected masked predictions AND on the
-    projected masked EMA targets.
-
-    Gradient boundary (design-critical, tested separately): the EMA *target
-    encoder* is frozen, so gradient through the target encoder is impossible;
-    the shared projector is a separate learnable head, and this target
-    regularization path intentionally trains it. The original JEPA cosine path
-    inside jepa_loss() remains detached (Bug #1 contract, test_jepa_loss.py) —
-    it is never switched back to a target-gradient path.
-    """
-
-    name = "jepa_vicreg2"
-
-    def __init__(self, lambda_var=0.1, lambda_cov=0.04, gamma=1.0, cov_on=True):
-        self.lambda_var = lambda_var
-        self.lambda_cov = lambda_cov
-        self.gamma = gamma
-        self.cov_on = cov_on
-
-    def __call__(self, model, G, S, M):
-        out = model(G, S, M)
-        mask = out["mask"] if "mask" in out else _mask_from_M(M)
-
-        # Existing JEPA loss; target path remains detached here.
-        L_J, _ = jepa_loss(
-            out["z_hat"],
-            out["z_y"],
-            mask,
-            proj=model.proj,
-        )
-
-        # Prediction branch regularization path.
-        zh = model.proj(out["z_hat"])[mask]
-
-        # Separate target regularization path.
-        # Target encoder is frozen; projector gradient is intentionally allowed.
-        zt = model.proj(out["z_y"])[mask]
-
-        L_var_p, L_cov_p = vicreg_loss(
-            zh,
-            gamma=self.gamma,
-            cov_on=self.cov_on,
-        )
-
-        L_var_t, L_cov_t = vicreg_loss(
-            zt,
-            gamma=self.gamma,
-            cov_on=self.cov_on,
-        )
-
-        L_var = L_var_p + L_var_t
-        L_cov = L_cov_p + L_cov_t
-
-        L_var_w = self.lambda_var * L_var
-        L_cov_w = self.lambda_cov * L_cov
-
-        total = L_J + L_var_w + L_cov_w
-        var_ratio = L_var_w / total.clamp_min(1e-8)
-        cov_ratio = L_cov_w / total.clamp_min(1e-8)
-
-        return {
-            "total_loss": total,
-            "components": {
-                "L_J": L_J,
-                "L_var_pred": L_var_p,
-                "L_var_target": L_var_t,
-                "L_cov_pred": L_cov_p,
-                "L_cov_target": L_cov_t,
-                "L_var": L_var,
-                "L_cov": L_cov,
-                "L_var_weighted": L_var_w,
-                "L_cov_weighted": L_cov_w,
-                "var_ratio": var_ratio,
-                "cov_ratio": cov_ratio,
-                "lambda_var": self.lambda_var,
-                "lambda_cov": self.lambda_cov,
-            },
-            "out": out,
-        }
-
-    def on_optimizer_step(self, model, step):
-        model.ema.update(model.geometry_encoder, step)
-
-
 class VICRegObjective(nn.Module):
-    """Faithful EMA-JEPA + VICReg-style regularization (candidate `jepa_vicreg`).
+    """Faithful EMA-JEPA + VICReg-style regularization (`jepa_vicreg`).
 
     Canonical VICReg (Bardes et al. 2021) uses two trainable views through a
     shared encoder/projector and combines invariance + variance + covariance on
@@ -229,6 +78,8 @@ class VICRegObjective(nn.Module):
     """
 
     name = "jepa_vicreg"
+    # unweighted component names whose isolated gradients the short audit measures
+    term_names = ("L_inv", "L_var", "L_cov")
 
     def __init__(self, lambda_inv=25.0, lambda_var=25.0, lambda_cov=1.0,
                  gamma=1.0, eps=1e-4,
@@ -309,159 +160,186 @@ class VICRegObjective(nn.Module):
         model.ema.update(model.geometry_encoder, step)
 
 
-class JEPABarlowObjective:
-    """Barlow-style redundancy reduction (ladder rung `jepa_barlow`).
+class BarlowObjective(nn.Module):
+    """EMA-JEPA + Barlow Twins redundancy reduction (`jepa_barlow`, §21).
 
-    L = L_J + lambda_bt * L_BT with L_BT the Barlow Twins cross-correlation
-    loss between the projected masked predictions and the projected masked EMA
-    targets (both standardized, diag -> match, off-diag -> de-redundancy). The
-    diagonal targets the observed dimensional-collapse pathology (low effective
-    rank); the off-diagonal penalizes redundant dimensions directly.
+    Independent implementation of the Barlow Twins (Zbinden et al. 2021)
+    cross-correlation objective — NOT a one-line variant of the VICReg
+    objective: the two projected branches are standardized per feature, the
+    cross-correlation matrix is formed, the DIAGONAL is matched to identity
+    (invariance) and the OFF-DIAGONAL is driven to zero (redundancy
+    reduction), with a single `alpha` weighting between the two:
 
-    Gradient boundary (same design as jepa_vicreg2, tested): the JEPA cosine
-    path inside jepa_loss() remains detached; the Barlow term runs on a
-    SEPARATE projection path, where the shared projector may be trained from
-    the frozen EMA target's output (target encoder parameters stay frozen).
+        zp = (p_hat - mean)/std ;  zt = (p_y - mean)/std
+        C  = (zp.T @ zt) / N
+        L_BT = mean_i (1 - C_ii)^2  +  alpha * mean_{i != j} C_ij^2
+
+    (Mean-form per-entry terms, a documented scaling deviation from the
+    canonical sum-form so L_BT is O(1) per dimension rather than O(D);
+    reported in the final report §J.)
+
+    The projector is objective-owned (BarlowProjector, never shared with
+    VICReg). The EMA target encoder stays frozen; the target branch reaches
+    the objective projector only. The raw 384-D latent is NOT the projector
+    output; raw-space health is reported separately.
     """
 
     name = "jepa_barlow"
+    term_names = ("L_BT",)
 
-    def __init__(self, lambda_bt=1.0, alpha=0.005):
+    def __init__(self, lambda_bt=1.0, alpha=0.005,
+                 projector_input_dim=384, projector_hidden_dim=384,
+                 projector_output_dim=384):
+        super().__init__()
+        self.projector = BarlowProjector(
+            input_dim=projector_input_dim,
+            hidden_dim=projector_hidden_dim,
+            output_dim=projector_output_dim,
+        )
         self.lambda_bt = lambda_bt
         self.alpha = alpha
 
-    def __call__(self, model, G, S, M):
+    def forward(self, model, G, S, M):
         out = model(G, S, M)
         mask = out["mask"] if "mask" in out else _mask_from_M(M)
+        z_hat, z_y = out["z_hat"], out["z_y"]
 
-        L_J, _ = jepa_loss(
-            out["z_hat"],
-            out["z_y"],
-            mask,
-            proj=model.proj,
-        )
+        p_hat_full = self.projector(z_hat)                 # (B, 256, D)
+        p_y_full = self.projector(z_y)                     # (B, 256, D)
+        p_hat = p_hat_full[mask]                           # (N, D) masked tokens
+        p_y = p_y_full[mask]                               # (N, D) masked tokens
 
-        zh = model.proj(out["z_hat"])[mask]
-        zt = model.proj(out["z_y"])[mask]
-
-        L_BT, info = barlow_twins_loss(
-            zh,
-            zt,
-            alpha=self.alpha,
-        )
+        L_BT, info = barlow_twins_loss(p_hat, p_y, alpha=self.alpha)
 
         L_BT_w = self.lambda_bt * L_BT
-        total = L_J + L_BT_w
+        total = L_BT_w
         barlow_ratio = L_BT_w / total.clamp_min(1e-8)
+
         # info returns python floats; re-wrap as tensors so the training loop's
-        # tensor-only component accumulator picks them up (Batch 4 logging fix).
-        bt_diag = zh.new_tensor(info["diag_term"])
-        bt_off_diag = zh.new_tensor(info["off_diag_term"])
+        # tensor-only component accumulator picks them up.
+        bt_diag = p_hat.new_tensor(info["diag_term"])
+        bt_off_diag = p_hat.new_tensor(info["off_diag_term"])
 
         return {
             "total_loss": total,
             "components": {
-                "L_J": L_J,
                 "L_BT": L_BT,
                 "L_BT_weighted": L_BT_w,
                 "barlow_ratio": barlow_ratio,
                 "lambda_bt": self.lambda_bt,
+                "alpha": self.alpha,
                 "bt_diag": bt_diag,
                 "bt_off_diag": bt_off_diag,
             },
             "out": out,
+            "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
+            "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full},
         }
 
     def on_optimizer_step(self, model, step):
         model.ema.update(model.geometry_encoder, step)
 
 
-class LeJEPAObjective:
-    """Phase 2 — design-doc §3.3 Variant B: no EMA/teacher copy; SIGReg-style
-    distribution regularization on the embeddings directly.
+class LeJEPAObjective(nn.Module):
+    """Teacher-free LeJEPA (`lejepa`, §22; design doc §3.3 Variant B).
 
-    L = L_J (student encoder output as target, no stop-grad — the regularizer
-    prevents collapse) + lambda_sigreg * L_SIGReg on the projected masked
-    predictions. See src/losses/sigreg.py for the exact sliced-ECF math and its
-    reported hyperparameters.
+    No EMA/teacher copy: the model is run with `with_target=False`, and the
+    target is the STUDENT geometry encoder's own output on the full geometry —
+
+        z_hat = predictor(masked context, physics)
+        z_y   = student_encoder(G)          (no teacher, no stop-grad)
+
+    with
+
+        L = L_J(z_hat, z_y; stop_grad_target=False)
+          + lambda_sigreg * 0.5 * (L_SIGReg(p_hat) + L_SIGReg(p_y))
+
+    where p_hat/p_y are the objective-owned projector's outputs on masked
+    tokens and L_SIGReg is the sliced-ECF Gaussianity test in
+    `src/losses/sigreg.py`. Because there is no teacher, BOTH learnable
+    branches receive distributional pressure (a frozen target would collapse
+    nothing; here the target is a student output and needs the same guard).
+
+    `on_optimizer_step` is a no-op: there is no teacher copy to update. The
+    path never touches `model.ema` — verified by tests (test_lejepa_collapse).
     """
 
     name = "lejepa"
+    term_names = ("L_J", "L_SIGReg")
 
-    def __init__(self, lambda_sigreg=0.1, num_slices=8, num_points=256, seed=0):
+    def __init__(self, lambda_sigreg=0.1, num_slices=8, num_points=256, seed=0,
+                 projector_input_dim=384, projector_hidden_dim=384,
+                 projector_output_dim=384):
+        super().__init__()
+        self.projector = LeJEPAProjector(
+            input_dim=projector_input_dim,
+            hidden_dim=projector_hidden_dim,
+            output_dim=projector_output_dim,
+        )
         self.lambda_sigreg = lambda_sigreg
         self.sigreg_kwargs = dict(num_slices=num_slices, num_points=num_points, seed=seed)
 
-    def __call__(self, model, G, S, M):
+    def forward(self, model, G, S, M):
         mask = _mask_from_M(M)
         out = model(G, S, M, with_target=False)            # student z_hat, no EMA
         z_hat = out["z_hat"]                               # (B, 256, 384)
-        z_y = model.geometry_encoder(G)                     # student target, no EMA
-        L_J, _ = jepa_loss(z_hat, z_y, mask, proj=model.proj,
+        z_y = model.geometry_encoder(G)                    # student target, no EMA
+        L_J, _ = jepa_loss(z_hat, z_y, mask, proj=None,
                            stop_grad_target=False)  # LeJEPA: no stop-grad by design
-        zh = model.proj(z_hat)[mask]
-        L_sig, info = sigreg_loss(zh, **self.sigreg_kwargs)
+
+        p_hat_full = self.projector(z_hat)
+        p_y_full = self.projector(z_y)
+        p_hat = p_hat_full[mask]
+        p_y = p_y_full[mask]
+
+        L_sig_p, info_p = sigreg_loss(p_hat, **self.sigreg_kwargs)
+        L_sig_t, info_t = sigreg_loss(p_y, **self.sigreg_kwargs)
+        L_sig = 0.5 * (L_sig_p + L_sig_t)
+
         L_sig_w = self.lambda_sigreg * L_sig
         total = L_J + L_sig_w
         sigreg_ratio = L_sig_w / total.clamp_min(1e-8)
         return {"total_loss": total,
                 "components": {"L_J": L_J, "L_SIGReg": L_sig,
+                               "L_SIGReg_pred": L_sig_p,
+                               "L_SIGReg_target": L_sig_t,
                                "L_SIGReg_weighted": L_sig_w,
                                "sigreg_ratio": sigreg_ratio,
                                "lambda_sigreg": self.lambda_sigreg,
-                               "sigreg_info": info},
-                "out": {"z_hat": z_hat, "mask": mask, "z_y": z_y}}
+                               "sigreg_info": {"pred": info_p, "target": info_t}},
+                "out": {"z_hat": z_hat, "z_y": z_y, "mask": mask},
+                "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
+                "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full}}
 
     def on_optimizer_step(self, model, step):
         pass  # no teacher copy in this variant
 
 
-class JEPAVarianceObjective:
-    """Screening rung between `jepa` and `jepa_vicreg`: isolates the variance
-    term alone (no covariance), to test whether a variance floor by itself is
-    sufficient to prevent target collapse, before attributing any effect to
-    covariance/decorrelation pressure.
-
-    L = L_J + lambda_var * L_var, on the PROJECTED predictions of masked
-    tokens — same feature space jepa_vicreg regularizes, for a controlled
-    comparison where only the objective differs.
-    """
-
-    name = "jepa_var"
-
-    def __init__(self, lambda_var=1.0, gamma=1.0):
-        self.lambda_var = lambda_var
-        self.gamma = gamma
-
-    def __call__(self, model, G, S, M):
-        out = model(G, S, M)
-        mask = out["mask"] if "mask" in out else _mask_from_M(M)
-        L_J, _ = jepa_loss(out["z_hat"], out["z_y"], mask, proj=model.proj)
-        zh = model.proj(out["z_hat"])[mask]                 # (N, D) masked predictions
-        L_var, _ = vicreg_loss(zh, gamma=self.gamma, cov_on=False)
-        L_var_w = self.lambda_var * L_var                   # weighted regularizer
-        total = L_J + L_var_w
-        var_ratio = L_var_w / total.clamp_min(1e-8)         # share of total loss
-        return {"total_loss": total,
-                "components": {"L_J": L_J, "L_var": L_var, "L_var_weighted": L_var_w,
-                               "var_ratio": var_ratio,
-                               "lambda_var": self.lambda_var},
-                "out": out}
-
-    def on_optimizer_step(self, model, step):
-        model.ema.update(model.geometry_encoder, step)
-
-
 OBJECTIVES = {
-    "jepa": JEPAObjective,
-    "jepa_var": JEPAVarianceObjective,
-    # jepa_vicreg is the FAITHFUL EMA-JEPA + VICReg-style objective
-    # (VICRegObjective: objective-owned projector, invariance+variance+
-    # covariance on both projected branches). The historical single-branch
-    # JEPAVICRegObjective class remains importable for the regression tests
-    # that compare against it, but is no longer a ladder rung.
     "jepa_vicreg": VICRegObjective,
-    "jepa_vicreg2": JEPAVICRegDualObjective,
-    "jepa_barlow": JEPABarlowObjective,
+    "jepa_barlow": BarlowObjective,
     "lejepa": LeJEPAObjective,
 }
+
+
+def build_objective(name, params=None, projector_input_dim=384,
+                    projector_hidden_dim=384, projector_output_dim=384):
+    """Instantiate one registered objective from a config dict (§24).
+
+    One interface: `objective(model, G, S, M)` + `on_optimizer_step(model, step)`.
+    `params` is the config's `objective_params.<name>` dict; the optional nested
+    `projector: {input_dim, hidden_dim, output_dim}` overrides the model-latent
+    defaults. Unknown top-level keys raise (typo guard) rather than being
+    silently ignored.
+    """
+    if name not in OBJECTIVES:
+        raise KeyError(
+            f"unknown objective {name!r}; registered: {sorted(OBJECTIVES)}")
+    params = dict(params or {})
+    proj = dict(params.pop("projector", None) or {})
+    kwargs = dict(
+        projector_input_dim=proj.get("input_dim", projector_input_dim),
+        projector_hidden_dim=proj.get("hidden_dim", projector_hidden_dim),
+        projector_output_dim=proj.get("output_dim", projector_output_dim),
+    )
+    return OBJECTIVES[name](**{**params, **kwargs})

@@ -13,7 +13,7 @@ Required invariant (final pre-training directive, FIX B):
             |
     raw reference embeddings
             |
-    CURRENT CANDIDATE model.proj     <-- the projected comparison space
+    CANDIDATE OBJECTIVE's projector      <-- the projected comparison space (§17)
             |
     projected healthy reference stats
 
@@ -23,8 +23,8 @@ build_deterministic_reference() — produces:
   - identical raw reference statistics
   - identical projected reference statistics
   - identical health classification
-and that the candidate model's proj head (not a separately random head) defines
-the projected comparison space.
+and that the candidate objective's projector (not a separately random head)
+defines the projected comparison space.
 """
 
 import os
@@ -62,18 +62,27 @@ class _DetSpectrumPath:
                 torch.full((B, 1, 2, 4), 1.0 / 8.0))
 
 
+class _Objective:
+    """Objective-shaped carrier for the projection head (spec §17: the
+    projection lives on the objective, never on the model)."""
+
+    def __init__(self, k):
+        self.name = "determinism"
+        self.projector = _ScaleProj(k)
+
+
 class _RefModel(nn.Module):
     """Released-init-style reference stand-in: a random-initialized linear
     encoder (the part build_deterministic_reference must fix — its init consumes
     the ambient torch RNG, like build_model's random components) plus a
-    deterministic forward that returns the encoder output as z_hat/z_y."""
+    deterministic forward that returns the encoder output as z_hat/z_y. Carries
+    NO projector of its own."""
 
     def __init__(self, hidden=4, T=256, grid=64):
         super().__init__()
         self.hidden = hidden
         self.T = T
         self.linear = nn.Linear(3 * grid * grid, T * hidden)
-        self.proj = None
         self.spectrum_path = _DetSpectrumPath()
 
     def ema(self, G):
@@ -141,10 +150,9 @@ def test_healthy_reference_stats_identical_across_ambient_rng():
     RAW and PROJECTED reference statistics, whatever the ambient RNG state."""
     fv = _fixed_val()
     m1, m2 = _build_reference_pair()
-    cand = m1
-    cand.proj = _ScaleProj(5.0)
-    refs1 = healthy_references(m1, fv, proj_source=cand)
-    refs2 = healthy_references(m2, fv, proj_source=cand)
+    obj = _Objective(5.0)
+    refs1 = healthy_references(m1, fv, objective=obj)
+    refs2 = healthy_references(m2, fv, objective=obj)
 
     assert refs1["raw"] == refs2["raw"], "raw reference stats must be identical"
     assert refs1["proj"] == refs2["proj"], "projected reference stats must be identical"
@@ -159,32 +167,26 @@ def test_health_classification_identical_across_ambient_rng():
     states — the Run A HEALTHY vs Run B WARNING (votes=0) flip is fixed."""
     fv = _fixed_val()
     m1, m2 = _build_reference_pair()
-    cand = m1
-    cand.proj = _ScaleProj(5.0)
-    refs1 = healthy_references(m1, fv, proj_source=cand)
-    refs2 = healthy_references(m2, fv, proj_source=cand)
+    obj = _Objective(5.0)
+    refs1 = healthy_references(m1, fv, objective=obj)
+    refs2 = healthy_references(m2, fv, objective=obj)
 
-    _, h1 = fv.evaluate(cand, refs1["raw"], refs1["proj"])
-    _, h2 = fv.evaluate(cand, refs2["raw"], refs2["proj"])
+    _, h1 = fv.evaluate(m1, obj, refs1["raw"], refs1["proj"])
+    _, h2 = fv.evaluate(m2, obj, refs2["raw"], refs2["proj"])
     assert h1["status"] == h2["status"]
     assert h1["signals"]["votes"] == h2["signals"]["votes"]
     assert h1["signals"] == h2["signals"]
 
 
-def test_candidate_proj_defines_projected_comparison_space():
-    """The projected reference stats must be measured through the CURRENT
-    CANDIDATE's proj head — a k=10 candidate head gives 5x the projected
-    token_std of a k=2 head on the same raw embeddings (raw side unchanged)."""
+def test_objective_projector_defines_projected_comparison_space():
+    """The projected reference stats must be measured through the CANDIDATE
+    OBJECTIVE's projector — a k=10 objective projector gives 5x the projected
+    token_std of a k=2 projector on the same raw embeddings (raw side unchanged)."""
     fv = _fixed_val()
     m1, _ = _build_reference_pair()
 
-    class _Cand(nn.Module):
-        def __init__(self, k):
-            super().__init__()
-            self.proj = _ScaleProj(k)
-
-    refs_2 = healthy_references(m1, fv, proj_source=_Cand(2.0))
-    refs_10 = healthy_references(m1, fv, proj_source=_Cand(10.0))
-    assert refs_2["raw"] == refs_10["raw"], "raw stats must not move with proj_source"
+    refs_2 = healthy_references(m1, fv, objective=_Objective(2.0))
+    refs_10 = healthy_references(m1, fv, objective=_Objective(10.0))
+    assert refs_2["raw"] == refs_10["raw"], "raw stats must not move with the objective"
     s2, s10 = refs_2["proj"]["token_std"], refs_10["proj"]["token_std"]
     assert abs(s10 - 5.0 * s2) < 1e-4, f"projected stats must scale with proj k: {s2} vs {s10}"

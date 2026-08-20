@@ -12,14 +12,15 @@ from torch.utils.data import DataLoader, Subset
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO/'src'))
 from data.dataset import MetaDiTDataset
-from assembly import build_model, load_into_model
-from train.engine import FixedValidation, build_deterministic_reference, healthy_references
+from assembly import build_model
+from losses.objectives import build_objective
+from train.engine import (FixedValidation, build_deterministic_reference,
+                          healthy_references, load_checkpoint)
 
 CANDIDATES = {
-    'jepa_vicreg':'phase_00_jepa_vicreg_best_healthy.pt',
-    'jepa_vicreg2':'phase_01_jepa_vicreg2_best_healthy.pt',
-    'jepa_barlow':'phase_02_jepa_barlow_best_healthy.pt',
-    'lejepa':'phase_03_lejepa_best_healthy.pt',
+    'jepa_vicreg':'sweep_jepa_vicreg_latest.pt',
+    'jepa_barlow':'sweep_jepa_barlow_latest.pt',
+    'lejepa':'sweep_lejepa_latest.pt',
 }
 
 def path(x):
@@ -53,15 +54,14 @@ def disjoint_pools(n_total,n_pools,n_per_pool,seed):
     assert len(flat)==len(set(flat)), 'Pool overlap detected.'
     return pools
 
-def evaluate(model,reference,batches,cfg,ratio,mask_seed,device):
-    collapse=cfg.get('adaptive_training',{}).get('collapse',{})
+def evaluate(model,objective,reference,batches,cfg,ratio,mask_seed,device):
     fixed=FixedValidation(batches=batches,ratio=ratio,grid=16,
         min_side=cfg['mask'].get('min_side',3),
         k_range=tuple(cfg['mask'].get('k_range',[1,4])),
-        mask_seed=mask_seed,device=device,collapse_cfg=collapse)
-    refs=healthy_references(reference,fixed,proj_source=model)
-    metrics,health=fixed.evaluate(model,refs['raw'],refs['proj'],goal_mode='real')
-    _,null_cos,null_gap=fixed.null_gap(model)
+        mask_seed=mask_seed,device=device)
+    refs=healthy_references(reference,fixed,objective=objective)
+    metrics,health=fixed.evaluate(model,objective,refs['raw'],refs['proj'],goal_mode='real')
+    _,null_cos,null_gap=fixed.null_gap(model,objective)
     raw,proj,pred=health['raw'],health['proj'],health['pred']
     return {
       'cos_err':float(metrics['cos_err_r0.5']),'null_cos_err':float(null_cos),'null_gap':float(null_gap),
@@ -76,8 +76,8 @@ def evaluate(model,reference,batches,cfg,ratio,mask_seed,device):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('--config',default='configs/milestone_b_adaptive.yaml')
-    p.add_argument('--checkpoint-dir',default='checkpoints/milestone_b/adaptive')
+    p.add_argument('--config',default='configs/milestone_b.yaml')
+    p.add_argument('--checkpoint-dir',default='checkpoints/milestone_b')
     p.add_argument('--out-dir',default='checkpoints/milestone_b/unseen_multimask_eval')
     p.add_argument('--device',default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--sample-pools',type=int,default=2)
@@ -106,7 +106,10 @@ def main():
     for name,file in CANDIDATES.items():
         ck=path(a.checkpoint_dir)/file
         if not ck.exists(): raise FileNotFoundError(ck)
-        m=build(cfg,device); obj=torch.load(ck,map_location='cpu',weights_only=False); load_into_model(m,obj['model'],device); m.eval(); models[name]=m
+        m=build(cfg,device)
+        objective=build_objective(name, cfg.get('objective_params',{}).get(name,{}),
+                                  projector_input_dim=cfg['model'].get('hidden',384))
+        load_checkpoint(ck,m,objective,None,None,device); m.eval(); models[name]=(m,objective)
     pool_batches=[make_batches(ds,idx,a.batch_size,device) for idx in pools]
     rows=[]
     total=len(models)*len(pool_batches)*len(a.mask_ratios)*len(a.mask_seeds)
@@ -114,8 +117,8 @@ def main():
     for pi,batches in enumerate(pool_batches):
       for ratio in a.mask_ratios:
        for mseed in a.mask_seeds:
-        for name,m in models.items():
-          c+=1; r=evaluate(m,ref,batches,cfg,ratio,mseed,device)
+        for name,(m,objective) in models.items():
+          c+=1; r=evaluate(m,objective,ref,batches,cfg,ratio,mseed,device)
           rows.append(clean({'condition':c,'model':name,'pool':pi,'n_samples':a.samples_per_pool,
                              'mask_ratio':ratio,'mask_seed':mseed,**r}))
           print(f'[{c}/{total}] pool={pi} mask={ratio:.2f} seed={mseed} {name}: cos={r["cos_err"]:.7f} null={r["null_cos_err"]:.7f} gap={r["null_gap"]:.7f} status={r["health_status"]} votes={r["collapse_votes"]}')

@@ -42,10 +42,12 @@ class SpectrumPath(nn.Module):
     """Design doc §3.4: frozen released spectrum encoder + goal-token pooling.
 
     S -> A_local (B, 301, 256); A_g = MeanPool(A_local) projected to 384 dims (global
-    physics condition for AdaLN-Zero); A_goal = 16 learned queries cross-attending over
-    A_local, projected to 384 dims (fine spectral structure). With `goal_mode='null'`
-    both are replaced by zeros — the §7.2 cheap proxy for goal-ignoring collapse
-    (Failure Mode 2), available without the full goal-dropout/CFG machinery (§3.5.1).
+    physics condition c_physics, consumed by every predictor block via FiLM); A_goal =
+    16 learned queries cross-attending over A_local, projected to 384 dims (fine
+    spectral structure, retained as structured tokens inside the predictor's KV
+    sequence). With `goal_mode='null'` both are replaced by zeros — the §7.2 cheap
+    proxy for goal-ignoring collapse (Failure Mode 2), available without the full
+    goal-dropout/CFG machinery (§3.5.1).
     """
 
     def __init__(self, released_encoder, spec_dim=256, hidden=384, goal_tokens=16,

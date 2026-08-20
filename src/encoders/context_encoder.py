@@ -1,14 +1,15 @@
-"""Context encoder (§3.2): masked geometry -> Z_x (256 tokens), plus the Perceiver-IO
-bottleneck that compresses Z_x to 64 tokens before the predictor.
+"""Context encoder (§3.2): masked geometry -> Z_x, full-resolution 256 tokens.
 
 Known patches receive their normal patch embedding; masked locations receive a learned
 MASK token plus positional embedding (never zero-fill: "this location is unknown" is
 semantically distinct from "this location is physically zero"). The geometry encoder
 weights are shared with the student geometry encoder; only the mask token is new.
 
-The Perceiver bottleneck (§3.2) is a single cross-attention from 64 learned latent
-queries into the full 256-token Z_x, followed by an MLP — a pure efficiency measure;
-full-resolution Z_x remains available for the decoder's masked-replacement step (Milestone C).
+There is NO Perceiver bottleneck in the active path: the predictor receives all 256
+full-resolution context tokens (see `src/predictor/gclct.py`). The 64-token
+bottleneck described in design doc §3.2 was deliberately not built — the active
+architecture keeps 256 context tokens + 16 structured physics/goal tokens + a global
+physics condition, per the verified base architecture.
 """
 
 import torch

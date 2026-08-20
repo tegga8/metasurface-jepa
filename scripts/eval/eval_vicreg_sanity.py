@@ -1,13 +1,18 @@
-"""VICReg sanity audit — collapse diagnostics, physics controls, and the short
-end-to-end training audit for the `jepa_vicreg` objective (CODEX spec §13–§22).
+"""Shared Milestone-B offline evaluation — collapse diagnostics, physics controls,
+and the short end-to-end training audit, for ALL three registered objectives
+(jepa_vicreg, jepa_barlow, lejepa; architecture-repair spec §15/§25/§27/§28).
+
+One objective per run (`--objective`), one interface `objective(model, G, S, M)`
+(§24), projection always through the OBJECTIVE's projector — never a model
+attribute (§17).
 
 Two modes (standalone CLI, runnable on local dev CPU or cloud GPU):
 
 1. Checkpoint validation (default):
        python scripts/eval/eval_vicreg_sanity.py \
-           --checkpoint checkpoints/milestone_b/adaptive/phase_01_jepa_vicreg_best_healthy.pt \
+           --checkpoint checkpoints/milestone_b/sweep_jepa_vicreg_latest.pt \
            --config configs/milestone_b.yaml
-   Loads the model AND the VICReg objective from the checkpoint (a checkpoint
+   Loads the model AND the objective from the §30 checkpoint (a checkpoint
    missing objective_state fails loudly, spec §12), then reports, on identical
    validation samples and masks:
      - raw target / raw predictor / projected target / projected predictor
@@ -15,19 +20,22 @@ Two modes (standalone CLI, runnable on local dev CPU or cloud GPU):
        mean feature std, top-eigenvalue fraction, per-feature std stats),
      - geometry-level (masked-token mean-pooled per geometry) statistics,
      - projector input/output audit (singular values, condition number, ...),
-     - collapse gates incl. the PROJECTOR_COLLAPSE classification,
-     - raw-vs-projected prediction (spec §17),
-     - real / null / shuffled physics controls in raw and projected space.
+     - the five-way collapse classification (spec §26: RAW_COLLAPSE /
+       PROJECTOR_COLLAPSE / PHYSICS_CONDITIONING_FAILURE /
+       TARGET_GRADIENT_LEAK / INVALID_IMPLEMENTATION / HEALTHY),
+     - raw-vs-projected prediction (spec §27),
+     - real / null / shuffled physics controls in raw and projected space (§28).
 
-2. Short end-to-end audit (spec §22, before any long training):
+2. Short end-to-end audit (spec §15, before any long training):
        python scripts/eval/eval_vicreg_sanity.py --short-audit \
            --steps 200 --report-every 25 --subset 32 --batch-size 8 \
            --config configs/milestone_b.yaml
-   100-300 optimizer steps on a fixed small subset. Every `--report-every`
-   steps it reports loss components, raw/projected rank + pairwise cosine,
-   feature-std stats, projector singular values, and per-term gradient norms.
-   Aborts immediately on NaN/Inf loss or gradients, EMA-target gradients,
-   raw/projected collapse, or persistent extreme term domination.
+    100-300 optimizer steps on a fixed small subset. Every `--report-every`
+    steps it reports loss components, raw/projected rank + pairwise cosine,
+    feature-std stats, projector singular values, and per-term gradient norms
+    (per-objective `term_names`). Aborts immediately on NaN/Inf loss or
+    gradients, EMA-target gradients, raw/projected collapse, or persistent
+    extreme term domination.
 
 Run a tiny local crash test with `--smoke` (6 steps, 8 samples, CPU).
 """
@@ -49,11 +57,14 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 
-from assembly import build_model, load_into_model
+from assembly import build_model
 from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
-from diagnostics.representation_health import eff_ranks, pairwise_cos_stats
-from losses.objectives import VICRegObjective
+from diagnostics.representation_health import (
+    classify_failure_mode, eff_ranks, pairwise_cos_stats,
+)
+from losses.objectives import build_objective
+from train.engine import load_checkpoint
 
 PIXEL_GRID = 16
 EPS_SV = 1e-12
@@ -161,10 +172,9 @@ def cosine_err(a, b, mask):
 # model / objective loading
 # ---------------------------------------------------------------------------
 
-def load_model_and_objective(cfg, checkpoint, device):
-    """Build model + VICReg objective; restore objective state from the
-    checkpoint (spec §12: missing objective_state fails loudly)."""
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+def load_model_and_objective(cfg, checkpoint, device, name):
+    """Build model + objective; restore BOTH from the §30 checkpoint (missing
+    objective_state fails loudly inside load_checkpoint, spec §12)."""
     model = build_model(
         cfg["model"],
         os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
@@ -172,30 +182,10 @@ def load_model_and_objective(cfg, checkpoint, device):
         init_from_metadit=cfg["model"].get("init_from_metadit", True),
         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]),
     )
-    load_into_model(model, ckpt["model"], device)
-
-    vicreg_cfg = cfg.get("vicreg", {})
-    loss_cfg = dict(vicreg_cfg.get("loss", {}))
-    proj_cfg = dict(vicreg_cfg.get("projector", {}))
-    objective = VICRegObjective(
-        lambda_inv=loss_cfg.get("lambda_inv", 25.0),
-        lambda_var=loss_cfg.get("lambda_var", 25.0),
-        lambda_cov=loss_cfg.get("lambda_cov", 1.0),
-        gamma=loss_cfg.get("gamma", 1.0),
-        eps=loss_cfg.get("eps", 1e-4),
-        projector_input_dim=proj_cfg.get("input_dim", 384),
-        projector_hidden_dim=proj_cfg.get("hidden_dim", 384),
-        projector_output_dim=proj_cfg.get("output_dim", 384),
-    )
-    if ckpt.get("objective_name") == objective.name and \
-            "objective_state" in ckpt:
-        objective.load_state_dict(ckpt["objective_state"])
-        print(f"[eval_vicreg_sanity] restored objective state from {checkpoint}")
-    elif any(p.requires_grad for p in objective.parameters()):
-        raise RuntimeError(
-            f"checkpoint {checkpoint} is missing objective_state for "
-            f"{objective.name} — refusing to evaluate with a freshly "
-            f"initialized projector (spec §12: fail loudly)")
+    objective = build_objective(
+        name, cfg.get("objective_params", {}).get(name, {}),
+        projector_input_dim=cfg["model"].get("hidden", 384))
+    ckpt = load_checkpoint(checkpoint, model, objective, None, None, device)
     model.eval()
     model.ema.eval()
     objective.eval()
@@ -228,8 +218,8 @@ def _load_fixed_validation(cfg, device, n_samples, batch_size, ratio=0.5,
 def validate_checkpoint(cfg, args):
     device = torch.device(args.device)
     set_seed(args.seed)
-    model, objective, ckpt = load_model_and_objective(cfg, args.checkpoint,
-                                                      device)
+    model, objective, ckpt = load_model_and_objective(
+        cfg, args.checkpoint, device, args.objective)
     batches, masks = _load_fixed_validation(
         cfg, device, args.subset, args.batch_size, ratio=args.mask_ratio,
         mask_seed=args.mask_seed)
@@ -287,7 +277,7 @@ def validate_checkpoint(cfg, args):
             phys["null_proj"].append(cosine_err(P(out_n["z_hat"]), p_n_zy, mask))
             phys["shuf_proj"].append(cosine_err(P(out_s["z_hat"]), p_s_zy, mask))
 
-            # raw-vs-projected prediction on identical samples/masks (§17)
+            # raw-vs-projected prediction on identical samples/masks (§27)
             m = mask
             pred["raw_cos"].append(F.cosine_similarity(
                 F.normalize(zh, dim=-1), F.normalize(zy, dim=-1), dim=-1
@@ -337,12 +327,39 @@ def validate_checkpoint(cfg, args):
         "projected_cosine_pzhat_pzy": float(np.mean(pred["proj_cos"])),
     }
 
+    # five-way classification (§26): physics gates use the RAW-space controls so
+    # the verdict is independent of projector health. Healthy references come
+    # from a deterministic released-init build on the SAME fixed validation set.
+    from train.engine import (FixedValidation, build_deterministic_reference,
+                              healthy_references)
+    from diagnostics.representation_health import token_space_stats
+    fv = FixedValidation(batches, ratio=args.mask_ratio, device=device,
+                         mask_seed=args.mask_seed)
+    refs_model = build_deterministic_reference(
+        lambda: build_model(cfg["model"],
+                            os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]),
+                            device=device,
+                            init_from_metadit=cfg["model"].get("init_from_metadit", True),
+                            metadit_weights=os.path.join(REPO_ROOT,
+                                                         cfg["weights"]["metadit"])))
+    refs_model.eval()
+    refs = healthy_references(refs_model, fv, objective=objective)
+    raw_stats = token_space_stats(zy)
+    proj_stats = token_space_stats(p_zy)
+    failure = classify_failure_mode(
+        raw_stats, proj_stats, refs["raw"], refs["proj"],
+        physics_gap=physics["raw_real_vs_null_improvement"],
+        physics_shuffle_delta=abs(physics["raw_real_vs_shuffled_improvement"]),
+        target_gradient_leak=False,
+        invalid_implementation=None)
+
     report = {
         "checkpoint": args.checkpoint,
-        "objective": "jepa_vicreg",
+        "objective": args.objective,
         "spaces": diag,
         "physics": physics,
         "prediction": pred_metrics,
+        "failure_mode": failure,
         "mask_statistics": {
             "ratio": args.mask_ratio, "seed": args.mask_seed,
             "n_batches": len(batches),
@@ -351,7 +368,7 @@ def validate_checkpoint(cfg, args):
     }
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "eval_vicreg_sanity.json"
+    path = out_dir / f"eval_{args.objective}_sanity.json"
     with open(path, "w") as f:
         json.dump(report, f, indent=2, default=float)
     print(json.dumps(report, indent=2))
@@ -400,7 +417,7 @@ def classify_collapse(diag):
 
 
 # ---------------------------------------------------------------------------
-# short end-to-end audit (spec §22)
+# short end-to-end audit (spec §15)
 # ---------------------------------------------------------------------------
 
 def _bn_snapshot(module):
@@ -423,13 +440,13 @@ def _bn_restore(snaps):
 
 
 def _term_grad_norms(obj, model, G, S, M, params):
-    """Unweighted per-term gradient norms (spec §22): forward + backward of
-    each of L_inv / L_var / L_cov separately (zeroing grads between), with the
-    projector's BN statistics snapshotted so the diagnostic is measurement-only.
-    Returns {term: grad_norm}."""
+    """Unweighted per-term gradient norms (spec §15): forward + backward of each
+    of the objective's `term_names` components separately (zeroing grads
+    between), with the projector's BN statistics snapshotted so the diagnostic
+    is measurement-only. Returns {term: grad_norm}."""
     snap = _bn_snapshot(obj.projector)
     norms = {}
-    for term in ("L_inv", "L_var", "L_cov"):
+    for term in obj.term_names:
         for p in params:
             if p.grad is not None:
                 p.grad = None
@@ -457,19 +474,9 @@ def run_short_audit(cfg, args):
     subset_n = 8 if args.smoke else args.subset
     batch_size = 2 if args.smoke else args.batch_size
 
-    vicreg_cfg = cfg.get("vicreg", {})
-    loss_cfg = dict(vicreg_cfg.get("loss", {}))
-    proj_cfg = dict(vicreg_cfg.get("projector", {}))
-    objective = VICRegObjective(
-        lambda_inv=loss_cfg.get("lambda_inv", 25.0),
-        lambda_var=loss_cfg.get("lambda_var", 25.0),
-        lambda_cov=loss_cfg.get("lambda_cov", 1.0),
-        gamma=loss_cfg.get("gamma", 1.0),
-        eps=loss_cfg.get("eps", 1e-4),
-        projector_input_dim=proj_cfg.get("input_dim", 384),
-        projector_hidden_dim=proj_cfg.get("hidden_dim", 384),
-        projector_output_dim=proj_cfg.get("output_dim", 384),
-    )
+    objective = build_objective(
+        args.objective, cfg.get("objective_params", {}).get(args.objective, {}),
+        projector_input_dim=cfg["model"].get("hidden", 384))
 
     model = build_model(
         cfg["model"],
@@ -502,6 +509,7 @@ def run_short_audit(cfg, args):
     step = 0
     abort_reason = None
     domination_streak = 0
+    sigreg_info = None
     while step < steps:
         for G, S in loader:
             if step >= steps:
@@ -512,6 +520,8 @@ def run_short_audit(cfg, args):
             res = objective(model, G, S, M)
             total = res["total_loss"]
             comps = res["components"]
+            if isinstance(comps.get("sigreg_info"), dict):
+                sigreg_info = comps["sigreg_info"]
             if not torch.isfinite(total):
                 abort_reason = f"NaN/Inf total loss at step {step}"
                 break
@@ -529,10 +539,10 @@ def run_short_audit(cfg, args):
             objective.on_optimizer_step(model, step)
 
             if step % report_every == 0:
-                row = _audit_row(
-                    step, model, objective, G, S, M, comps, params, args)
+                row = _audit_row(step, model, objective, G, S, M, comps,
+                                 params, args)
                 rows.append(row)
-                # Spec §22 aborts. Collapse is judged RELATIVE to the run's own
+                # Spec §15 aborts. Collapse is judged RELATIVE to the run's own
                 # released-init start (first report), not by arbitrary absolute
                 # thresholds that would fire on a healthy initialized model.
                 if step == 0:
@@ -543,10 +553,9 @@ def run_short_audit(cfg, args):
                         abort_reason = reason
                         break
 
-            term_ratios = {k: comps[k].item() for k in ("inv_ratio",
-                                                        "var_ratio",
-                                                        "cov_ratio")}
-            if max(term_ratios.values()) > 0.999:
+            term_ratios = {k: comps[k].item() / max(total.item(), 1e-9)
+                           for k in _weighted_terms(comps)}
+            if term_ratios and max(term_ratios.values()) > 0.999:
                 domination_streak += 1
             else:
                 domination_streak = 0
@@ -564,15 +573,12 @@ def run_short_audit(cfg, args):
     else:
         print(f"[short-audit] completed {step} optimizer steps")
 
-    report = {"mode": "short_audit", "steps": step, "abort_reason": abort_reason,
-              "config": {"lambda_inv": objective.lambda_inv,
-                         "lambda_var": objective.lambda_var,
-                         "lambda_cov": objective.lambda_cov,
-                         "gamma": objective.gamma, "eps": objective.eps,
-                         "lr": args.lr, "wd": args.wd,
+    report = {"mode": "short_audit", "objective": args.objective,
+              "steps": step, "abort_reason": abort_reason,
+              "config": {"lr": args.lr, "wd": args.wd,
                          "mask_ratio": args.mask_ratio},
-              "rows": rows}
-    path = out_dir / "eval_vicreg_short_audit.json"
+              "rows": rows, "sigreg_info": sigreg_info}
+    path = out_dir / f"eval_{args.objective}_short_audit.json"
     with open(path, "w") as f:
         json.dump(report, f, indent=2, default=float)
     for r in rows:
@@ -582,8 +588,16 @@ def run_short_audit(cfg, args):
         sys.exit(1)
 
 
+def _weighted_terms(comps):
+    """Component keys that are weighted loss terms (ratio candidates): keys
+    ending in '_weighted' plus the unweighted L_J (LeJEPA)."""
+    return [k for k in comps
+            if isinstance(comps[k], torch.Tensor)
+            and (k.endswith("_weighted") or k == "L_J")]
+
+
 def _audit_collapse_abort(row, base):
-    """Reference-relative abort verdict for one audit report (spec §22). All
+    """Reference-relative abort verdict for one audit report (spec §15). All
     signals are measured against the run's own first report (released-init
     baseline): raw collapse = raw target rank fraction halved while the
     cross-geometry p05 cosine approaches identity (past both 0.98 and the
@@ -650,15 +664,10 @@ def _audit_row(step, model, objective, G, S, M, comps, params, args):
             {"mean": float("nan")}
 
     grads = _term_grad_norms(objective, model, G, S, M, params)
-    return {
+    row = {
         "step": step,
-        "L_total": comps["L_inv_weighted"].item() + comps["L_var_weighted"].item()
-        + comps["L_cov_weighted"].item(),
-        "L_inv": comps["L_inv"].item(), "L_var": comps["L_var"].item(),
-        "L_cov": comps["L_cov"].item(),
-        "inv_ratio": comps["inv_ratio"].item(),
-        "var_ratio": comps["var_ratio"].item(),
-        "cov_ratio": comps["cov_ratio"].item(),
+        "L_total": comps["total_loss"].item() if "total_loss" in comps
+        else sum(v.item() for v in comps.values() if isinstance(v, torch.Tensor)),
         "raw_target_rank": r_zy, "raw_predictor_rank": r_zh,
         "raw_target_rank_frac": f_zy, "raw_predictor_rank_frac": f_zh,
         "proj_target_rank": r_pzy, "proj_predictor_rank": r_pzh,
@@ -674,10 +683,13 @@ def _audit_row(step, model, objective, G, S, M, comps, params, args):
         "proj_mean_feature_std": feature_std_stats(p_zh_m)["mean_std"],
         "proj_frac_std_lt_0p1": feature_std_stats(p_zh_m)["frac_std_lt_0p1"],
         "projector_sv": sv_stats(p_zh_m),
-        "grad_norm_inv": grads["L_inv"],
-        "grad_norm_var": grads["L_var"],
-        "grad_norm_cov": grads["L_cov"],
     }
+    for k, v in comps.items():
+        if isinstance(v, torch.Tensor):
+            row[f"comp_{k}"] = v.item()
+    for term, norm in grads.items():
+        row[f"grad_norm_{term}"] = norm
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -685,10 +697,12 @@ def _audit_row(step, model, objective, G, S, M, comps, params, args):
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="VICReg sanity audit")
+    p = argparse.ArgumentParser(description="Shared Milestone-B sanity audit")
     p.add_argument("--config", required=True)
+    p.add_argument("--objective", default=None,
+                   help="objective name (default: config objective)")
     p.add_argument("--checkpoint", default=None,
-                   help="phase checkpoint for validation mode")
+                   help="§30 checkpoint for validation mode")
     p.add_argument("--short-audit", action="store_true",
                    help="run the 100-300 step short end-to-end audit")
     p.add_argument("--steps", type=int, default=200)
@@ -713,6 +727,8 @@ def main():
     args = parse_args()
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+    if args.objective is None:
+        args.objective = cfg.get("objective", "jepa_vicreg")
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     if args.smoke:

@@ -2,9 +2,14 @@
 # Canonical sizes from design doc §11; run via
 #   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml
 #   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml --experiment sweep
-#   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml --model-variant direct
+#   python scripts/train/train_milestone_b.py --config configs/milestone_b.yaml \
+#       --objective lejepa
+# One objective per run, from the final three-registry (§23):
+#   jepa_vicreg | jepa_barlow | lejepa
 experiment: minimal            # minimal: §7.2 fixed 50% block-mask, random placement only
                                # sweep:   §7 Phase 2 full training at 20/40/60/80/100%
+objective: jepa_vicreg
+
 minimal:
   mask_ratio: 0.5
   mask_placement: random       # §7.2 step 1: "blocks placed uniformly at random for this first test"
@@ -13,66 +18,42 @@ sweep:
   mask_placement: half_sensitivity         # §2: half random / half resonance-relevant
 
 # ---------------------------------------------------------------------------
-# VICReg objective configuration (CODEX spec §23 — explicit, configurable values;
-# official VICReg's sim/std/cov coefficients are NOT copied blindly into this
-# token-level setting; start from these defaults and tune on gradient scales).
+# Per-objective hyperparameters (CODEX spec §23/§24 — explicit, configurable
+# values; official VICReg/Barlow/LeJEPA coefficients are not copied blindly into
+# this token-level setting; start from these defaults and tune on gradient
+# scales). `projector` overrides the model-latent default (384); every objective
+# owns its projector and there is no model.proj (§17).
 # ---------------------------------------------------------------------------
-vicreg:
-  projector:
-    input_dim: 384
-    hidden_dim: 384
-    output_dim: 384
-  loss:
+objective_params:
+  jepa_vicreg:
+    projector:
+      input_dim: 384
+      hidden_dim: 384
+      output_dim: 384
     lambda_inv: 25.0
     lambda_var: 25.0
     lambda_cov: 1.0
     gamma: 1.0
     eps: 1.0e-4
-
-# ---------------------------------------------------------------------------
-# Adaptive screening ladder (operator override 2026-08-17). This is the VICReg
-# experiment's training path: short `jepa` baseline rung, then the faithful
-# EMA-JEPA + VICReg-style `jepa_vicreg` candidate (VICRegObjective, owns its
-# projector; optimizer = model params + objective params; objective state is
-# checkpointed and restored on resume). The historical model.proj-dependent
-# rungs (jepa_var / jepa_vicreg2 / jepa_barlow / lejepa) are not part of this
-# experiment — the refactored 256x384 model has no model.proj.
-# ---------------------------------------------------------------------------
-adaptive_training:
-  enabled: true
-  objectives: [jepa, jepa_vicreg]
-  max_total_steps: 1800
-  warmup_steps: 200
-  plateau_patience: 2
-  collapse_patience: 2
-  min_delta: 1.0e-5
-  lr: 0.0001
-  wd: 0.05
-  grad_accum: 2
-  batch_size: 64
-  val_every_steps: 100
-  log_every_steps: 25
-  lr_warmup_steps: 200
-  clip_grad_norm: 1.0
-  fixed_val_subset: 512
-  val_batch_size: 32
-  mask_ratio: 0.5
-  mask_seed: 12345
-  refs_seed: 2026
-  fresh_start_each_objective: false
-  save_optimizer: true
-  collapse:
-    eff_rank_frac_div: 3.0
-    p05_plus: 0.005
-    same_token_plus: 0.005
-    std_div: 3.0
-    collapse_votes: 3
-    near_rank: 0.05
-    near_p05: 0.02
-    near_same: 0.05
+  jepa_barlow:
+    projector:
+      input_dim: 384
+      hidden_dim: 384
+      output_dim: 384
+    lambda_bt: 1.0
+    alpha: 0.005
+  lejepa:
+    projector:
+      input_dim: 384
+      hidden_dim: 384
+      output_dim: 384
+    lambda_sigreg: 0.1
+    num_slices: 8
+    num_points: 256
+    seed: 0
 
 model:
-  variant: jepa                # jepa (GoalConditionedJEPA) | direct (Baseline 2)
+  variant: jepa                # jepa only (GoalConditionedJEPA) — direct moved to src/reference/
   patch_size: 4                # §11
   token_grid: 16               # 64 / 4 -> block masks operate here (§2)
   hidden: 384                  # §11 geometry encoder / predictor
@@ -80,7 +61,6 @@ model:
   num_predictor_heads: 6
   geo_depth: 6                 # §11 geometry encoder blocks
   predictor_depth: 8           # §11 predictor blocks (dense attention only this milestone)
-  bottleneck_tokens: 64        # §3.2 Perceiver-IO bottleneck
   goal_tokens: 16              # §3.4 / §11 physics bottleneck
   num_goal_heads: 4
   ema_momentum_start: 0.996    # §3.3 Variant A
@@ -89,6 +69,7 @@ model:
 mask:
   min_side: 3                  # §2 minimum block side length in tokens
   k_range: [1, 4]              # §2 "Sample 1-4 axis-aligned rectangular blocks"
+  mask_seed: 12345             # fixed-validation mask seed (shared, deterministic)
 
 data:
   train_split: data/metadit/split_data/train_set.mat

@@ -1,4 +1,4 @@
-"""Regression tests for BUGLOG Tier 2 rows #7-#12 (2026-08-18).
+"""Regression tests for BUGLOG Tier 2 rows #7-#9, #11 (2026-08-18).
 
 #7  healthy_references() must project on the model's device — no .cpu() before
     proj and no .cuda() hack (the projection input must be the exact tensor the
@@ -7,12 +7,14 @@
     batch), including n_samples < batch_size.
 #9  mask coverage std must use population std (unbiased std of one sample is NaN).
 #11 load_into_model must refuse silent non-strict loads.
-#12 AdaptiveController state_dict/load_state_dict must round-trip patience
-    counters, histories, transitions, and phase bookkeeping exactly, and the
-    restored counters must drive subsequent decisions.
+
+#12 was the AdaptiveController state round-trip — the adaptive ladder was
+removed in the architecture repair (controller and LOSS_LADDER deleted); the
+resume-integrity contract it protected now lives in the §30 checkpoint tests
+(tests/test_checkpoint_resume.py) and the engine's load_checkpoint strictness.
 
 (#10 — global_step counts optimizer steps under grad_accum>1 — is verified by
-integration runs of the adaptive smoke with grad_accum=1 vs 2; see BUGLOG.)
+integration runs with grad_accum=1 vs 2; see the Milestone B BUGLOG.)
 
 Run:  python tests/test_tier2_fixes.py   (pytest-collectable)
 """
@@ -29,7 +31,6 @@ import torch
 import torch.nn as nn
 
 from assembly import load_into_model, saveable_state_dict  # noqa: E402
-from train.adaptive import AdaptiveController  # noqa: E402
 from train.engine import (  # noqa: E402
     FixedValidation, fixed_validation_from_loader, healthy_references,
 )
@@ -62,9 +63,14 @@ def test_healthy_references_projects_ema_output_object():
                 proj_seen["ema_object"] = True     # Bug #14: z_y must be projected
             return x * 2.0                          # in-place, never transformed
 
+    class _Objective:
+        """Objective-shaped carrier for the projector (spec §17: the projection
+        lives on the objective, never on the model)."""
+        name = "tier2"
+        projector = _Proj()
+
     class _Model:
         def __init__(self):
-            self.proj = _Proj()
             self.ema = _Ema()
             self.training = False
 
@@ -87,7 +93,7 @@ def test_healthy_references_projects_ema_output_object():
         return original_cuda(self, *a, **k)
     torch.Tensor.cuda = _raise_cuda
     try:
-        refs = healthy_references(_Model(), fv)
+        refs = healthy_references(_Model(), fv, objective=_Objective())
     finally:
         torch.Tensor.cuda = original_cuda
 
@@ -203,64 +209,6 @@ def test_load_filters_released_keys_before_strict():
     assert not any(".released." in k for k in sd)
     m2 = _WithReleased()
     load_into_model(m2, sd, "cpu")          # released filter → no mismatch
-
-
-# --------------------------------------------------------------------------
-# #12 — AdaptiveController state round-trip
-# --------------------------------------------------------------------------
-
-def test_controller_state_roundtrip_exact():
-    c = AdaptiveController({"max_total_steps": 100, "warmup_steps": 5,
-                            "plateau_patience": 2, "min_delta": 1e-5,
-                            "collapse_patience": 2}, ["jepa", "lejepa"])
-    c.start_phase("jepa", 0)
-    c.on_validation(0.9, "HEALTHY", 10)
-    c.on_validation(0.7, "HEALTHY", 20)     # improvement
-    c.on_validation(0.72, "HEALTHY", 30)    # plateau_bad = 1
-
-    sd = c.state_dict()
-    c2 = AdaptiveController({}, ["unrelated"])   # wrong config on purpose
-    c2.max_total_steps = 7
-    c2.load_state_dict(sd)
-
-    assert c2.max_total_steps == 100 and c2.objectives == ["jepa", "lejepa"]
-    assert c2.transitions == c.transitions
-    p = c2.phase
-    assert p.objective == "jepa" and p.idx == 0
-    assert p.start_global_step == 0
-    assert p.plateau_bad == 1 and p.collapse_bad == 0
-    assert p.best_metric == 0.7 and p.best_step == 20
-    assert p.metric_history == [0.9, 0.7, 0.72]
-    assert p.health_history == ["HEALTHY", "HEALTHY", "HEALTHY"]
-
-
-def test_restored_counters_drive_future_decisions():
-    """The restored plateau counter must actually trigger switching on the next
-    non-improvement — the point of bug #12 (resume was restarting patience)."""
-    c = AdaptiveController({"max_total_steps": 100, "warmup_steps": 0,
-                            "plateau_patience": 2, "min_delta": 1e-5,
-                            "collapse_patience": 2}, ["jepa", "lejepa"])
-    c.start_phase("jepa", 0)
-    c.on_validation(0.9, "HEALTHY", 10)     # improvement (best=0.9, bad=0)
-    c.on_validation(0.91, "HEALTHY", 20)    # non-improvement -> plateau_bad = 1
-
-    c2 = AdaptiveController({}, ["x"])
-    c2.load_state_dict(c.state_dict())
-    assert c2.phase.plateau_bad == 1
-    d = c2.on_validation(0.92, "HEALTHY", 30)   # plateau_bad -> 2 -> switch
-    assert d["action"] == "switch", (
-        "restored plateau counter must fire on the next non-improvement, "
-        f"got action={d['action']}")
-    assert d["transition"]["next"] == "lejepa"
-
-
-def test_controller_state_without_phase():
-    c = AdaptiveController({"max_total_steps": 50}, ["jepa"])
-    sd = c.state_dict()
-    assert sd["phase"] is None
-    c2 = AdaptiveController({}, ["x"])
-    c2.load_state_dict(sd)
-    assert c2.phase is None and c2.max_total_steps == 50
 
 
 if __name__ == "__main__":

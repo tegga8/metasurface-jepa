@@ -9,7 +9,9 @@ producing p=-1 normalization over the token dim and garbage cos_err values
 
 These tests pin the contract that any metric path touching prediction quality
 (evaluate / null_gap) is (a) the identical formula with dim=-1, (b) invariant
-to call order, and (c) pure — no input or weight mutation.
+to call order, and (c) pure — no input or weight mutation. Projection is the
+OBJECTIVE's (spec §17), so the frozen-projection assertions check the objective
+projector, never a model attribute.
 
 Run:  python tests/test_null_gap_metric_consistency.py   (pytest-collectable)
 """
@@ -65,15 +67,23 @@ class _FakeSpectrumPath:
         return (torch.randn(B, 4), torch.randn(B, 2, 3), torch.rand(B, 1, 2, 4))
 
 
+class _Objective:
+    """Objective-shaped carrier for the projection head (spec §17). Frozen
+    during evaluate/null_gap (no autograd), like the real objective projector."""
+
+    def __init__(self, seed=0):
+        self.name = "nullgap"
+        torch.manual_seed(seed)
+        self.projector = torch.nn.Linear(3, 3)
+
+
 class _FakeModel:
     """Deterministic model-shaped object: outputs are a pure function of the
-    inputs (no RNG), so every metric path sees bit-identical forwards. Carries a
-    real projection head and records every call."""
+    inputs (no RNG), so every metric path sees bit-identical forwards. Carries
+    NO projector of its own (spec §17). Records every call."""
 
     def __init__(self, seed=0):
         self.seed = seed
-        torch.manual_seed(seed)
-        self.proj = torch.nn.Linear(3, 3)
         self.spectrum_path = _FakeSpectrumPath()
         self.calls = []
         self.training = False
@@ -104,17 +114,18 @@ def _fixed_val_and_model():
     S = torch.randn(2, 301)
     fv = FixedValidation([(G, S), (G, S)], ratio=0.5, mask_seed=12345, device="cpu")
     model = _FakeModel()
+    obj = _Objective()
     raw = token_space_stats(torch.randn(4, 2, 3))
     proj_stats = token_space_stats(torch.randn(4, 2, 3))
-    return fv, model, raw, proj_stats
+    return fv, model, obj, raw, proj_stats
 
 
 def test_null_gap_real_equals_evaluate_cos_err():
     """null_gap's real-mode cos_err and evaluate's cos_err must be bit-identical
-    (same batches, masks, formula, dim=-1 normalization)."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model)
-    metrics, _ = fv.evaluate(model, raw, proj_stats)
+    (same batches, masks, formula, dim=-1 normalization, same objective projector)."""
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    real, null, gap = fv.null_gap(model, obj)
+    metrics, _ = fv.evaluate(model, obj, raw, proj_stats)
     assert real == metrics["cos_err_r0.5"], (
         f"null_gap real {real} != evaluate cos_err {metrics['cos_err_r0.5']}")
 
@@ -123,65 +134,66 @@ def test_null_gap_null_equals_evaluate_null_mode():
     """null_gap's null-mode cos_err must equal evaluate(goal_mode='null'). The
     target z_y is EMA-style (goal-independent, from the full geometry), so the
     null prediction is scored against the same target in both paths."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model)
-    metrics, _ = fv.evaluate(model, raw, proj_stats, goal_mode="null")
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    real, null, gap = fv.null_gap(model, obj)
+    metrics, _ = fv.evaluate(model, obj, raw, proj_stats, goal_mode="null")
     assert null == metrics["cos_err_r0.5"], (
         f"null_gap null {null} != evaluate(null) {metrics['cos_err_r0.5']}")
 
 
 def test_null_gap_gap_positive_with_distinct_goals():
     """A non-null goal must change z_hat on masked tokens: gap > 0."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model)
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    real, null, gap = fv.null_gap(model, obj)
     assert gap > 0.0, f"goal gap collapsed: {gap}"
 
 
 def test_order_invariance_evaluate_nullgap_evaluate():
     """Metric values must not depend on which path ran first (canonical →
     diagnostic → canonical), i.e. no hidden state pollution between paths."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
-    m1, _ = fv.evaluate(model, raw, proj_stats)
-    real, null, gap = fv.null_gap(model)
-    m2, _ = fv.evaluate(model, raw, proj_stats)
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    m1, _ = fv.evaluate(model, obj, raw, proj_stats)
+    real, null, gap = fv.null_gap(model, obj)
+    m2, _ = fv.evaluate(model, obj, raw, proj_stats)
     assert m1["cos_err_r0.5"] == m2["cos_err_r0.5"], (
         f"cos_err changed across call order: {m1['cos_err_r0.5']} -> "
         f"{m2['cos_err_r0.5']}")
     # reversed order as well
-    fv2, model2, _, _ = _fixed_val_and_model()
-    r2, n2, g2 = fv2.null_gap(model2)
-    m3, _ = fv2.evaluate(model2, raw, proj_stats)
-    r3, n3, g3 = fv2.null_gap(model2)
+    fv2, model2, obj2, _, _ = _fixed_val_and_model()
+    r2, n2, g2 = fv2.null_gap(model2, obj2)
+    m3, _ = fv2.evaluate(model2, obj2, raw, proj_stats)
+    r3, n3, g3 = fv2.null_gap(model2, obj2)
     assert (r2, n2, g2) == (r3, n3, g3) and m3["cos_err_r0.5"] == m1["cos_err_r0.5"]
 
 
 def test_evaluate_and_null_gap_do_not_mutate_inputs():
     """G/S/M tensors must be bit-identical after evaluate and null_gap."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
     G0, S0 = fv.batches[0]
     M0 = fv.masks[0].clone()
     g0, s0, m0 = G0.clone(), S0.clone(), M0.clone()
-    fv.evaluate(model, raw, proj_stats)
-    fv.null_gap(model)
+    fv.evaluate(model, obj, raw, proj_stats)
+    fv.null_gap(model, obj)
     assert torch.equal(G0, g0) and torch.equal(S0, s0) and torch.equal(M0, m0), (
         "evaluate/null_gap mutated fixed inputs")
 
 
-def test_proj_weights_invariant_under_evaluate_and_null_gap():
-    """The projection head must be frozen (no grad accumulation) across both paths."""
-    fv, model, raw, proj_stats = _fixed_val_and_model()
-    w0 = model.proj.weight.detach().clone()
-    b0 = model.proj.bias.detach().clone()
-    fv.evaluate(model, raw, proj_stats)
-    fv.null_gap(model)
-    assert torch.equal(model.proj.weight, w0) and torch.equal(model.proj.bias, b0)
-    assert model.proj.weight.grad is None and model.proj.bias.grad is None
+def test_projector_weights_invariant_under_evaluate_and_null_gap():
+    """The objective's projection head must be frozen (no grad accumulation)
+    across both paths."""
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    w0 = obj.projector.weight.detach().clone()
+    b0 = obj.projector.bias.detach().clone()
+    fv.evaluate(model, obj, raw, proj_stats)
+    fv.null_gap(model, obj)
+    assert torch.equal(obj.projector.weight, w0) and torch.equal(obj.projector.bias, b0)
+    assert obj.projector.weight.grad is None and obj.projector.bias.grad is None
 
 
 def test_model_mode_restored_after_null_gap():
-    fv, model, raw, proj_stats = _fixed_val_and_model()
+    fv, model, obj, raw, proj_stats = _fixed_val_and_model()
     model.train()
-    fv.null_gap(model)
+    fv.null_gap(model, obj)
     assert model.training is True
     assert all(c["need_attn"] is False for c in model.calls)
 
@@ -191,7 +203,7 @@ def test_need_weights_branch_does_not_change_predictions():
     extraction — a numerical drift here would re-open the in-loop vs winner-eval
     divergence the audit removed (need_attn=True path)."""
     torch.manual_seed(3)
-    g = GCLCT(depth=2, hidden=16, num_heads=2, head_type="latent")
+    g = GCLCT(depth=2, hidden=16, num_heads=2)
     g.eval()
     queries = torch.randn(1, 256, 16)
     kv = torch.randn(1, 80, 16)

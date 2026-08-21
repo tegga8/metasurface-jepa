@@ -2,7 +2,7 @@
 
 **Spec:** PHYSICS_GEOMETRY_VALIDATION_V2 §8–§10 · **Date:** 2026-08-21 · **Executed:** local dev machine (CPU), per Compute Environment section (inference + toy-scale training only)
 
-**Status: COMPLETE — classified 0B. STOP called per spec; no further validation work in this line.**
+**Status: COMPLETE — classified 0D (corrected 2026-08-21, see §Classification correction below). STOP called per spec; no further validation work in this line.**
 
 ---
 
@@ -50,16 +50,41 @@ TrivialMLP (608 → 256 → 128 → 64 → 3, ReLU) regressing (l,h,r) from `[vi
 
 ---
 
-## Classification: **0B**
+## Classification: **0D** (corrected 2026-08-21 — was incorrectly labeled 0B)
 
-Mapping used (two independent gate outcomes → four classes):
+> **Classification correction (2026-08-21, operator-directed).** The original report
+> labeled this result 0B. That label was wrong under the specified matrix. The
+> measured facts are: occupancy deterministic? **NO**; scalar baseline near-solves?
+> **YES at 25–50%**. Under the authoritative matrix
+>
+> | | scalar baseline near-solves | does not near-solve |
+> |---|---|---|
+> | **occupancy deterministic** | (n/a) | **0B** |
+> | **occupancy not deterministic** | **0D — this result** | **0C** |
+>
+> the correct branch is **0D**: non-deterministic occupancy + scalar subproblem
+> near-solved. **0D does NOT mean the complete product is solved.**
+
+Correct interpretation wording:
+
+> **The scalar physical-parameter subproblem is near-solved at low/moderate masking,
+> while independent spatial occupancy remains unsolved.**
+
+The previously written sentence "the product problem is solved by a trivial MLP" is
+retracted as unsupported: the Gate 0.5 MLP predicts only `[l_lattice, h_atom, r_atom]`
+— it is NOT a geometry-completion baseline and provides no evidence about spatial
+occupancy prediction.
+
+Original mapping table retained for the record (superseded by the matrix above):
 
 | | trivial baseline near-solves | does not near-solve |
 |---|---|---|
-| **occupancy deterministic** | 0A — everything trivial; premise collapses | 0C — odd asymmetry; investigate |
-| **occupancy not deterministic** | **0B — this result** | 0D — genuine task; proceed as planned |
+| **occupancy deterministic** | 0A — everything trivial; premise collapses | 0B |
+| **occupancy not deterministic** | ~~0B~~ → **0D (correct)** | 0C |
 
-Observed: occupancy **not deterministic** (G0-B decisive) **and** the product problem **near-solved** by a trivial MLP at ≤50% masking under identical mask semantics.
+Observed: occupancy **not deterministic** (G0-B decisive) **and** the scalar
+parameter subproblem **near-solved** by a trivial MLP at ≤50% masking under identical
+mask semantics. The full spatial geometry task remains unsolved by this baseline.
 
 ## Implications for the JEPA validation
 
@@ -76,4 +101,7 @@ Observed: occupancy **not deterministic** (G0-B decisive) **and** the product pr
 
 ---
 
-**STOP.** Per spec §10: classification 0B recorded; no further gates in this validation line without operator direction.
+**STOP.** Per spec §10: classification **0D** recorded (corrected 2026-08-21); no
+further gates in this validation line without operator direction. Follow-up work is
+governed by the physics-geometry latent-selection specification (spatial latent probe +
+physics target selection diagnostics).

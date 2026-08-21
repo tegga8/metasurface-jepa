@@ -273,7 +273,7 @@ def evaluate_ratio(model, batches, masks, device, probe_payload=None):
             (out_r["z_hat"] - out_s["z_hat"]).norm(dim=-1)[mask].cpu().tolist())
 
         if probe is not None:
-            occ_true = (G[:, 1] > 0).float().cpu().numpy()
+            occ_true = (G[:, 1] > 0).float().cpu().numpy().reshape(G.shape[0], -1)
             for name, out in (("real", out_r), ("null", out_n),
                               ("shuffled", out_s)):
                 zp = (out["z_hat"].mean(dim=1).cpu() - mu) / sd
@@ -478,7 +478,7 @@ def main():
                 print(f"[{tag}] ratio {ratio}: geometry-aware subset "
                       f"k={len(sub)} min_hamming={sub_info['min_pairwise_hamming']}")
                 res["retrieval_geometry_aware"] = retrieval_block(
-                    model, Gm, Sm, Mm, occ_flat, device, subset_info=sub)
+                    model, Gm, Sm, Mm, occ_flat, device, subset_info=sub_info)
             report["ratios"][f"{tag}_r{ratio:.2f}"] = res
 
     out_dir = REPO_ROOT / args.out_dir

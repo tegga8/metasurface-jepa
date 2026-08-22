@@ -27,7 +27,7 @@ scalar-parameter distance as control.
 Run:
   python scripts/diagnostics/latent_geometry_probe.py \
       --config configs/milestone_b.yaml \
-      --checkpoint checkpoints/milestone_b/minimal_jepa_vicreg_smoke_latest.pt
+      --checkpoint <genuine_trained_checkpoint>.pt
 
 Outputs:
   checkpoints/milestone_b/physics_validation/latent_geometry_probe.json

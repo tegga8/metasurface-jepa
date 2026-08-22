@@ -27,9 +27,10 @@ from latent_geometry_probe import (
     build_probe, fit_input_stats, split_indices,
 )
 from physics_target_selection import (
-    evaluate_ratio, geometry_aware_subset, margin_stats,
+    assert_reference_modules_frozen, check_same_target_across_conditions,
+    check_target_shape, evaluate_ratio, geometry_aware_subset, margin_stats,
     per_sample_distances, retrieval_matrix_metrics, same_context_causal_wins,
-    shuffle_permutation,
+    shuffle_permutation, validate_checkpoint_provenance,
 )
 
 
@@ -330,6 +331,172 @@ def test_per_sample_distances_does_not_mutate_inputs():
     per_sample_distances(z1, z2, mask)
     assert torch.equal(z1, a)
     assert torch.equal(z2, b)
+
+
+# ---------------------------------------------------------------------------
+# checkpoint-validity guards (validity-fix spec §10/§17)
+# ---------------------------------------------------------------------------
+
+def _genuine_ckpt(**over):
+    """A checkpoint dict whose metadata says 'genuinely trained' (§6 criteria)."""
+    ck = {
+        "step": 2687,
+        "epoch": 20,
+        "objective_name": "jepa_vicreg",
+        "cfg": {
+            "train": {"seed": 0, "batch_size": 64, "max_steps": 3840},
+            "data": {"max_train_samples": 8192},
+        },
+        "model": {},
+    }
+    ck.update(over)
+    return ck
+
+
+def test_accepts_genuine_checkpoint_metadata():
+    prov = validate_checkpoint_provenance(_genuine_ckpt(), "fake_trained.pt")
+    assert prov["is_smoke_checkpoint"] is False
+    assert prov["genuinely_trained"] is True
+    assert prov["step"] == 2687
+    assert prov["objective_name"] == "jepa_vicreg"
+    assert prov["seed"] == 0
+    assert len(prov["config_sha256_16"]) == 16
+    # spec §7 required fields all present
+    for key in ("path", "step", "objective_name", "seed", "is_smoke_checkpoint"):
+        assert key in prov
+
+
+@pytest.mark.parametrize("over", [
+    {"step": 2},                                            # near-init step
+    {"cfg": {"train": {"max_steps": 3},
+             "data": {"max_train_samples": 8}}},            # smoke-scale run
+    {"cfg": {"adaptive_training": {"max_total_steps": 6}}},  # smoke ladder budget
+])
+def test_rejects_smoke_checkpoint_loudly(over):
+    with pytest.raises(ValueError, match="SMOKE"):
+        validate_checkpoint_provenance(_genuine_ckpt(**over), "smoke.pt")
+
+
+def test_smoke_override_labels_reference_only():
+    prov = validate_checkpoint_provenance(
+        _genuine_ckpt(step=2), "smoke.pt",
+        allow_smoke_reason="operator override: reproducibility anchor")
+    assert prov["is_smoke_checkpoint"] is True
+    assert prov["genuinely_trained"] is False
+    assert "reference_only" in prov["run_status"]
+    assert prov["override_reason"] == "operator override: reproducibility anchor"
+
+
+def test_rejects_missing_metadata():
+    with pytest.raises(ValueError, match="step"):
+        validate_checkpoint_provenance({"model": {}}, "raw_state_dict.pt")
+    with pytest.raises(ValueError, match="objective_name"):
+        validate_checkpoint_provenance({"step": 100, "model": {}}, "x.pt")
+    with pytest.raises(ValueError):
+        validate_checkpoint_provenance(torch.nn.Linear(2, 2).state_dict(), "raw.pt")
+
+
+def test_objective_name_checked():
+    with pytest.raises(ValueError, match="objective"):
+        validate_checkpoint_provenance(
+            _genuine_ckpt(objective_name="direct_pixel"), "x.pt")
+    # custom allowed set honored (e.g. Milestone G authorizes lejepa)
+    prov = validate_checkpoint_provenance(
+        _genuine_ckpt(objective_name="lejepa"), "x.pt",
+        allowed_objectives=("lejepa",))
+    assert prov["objective_name"] == "lejepa"
+
+
+def _tiny_model(ema_frozen=True, released_frozen=True, with_released=True):
+    m = torch.nn.Module()
+    m.ema = torch.nn.Linear(4, 4)
+    for p in m.ema.parameters():
+        p.requires_grad_(not ema_frozen)
+    if with_released:
+        sp = torch.nn.Module()
+        sp.released = torch.nn.Linear(4, 4)
+        for p in sp.released.parameters():
+            p.requires_grad_(not released_frozen)
+        m.spectrum_path = sp
+    return m
+
+
+def test_ema_frozen():
+    rec = assert_reference_modules_frozen(_tiny_model())
+    assert rec["ema_frozen"] is True
+    with pytest.raises(RuntimeError, match="EMA"):
+        assert_reference_modules_frozen(_tiny_model(ema_frozen=False))
+
+
+def test_spectrum_encoder_frozen():
+    rec = assert_reference_modules_frozen(_tiny_model())
+    assert rec["released_spectrum_frozen"] is True
+    with pytest.raises(RuntimeError, match="released spectrum"):
+        assert_reference_modules_frozen(_tiny_model(released_frozen=False))
+    # absent released encoder (unit-test stubs) must NOT raise, only record
+    rec = assert_reference_modules_frozen(_tiny_model(with_released=False))
+    assert rec["released_spectrum_frozen"] is None
+
+
+def test_check_target_shape():
+    z = torch.zeros(3, 256, 384)
+    check_target_shape(z, 256, 384)                     # ok
+    with pytest.raises(ValueError, match="Check C"):
+        check_target_shape(torch.zeros(3, 64, 384), 256, 384)
+    with pytest.raises(ValueError, match="Check C"):
+        check_target_shape(torch.zeros(3, 256, 128), 256, 384)
+    with pytest.raises(ValueError, match="Check C"):
+        check_target_shape(torch.zeros(256, 384), 256, 384)
+
+
+class _LeakyTargetModel(_FakeModel):
+    """Negative control: target latent secretly depends on the spectrum under
+    the null condition — Check F MUST catch this."""
+
+    def forward(self, G, S, M, goal_mode="real", need_attn=False):
+        out = super().forward(G, S, M, goal_mode=goal_mode, need_attn=need_attn)
+        if goal_mode == "null":
+            out["z_y_raw"] = out["z_y_raw"] + S.mean(dim=(1, 2)).view(-1, 1, 1)
+        return out
+
+
+def test_target_identical_across_conditions():
+    torch.manual_seed(0)
+    model = _FakeModel(b=4)
+    G, S, M = _make_batch(4)
+    out_r = model(G, S, M, goal_mode="real")
+    out_n = model(G, S, M, goal_mode="null")
+    out_s = model(G, S[[1, 0, 3, 2]], M, goal_mode="real")
+    check_same_target_across_conditions(out_r, out_n, out_s)   # no raise
+
+
+def test_target_leakage_detected():
+    torch.manual_seed(0)
+    model = _LeakyTargetModel(b=4)
+    G, S, M = _make_batch(4)
+    out_r = model(G, S, M, goal_mode="real")
+    out_n = model(G, S, M, goal_mode="null")
+    out_s = model(G, S[[1, 0, 3, 2]], M, goal_mode="real")
+    with pytest.raises(RuntimeError, match="Check F"):
+        check_same_target_across_conditions(out_r, out_n, out_s)
+
+
+def test_evaluate_ratio_enforces_guards_end_to_end():
+    torch.manual_seed(0)
+    model = _FakeModel(b=2, d=384)
+    G, S, M = _make_batch(2)
+    # expected shape enforced without error on a conforming fake
+    res = evaluate_ratio(model, [(G, S)], [M], device="cpu",
+                         expected_target_shape=(256, 384))
+    assert res["n_samples"] == 2
+    # wrong expectation -> loud failure
+    with pytest.raises(ValueError, match="Check C"):
+        evaluate_ratio(model, [(G, S)], [M], device="cpu",
+                       expected_target_shape=(64, 384))
+    # leaky target -> loud failure even without a shape expectation
+    leaky = _LeakyTargetModel(b=2, d=384)
+    with pytest.raises(RuntimeError, match="Check F"):
+        evaluate_ratio(leaky, [(G, S)], [M], device="cpu")
 
 
 if __name__ == "__main__":

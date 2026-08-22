@@ -26,16 +26,28 @@ Additional blocks (spec §16-§19):
 
 Evaluated at mask_ratio 1.00 (primary, spec §12) and 0.75 (§20 comparison).
 
+Checkpoint-validity guards (validity-fix spec §6/§7/§10): a loaded checkpoint must
+carry genuine training provenance (step, objective_name, cfg) and must NOT be a
+smoke/near-init artifact (step <= 10 OR max_total_steps <= 20 OR
+max_train_samples <= 64), otherwise the diagnostic FAILS LOUDLY instead of
+producing a number that could be mistaken for a trained-model result. An explicit
+operator override (--allow-smoke-reason "<why>") proceeds but labels the run
+reference-only (`is_smoke_checkpoint: true`, never a trained-model result).
+Runtime sanity checks on every batch: EMA target frozen, released spectrum
+encoder frozen, z_y_raw shape [B, 256, 384], identical target across the three
+conditions.
+
 Run:
   python scripts/diagnostics/physics_target_selection.py \
       --config configs/milestone_b.yaml \
-      --checkpoint checkpoints/milestone_b/minimal_jepa_vicreg_smoke_latest.pt \
+      --checkpoint <genuine_trained_checkpoint>.pt \
       --ratios 1.00 0.75
 
 Output: checkpoints/milestone_b/physics_validation/physics_target_selection.json
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -219,13 +231,155 @@ def same_context_causal_wins(D):
 
 
 # ---------------------------------------------------------------------------
+# checkpoint-validity guards (validity-fix spec §6/§7/§10)
+# ---------------------------------------------------------------------------
+
+SMOKE_MAX_STEP = 10
+SMOKE_MAX_TOTAL_STEPS = 20
+SMOKE_MAX_TRAIN_SAMPLES = 64
+ALLOWED_OBJECTIVES = ("jepa", "jepa_var", "jepa_vicreg", "jepa_vicreg2",
+                      "jepa_barlow", "lejepa")
+
+
+def validate_checkpoint_provenance(ckpt, path,
+                                   allowed_objectives=ALLOWED_OBJECTIVES,
+                                   allow_smoke_reason=None):
+    """Metadata-based validity gate (Checks A + B). Returns the provenance dict
+    required by spec §7; raises ValueError when the checkpoint cannot be shown
+    to be genuinely trained — missing metadata, smoke-scale training signals, or
+    an objective outside `allowed_objectives` (fail loudly rather than guessing).
+
+    `allow_smoke_reason` is the explicit operator override: the run proceeds but
+    the provenance is labeled reference-only (`is_smoke_checkpoint: true`,
+    `genuinely_trained: false`) and must never be reported as a trained-model
+    result.
+    """
+    if not isinstance(ckpt, dict) or "model" not in ckpt:
+        raise ValueError(
+            f"{path}: not a metadata checkpoint (raw state dict?) — refusing to "
+            f"guess provenance; re-save via engine.save_checkpoint")
+    step = ckpt.get("step")
+    objective_name = ckpt.get("objective_name")
+    cfg = ckpt.get("cfg") or {}
+    if step is None:
+        raise ValueError(f"{path}: missing 'step' metadata — cannot verify the "
+                         f"checkpoint is genuinely trained")
+    if objective_name is None:
+        raise ValueError(f"{path}: missing 'objective_name' metadata — cannot "
+                         f"verify which objective produced these weights")
+    step = int(step)
+    train_cfg = cfg.get("train") or {}
+    data_cfg = cfg.get("data") or {}
+    adapt_cfg = cfg.get("adaptive_training") or {}
+
+    def _int(v):
+        return int(v) if v is not None else None
+
+    signals = {
+        "step": step,
+        "max_total_steps": _int(adapt_cfg.get("max_total_steps")),
+        "max_train_samples": _int(data_cfg.get("max_train_samples")),
+        "train_max_steps": _int(train_cfg.get("max_steps")),
+        "batch_size": _int(train_cfg.get("batch_size")),
+    }
+    is_smoke = (
+        signals["step"] <= SMOKE_MAX_STEP
+        or (signals["max_total_steps"] is not None
+            and signals["max_total_steps"] <= SMOKE_MAX_TOTAL_STEPS)
+        or (signals["max_train_samples"] is not None
+            and signals["max_train_samples"] <= SMOKE_MAX_TRAIN_SAMPLES)
+    )
+    if is_smoke and allow_smoke_reason is None:
+        raise ValueError(
+            f"{path}: SMOKE/near-init checkpoint refused "
+            f"(signals={signals}; thresholds: step<={SMOKE_MAX_STEP} OR "
+            f"max_total_steps<={SMOKE_MAX_TOTAL_STEPS} OR "
+            f"max_train_samples<={SMOKE_MAX_TRAIN_SAMPLES}). A trained-model "
+            f"result cannot be produced from this state. Pass "
+            f"--allow-smoke-reason to label the run reference-only.")
+    if objective_name not in allowed_objectives:
+        raise ValueError(
+            f"{path}: objective {objective_name!r} is not in the allowed set "
+            f"{sorted(allowed_objectives)} — refusing to evaluate weights from "
+            f"an unapproved objective")
+    seed = train_cfg.get("seed")
+    cfg_hash = hashlib.sha256(
+        json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    prov = {
+        "path": str(path),
+        "step": step,
+        "epoch": int(ckpt.get("epoch") or 0),
+        "objective_name": str(objective_name),
+        "seed": _int(seed),
+        "config_sha256_16": cfg_hash,
+        "smoke_signals": signals,
+        "is_smoke_checkpoint": bool(is_smoke),
+        "genuinely_trained": not is_smoke,
+    }
+    if is_smoke:
+        prov["override_reason"] = str(allow_smoke_reason)
+        prov["run_status"] = "reference_only_not_a_trained_model_result"
+    return prov
+
+
+def assert_reference_modules_frozen(model):
+    """Checks D + E: EMA target encoder and released spectrum encoder must have
+    zero trainable parameters. Raises RuntimeError on any violation. Returns a
+    record for the report (`released_spectrum` may be absent in unit-test
+    stubs)."""
+    trainable_ema = [n for n, p in model.ema.named_parameters() if p.requires_grad]
+    if trainable_ema:
+        raise RuntimeError(
+            f"EMA target encoder has trainable parameters {trainable_ema[:5]}... "
+            f"— target-leakage/protocol violation (Check D)")
+    released = getattr(getattr(model, "spectrum_path", None), "released", None)
+    record = {"ema_frozen": True,
+              "ema_n_params": sum(1 for _ in model.ema.parameters())}
+    if released is None:
+        record["released_spectrum_frozen"] = None   # absent (stub/reference build)
+    else:
+        trainable_rel = [n for n, p in released.named_parameters()
+                         if p.requires_grad]
+        if trainable_rel:
+            raise RuntimeError(
+                f"released spectrum encoder has trainable parameters "
+                f"{trainable_rel[:5]}... — frozen-component violation (Check E)")
+        record["released_spectrum_frozen"] = True
+        record["released_n_params"] = sum(1 for _ in released.parameters())
+    return record
+
+
+def check_target_shape(z_y_raw, n_tokens, dim):
+    """Check C: z_y_raw must be (B, n_tokens, dim) — (B, 256, 384) at §11 sizes."""
+    if z_y_raw.dim() != 3 or z_y_raw.shape[1] != n_tokens \
+            or z_y_raw.shape[2] != dim:
+        raise ValueError(
+            f"z_y_raw shape {tuple(z_y_raw.shape)} != (B, {n_tokens}, {dim}) "
+            f"(Check C)")
+
+
+def check_same_target_across_conditions(out_r, out_n, out_s):
+    """Check F: the target latent must be IDENTICAL across real/null/shuffled
+    conditions (same G, same frozen EMA). Raises RuntimeError on any drift."""
+    zr, zn, zs = out_r["z_y_raw"], out_n["z_y_raw"], out_s["z_y_raw"]
+    if not (torch.equal(zr, zn) and torch.equal(zr, zs)):
+        raise RuntimeError(
+            "target latent differs across real/null/shuffled conditions "
+            "(Check F) — protocol broken: the three conditions would no longer "
+            "be comparable")
+
+
+# ---------------------------------------------------------------------------
 # evaluation core
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate_ratio(model, batches, masks, device, probe_payload=None):
+def evaluate_ratio(model, batches, masks, device, probe_payload=None,
+                   expected_target_shape=None):
     """All conditions on IDENTICAL (G, S, M, z_y_raw). Returns the per-ratio report
-    dict. batches: list of (G, S); masks: list of M aligned with batches."""
+    dict. batches: list of (G, S); masks: list of M aligned with batches.
+    expected_target_shape: optional (n_tokens, dim) — Check C enforced per batch."""
     was_training = model.training
     model.eval()
     per_cond = {"real": {"cos": [], "l2_token": [], "l2_pooled": []},
@@ -258,6 +412,10 @@ def evaluate_ratio(model, batches, masks, device, probe_payload=None):
         out_r = model(G, S, M, goal_mode="real")
         out_n = model(G, S, M, goal_mode="null")
         out_s = model(G, S_shuf, M, goal_mode="real")
+
+        check_same_target_across_conditions(out_r, out_n, out_s)
+        if expected_target_shape is not None:
+            check_target_shape(out_r["z_y_raw"], *expected_target_shape)
 
         z_y = out_r["z_y_raw"]
         mask = out_r["mask"]
@@ -326,7 +484,8 @@ def probe_logits_safe(probe, x):
 
 
 @torch.no_grad()
-def retrieval_block(model, G, S, M, occ_flat, device, subset_info=None):
+def retrieval_block(model, G, S, M, occ_flat, device, subset_info=None,
+                    expected_target_shape=None):
     """Exact spectrum retrieval matrix (§16) on one fixed batch, optionally
     restricted to a geometry-aware subset (§17)."""
     model.eval()
@@ -339,6 +498,8 @@ def retrieval_block(model, G, S, M, occ_flat, device, subset_info=None):
                     np.full((1, 1), np.nan))}
     G_sub, S_sub, M_sub = G[idx].to(device), S[idx].to(device), M[idx].to(device)
     z_y = model.ema(G_sub)                       # fixed target per row
+    if expected_target_shape is not None:
+        check_target_shape(z_y, *expected_target_shape)
     mask = (M_sub.view(k, -1) == 0)
     D = np.zeros((k, k), dtype=np.float64)
     for i in range(k):
@@ -381,6 +542,11 @@ def parse_args():
                    help="skip the §18 predicted-latent probe block")
     p.add_argument("--mask-seed", type=int, default=12345)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--allow-smoke-reason", default=None,
+                   help="EXPLICIT operator override to evaluate a smoke/near-init "
+                        "checkpoint anyway; the run is labeled reference-only in "
+                        "the JSON and must never be reported as a trained-model "
+                        "result")
     p.add_argument("--device", default="cpu")
     p.add_argument("--out-dir",
                    default="checkpoints/milestone_b/physics_validation")
@@ -393,13 +559,14 @@ def load_model(cfg, args, device):
     if args.checkpoint:
         model = build_model(cfg["model"], str(spec_w), device=device,
                             init_from_metadit=True, metadit_weights=str(metadit_w))
-        ckpt = torch.load(REPO_ROOT / args.checkpoint, map_location="cpu",
-                          weights_only=False)
+        ckpt_path = REPO_ROOT / args.checkpoint
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # validity gate FIRST (Checks A+B): refuse smoke/unlabeled checkpoints
+        # before any weights touch the model (validity-fix spec §6/§7/§10)
+        provenance = validate_checkpoint_provenance(
+            ckpt, args.checkpoint, allow_smoke_reason=args.allow_smoke_reason)
         from assembly import load_into_model
         load_into_model(model, ckpt["model"], device)
-        provenance = {"checkpoint": str(args.checkpoint),
-                      "checkpoint_step": ckpt.get("step"),
-                      "objective_name": ckpt.get("objective_name")}
     else:
         model = build_deterministic_reference(
             lambda: build_model(cfg["model"], str(spec_w), device=device,
@@ -432,13 +599,21 @@ def main():
 
     dataset = MetaDiTDataset(str(val_path))
 
+    # Check C expectation: 16x16 token grid x model hidden dim (§11 sizes)
+    expected_target_shape = (16 * 16, int(cfg["model"]["hidden"]))
+
     report = {"provenance": {}, "config": vars(args), "ratios": {}}
 
     for tag, label in (("trained", "checkpoint"), ("init_reference", "reference")):
         if tag == "trained" and not args.checkpoint:
             continue
         model, prov = load_model(cfg, args, device)
+        prov["freeze_checks"] = assert_reference_modules_frozen(model)
         report["provenance"][tag] = prov
+        if tag == "trained":
+            # spec §7 literal key: top-level checkpoint_provenance block with
+            # path/step/objective_name/seed/is_smoke_checkpoint/config hash
+            report["checkpoint_provenance"] = prov
 
         for ratio in args.ratios:
             # fixed validation subset + fixed masks (repo convention: first n
@@ -460,7 +635,8 @@ def main():
 
             print(f"[{tag}] ratio {ratio}: real/null/shuffle on {n} samples ...")
             res = evaluate_ratio(model, batches, masks, device,
-                                 probe_payload=probe_payload)
+                                 probe_payload=probe_payload,
+                                 expected_target_shape=expected_target_shape)
 
             # retrieval matrix on the FIRST retrieval-batch samples (same fixed
             # set, same per-sample masks as the stats phase)
@@ -470,7 +646,8 @@ def main():
             print(f"[{tag}] ratio {ratio}: retrieval matrix B={nb} "
                   f"({nb ** 2} forwards) ...")
             res["retrieval_full"] = retrieval_block(model, Gm, Sm, Mm, occ_flat,
-                                                    device)
+                                                    device,
+                                                    expected_target_shape=expected_target_shape)
             sub, sub_info = geometry_aware_subset(occ_flat, args.subset_k,
                                                   min_hamming=args.min_hamming)
             res["geometry_aware_subset_selection"] = sub_info
@@ -478,7 +655,8 @@ def main():
                 print(f"[{tag}] ratio {ratio}: geometry-aware subset "
                       f"k={len(sub)} min_hamming={sub_info['min_pairwise_hamming']}")
                 res["retrieval_geometry_aware"] = retrieval_block(
-                    model, Gm, Sm, Mm, occ_flat, device, subset_info=sub_info)
+                    model, Gm, Sm, Mm, occ_flat, device, subset_info=sub_info,
+                    expected_target_shape=expected_target_shape)
             report["ratios"][f"{tag}_r{ratio:.2f}"] = res
 
     out_dir = REPO_ROOT / args.out_dir

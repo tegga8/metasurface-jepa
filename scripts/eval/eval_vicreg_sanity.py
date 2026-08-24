@@ -688,35 +688,50 @@ def _audit_collapse_abort(row, base):
 def _audit_row(step, model, objective, G, S, M, comps, params, args):
     """One per-report row of the short audit: loss components, raw/projected
     rank + pairwise cosine, feature stds, projector singular values, and
-    per-term gradient norms. All measured on the last training batch."""
+    per-term gradient norms. All measured on the last training batch.
+
+    Phase-2 plumbing fix B: the measurement forward runs with BOTH model and
+    objective in eval mode (deterministic batch-independent statistics; eval
+    forwards never touch BatchNorm running stats), then restores both previous
+    modes so the surrounding training loop and the per-term gradient diagnostic
+    below keep their training-mode semantics.
+    """
     P = objective.projector
     mask = (M.view(G.shape[0], -1) == 0)
-    with torch.no_grad():
-        out = model(G, S, M)
-        zy, zh = out["z_y_raw"], out["z_hat"]
-        p_zy, p_zh = P(zy), P(zh)
-        mw = mask.float()
-        zh_pool = (zh * mw.unsqueeze(-1)).sum(1) \
-            / mw.sum(1, keepdim=True).clamp(min=1)          # (B, D)
-        zy_pool = (zy * mw.unsqueeze(-1)).sum(1) \
-            / mw.sum(1, keepdim=True).clamp(min=1)
-        p_zh_pool = (p_zh * mw.unsqueeze(-1)).sum(1) \
-            / mw.sum(1, keepdim=True).clamp(min=1)
-        p_zy_pool = (p_zy * mw.unsqueeze(-1)).sum(1) \
-            / mw.sum(1, keepdim=True).clamp(min=1)
-        zh_m, zy_m = _rows(zh[mask]), _rows(zy[mask])
-        p_zh_m, p_zy_m = _rows(p_zh[mask]), _rows(p_zy[mask])
+    was_model_training = model.training
+    was_objective_training = objective.training
+    model.eval()
+    objective.eval()
+    try:
+        with torch.no_grad():
+            out = model(G, S, M)
+            zy, zh = out["z_y_raw"], out["z_hat"]
+            p_zy, p_zh = P(zy), P(zh)
+            mw = mask.float()
+            zh_pool = (zh * mw.unsqueeze(-1)).sum(1) \
+                / mw.sum(1, keepdim=True).clamp(min=1)          # (B, D)
+            zy_pool = (zy * mw.unsqueeze(-1)).sum(1) \
+                / mw.sum(1, keepdim=True).clamp(min=1)
+            p_zh_pool = (p_zh * mw.unsqueeze(-1)).sum(1) \
+                / mw.sum(1, keepdim=True).clamp(min=1)
+            p_zy_pool = (p_zy * mw.unsqueeze(-1)).sum(1) \
+                / mw.sum(1, keepdim=True).clamp(min=1)
+            zh_m, zy_m = _rows(zh[mask]), _rows(zy[mask])
+            p_zh_m, p_zy_m = _rows(p_zh[mask]), _rows(p_zy[mask])
 
-        r_zh, f_zh = eff_rank(zh_m)
-        r_zy, f_zy = eff_rank(zy_m)
-        r_pzh, f_pzh = eff_rank(p_zh_m)
-        r_pzy, f_pzy = eff_rank(p_zy_m)
+            r_zh, f_zh = eff_rank(zh_m)
+            r_zy, f_zy = eff_rank(zy_m)
+            r_pzh, f_pzh = eff_rank(p_zh_m)
+            r_pzy, f_pzy = eff_rank(p_zy_m)
 
-        pcos = pairwise_cos_stats
-        raw_cos = pcos(zh_pool) if zh_pool.shape[0] >= 2 else \
-            {"mean": float("nan")}
-        proj_cos = pcos(p_zh_pool) if p_zh_pool.shape[0] >= 2 else \
-            {"mean": float("nan")}
+            pcos = pairwise_cos_stats
+            raw_cos = pcos(zh_pool) if zh_pool.shape[0] >= 2 else \
+                {"mean": float("nan")}
+            proj_cos = pcos(p_zh_pool) if p_zh_pool.shape[0] >= 2 else \
+                {"mean": float("nan")}
+    finally:
+        model.train(was_model_training)
+        objective.train(was_objective_training)
 
     grads = _term_grad_norms(objective, model, G, S, M, params)
     row = {

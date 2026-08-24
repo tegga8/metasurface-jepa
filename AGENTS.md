@@ -64,6 +64,18 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
      VICReg/LeJEPA-SIGReg objectives, phase transitions, and winner selection live inside
      Milestone B's adaptive controller by operator decision. Tracked and worked via
      `checkpoints/milestone_b/BUGLOG.md` (see the fix directive that originated this entry).
+   - **2026-08-24 — Physics-Guided Masked Retrofit sequence re-scoped mid-preflight.** The
+     operator replaced the previously provided retrofit "Phase 2 (Geometry Decoder)" content
+     with "Phase 2 — Fix VICReg Training/Validation Plumbing Before Cloud Run" (plumbing-only:
+     objective device placement + eval-mode hygiene in validation/reference paths), explicitly
+     forbidding decoder/inverse-design/swapped-spectrum work. Rationale: the verified VICReg
+     CPU/CUDA construction defect blocks the genuine Milestone-B cloud training run that all
+     checkpoint-gated preflight items depend on (`checkpoints/milestone_b/physics_validation/
+     PHYSICS_TARGET_SELECTION_TRAINED_REPORT.md`). Same session therefore closed retrofit
+     Phase 1 (Gate-0 PASS; Gate-2 candidate-freezing DEFERRED; target-health/Gate-1 stay
+     BLOCKED pending a genuine trained checkpoint) and then executed the new plumbing phase.
+     See `checkpoints/physics_retrofit/preflight/REPORT.md` and
+     `checkpoints/milestone_b/PHASE2_VICREG_PLUMBING_REPORT.md`.
 
 ---
 

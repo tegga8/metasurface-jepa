@@ -230,9 +230,19 @@ def main():
                         init_from_metadit=cfg["model"].get("init_from_metadit", True),
                         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]))
     model.ema.set_total_steps(total_steps)
+    # Phase-2 plumbing fix A: the objective owns trainable projector parameters
+    # (VICReg/Barlow/LeJEPA projectors) and must live on the SAME device as the
+    # model — a CPU-resident objective crashes on the first CUDA forward
+    # ("Expected all tensors to be on the same device").
     objective = build_objective(
         objective_name, cfg.get("objective_params", {}).get(objective_name, {}),
-        projector_input_dim=cfg["model"].get("hidden", 384))
+        projector_input_dim=cfg["model"].get("hidden", 384),
+    ).to(device)
+    objective_params = list(objective.parameters())
+    if objective_params:  # every registered objective owns projector parameters
+        objective_device = objective_params[0].device
+        assert objective_device == device, (
+            f"Objective parameters are on {objective_device}, expected {device}")
 
     # fixed validation + healthy released-init references (per ratio, same masks)
     from train.engine import (build_deterministic_reference,

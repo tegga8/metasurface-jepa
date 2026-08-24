@@ -70,12 +70,15 @@ def build_scalars(parameter, pattern):
 
 def build_geometries(pattern, parameter):
     """Vectorized MetaDiTDataset convention: -> (N, 3, 64, 64) float32."""
-    occ = (pattern == 1)
+    occ_t = (pattern == 1).transpose(2, 0, 1)                  # (N, 64, 64)
     n = parameter.shape[0]
     g = np.zeros((n, 3, 64, 64), dtype=np.float32)
-    g[:, 0][occ.T] = (parameter[None, :, 2] / 5.0).astype(np.float32)
-    g[:, 1][occ.T] = parameter[None, :, 1].astype(np.float32)
-    g[:, 2] = (parameter[None, :, 0] / 3.0).astype(np.float32)[:, None, None]
+    r_col = (parameter[:, 2] / 5.0).astype(np.float32)[:, None, None]   # (N,1,1)
+    h_col = parameter[:, 1].astype(np.float32)[:, None, None]
+    l_row = (parameter[:, 0] / 3.0).astype(np.float32)[:, None, None]
+    g[:, 0] = np.where(occ_t, r_col, np.float32(0.0))
+    g[:, 1] = np.where(occ_t, h_col, np.float32(0.0))
+    g[:, 2] = np.broadcast_to(l_row, (n, 64, 64))
     return torch.from_numpy(g)
 
 
@@ -116,6 +119,8 @@ class ScalarMLP(nn.Module):
 def train_scalar_mlp(x_tr, y_tr, x_va, y_va, epochs, batch_size, lr, seed, device):
     """Deterministic small regression run; returns best-val-state predictions."""
     torch.manual_seed(seed)
+    x_tr = torch.from_numpy(np.ascontiguousarray(x_tr, dtype=np.float32))
+    y_tr = torch.from_numpy(np.ascontiguousarray(y_tr, dtype=np.float32))
     model = ScalarMLP(x_tr.shape[1], 256, y_tr.shape[1]).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     best_val, best_state, best_epoch = float("inf"), None, -1

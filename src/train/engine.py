@@ -107,6 +107,35 @@ def _objective_projection(objective):
     return getattr(objective, "projector", None)
 
 
+def _eval_mode_restore(model, objective):
+    """Phase-2 plumbing fix B: switch model AND objective to eval mode for an
+    evaluation/reference pass and return a zero-arg callable restoring BOTH
+    previous modes (never a blind .train()).
+
+    Duck-typed on purpose: real nn.Modules always expose the mode API and get
+    the full semantics; bare test-stub objects without .eval/.train/.training
+    are left untouched (exactly their pre-fix behavior).
+    """
+    has_model_api = (callable(getattr(model, "eval", None))
+                     and callable(getattr(model, "train", None)))
+    was_model_training = getattr(model, "training", None)
+    was_objective_training = getattr(objective, "training", None)
+    has_objective_api = objective is not None and \
+        callable(getattr(objective, "eval", None))
+    if has_model_api:
+        model.eval()
+    if was_objective_training is not None and has_objective_api:
+        objective.eval()
+
+    def _restore():
+        if has_model_api and was_model_training is not None:
+            model.train(was_model_training)
+        if was_objective_training is not None and has_objective_api:
+            objective.train(was_objective_training)
+
+    return _restore
+
+
 def _pooled_pred_stats(Z_pooled):
     """Z_pooled: (B, D) mean-pooled masked predictions -> projection-space stats.
 
@@ -168,7 +197,13 @@ class FixedValidation:
         Projection is through `objective.projector` (spec §17: never a model
         attribute). Runs in eval mode (deterministic; training-mode
         DropPath/dropout would make the validation metric incomparable with the
-        final winner eval), restoring the model's previous mode afterwards.
+        final winner eval), restoring both previous modes afterwards.
+
+        Phase-2 plumbing fix B: the OBJECTIVE is switched to eval too — its
+        projector contains BatchNorm layers whose running statistics would be
+        contaminated by train-mode validation forwards (and batch statistics
+        would make the metric nondeterministic). Both prior modes are restored
+        in a finally block; neither module is left forced into either mode.
 
         NOTE (2026-08-17, audit fix): forwards run with need_attn=False — the
         prediction metric must not touch the predictor's attention path (the SDPA
@@ -176,58 +211,58 @@ class FixedValidation:
         winner eval). Goal-token utilization is monitored via the spectrum-path
         attention weights below, which never modify model outputs.
         """
-        was_training = model.training
-        model.eval()
-        # Bug #19: aggregate globally (loss_sum / mask_count), NOT per-batch means —
-        # averaging per-batch means makes the metric depend on batch partitioning.
-        loss_sum = 0.0
-        mask_count = 0
-        zy_raw, zy_proj, zh_pooled = [], [], []
-        goal_tokens, goal_attns = [], []
-        with torch.no_grad():
-            for (G, S), M in zip(self.batches, self.masks):
-                out = model(G, S, M, goal_mode=goal_mode, need_attn=False)
-                mask = out["mask"]
-                z_hat, z_y = out["z_hat"], out["z_y_raw"]
-                ph_ = self._project(objective, z_hat)
-                pt_ = self._project(objective, z_y)
-                d = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(ph_, dim=-1),
-                    torch.nn.functional.normalize(pt_, dim=-1), dim=-1)).clamp(min=0)
-                dm = d[mask]
-                loss_sum += float(dm.sum(dtype=torch.float64).item())
-                mask_count += int(dm.numel())
-                zy_raw.append(z_y.cpu())
-                zy_proj.append(pt_.cpu())
-                mw = mask.float()
-                # Bug #13: prediction-health stats pool the PROJECTED prediction
-                # (same space the cos_err metric lives in), not raw z_hat — raw
-                # pooling is invariant to the learned projection and reports stats
-                # in a space nothing else uses.
-                zh_pooled.append(((ph_ * mw.unsqueeze(-1)).sum(1)
-                                  / mw.sum(1, keepdim=True).clamp(min=1)).cpu())
-                _, a_goal, w = model.spectrum_path(S, goal_mode, need_weights=True)
-                goal_tokens.append(a_goal.cpu())
-                goal_attns.append(w.cpu())
-        if was_training:
-            model.train()
-        metrics = {
-            "cos_err_r0.5": float(loss_sum / max(1, mask_count)),
-        }
-        raw = token_space_stats(torch.cat(zy_raw, dim=0))
-        proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
-        pred = _pooled_pred_stats(torch.cat(zh_pooled, dim=0))
-        status, signals = classify_health(raw, proj_stats, healthy_raw,
-                                          healthy_proj, self.collapse_cfg)
-        health = {
-            "status": status,
-            "signals": signals,
-            "raw": raw,
-            "proj": proj_stats,
-            "pred": pred,
-            "goal": goal_token_stats(torch.cat(goal_tokens, dim=0)),
-            "attention": goal_attention_stats(torch.cat(goal_attns, dim=0)),
-        }
+        restore_modes = _eval_mode_restore(model, objective)
+        try:
+            # Bug #19: aggregate globally (loss_sum / mask_count), NOT per-batch means —
+            # averaging per-batch means makes the metric depend on batch partitioning.
+            loss_sum = 0.0
+            mask_count = 0
+            zy_raw, zy_proj, zh_pooled = [], [], []
+            goal_tokens, goal_attns = [], []
+            with torch.no_grad():
+                for (G, S), M in zip(self.batches, self.masks):
+                    out = model(G, S, M, goal_mode=goal_mode, need_attn=False)
+                    mask = out["mask"]
+                    z_hat, z_y = out["z_hat"], out["z_y_raw"]
+                    ph_ = self._project(objective, z_hat)
+                    pt_ = self._project(objective, z_y)
+                    d = (1.0 - torch.nn.functional.cosine_similarity(
+                        torch.nn.functional.normalize(ph_, dim=-1),
+                        torch.nn.functional.normalize(pt_, dim=-1), dim=-1)).clamp(min=0)
+                    dm = d[mask]
+                    loss_sum += float(dm.sum(dtype=torch.float64).item())
+                    mask_count += int(dm.numel())
+                    zy_raw.append(z_y.cpu())
+                    zy_proj.append(pt_.cpu())
+                    mw = mask.float()
+                    # Bug #13: prediction-health stats pool the PROJECTED prediction
+                    # (same space the cos_err metric lives in), not raw z_hat — raw
+                    # pooling is invariant to the learned projection and reports stats
+                    # in a space nothing else uses.
+                    zh_pooled.append(((ph_ * mw.unsqueeze(-1)).sum(1)
+                                      / mw.sum(1, keepdim=True).clamp(min=1)).cpu())
+                    _, a_goal, w = model.spectrum_path(S, goal_mode, need_weights=True)
+                    goal_tokens.append(a_goal.cpu())
+                    goal_attns.append(w.cpu())
+            metrics = {
+                "cos_err_r0.5": float(loss_sum / max(1, mask_count)),
+            }
+            raw = token_space_stats(torch.cat(zy_raw, dim=0))
+            proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
+            pred = _pooled_pred_stats(torch.cat(zh_pooled, dim=0))
+            status, signals = classify_health(raw, proj_stats, healthy_raw,
+                                              healthy_proj, self.collapse_cfg)
+            health = {
+                "status": status,
+                "signals": signals,
+                "raw": raw,
+                "proj": proj_stats,
+                "pred": pred,
+                "goal": goal_token_stats(torch.cat(goal_tokens, dim=0)),
+                "attention": goal_attention_stats(torch.cat(goal_attns, dim=0)),
+            }
+        finally:
+            restore_modes()
         return metrics, health
 
     def evaluate(self, model, objective, healthy_raw, healthy_proj,
@@ -239,34 +274,35 @@ class FixedValidation:
     def null_gap(self, model, objective):
         """cos_err for real goal, cos_err for null goal, and ||z_hat_real - z_hat_null||
         on masked tokens — the single-forward-pass goal-utilization diagnostic, computed
-        identically (eval mode, same batches/masks/metric) as evaluate()."""
-        was_training = model.training
-        model.eval()
-        # Bug #19: per-batch means replaced by global aggregation (identical rule
-        # to _acc_stats) so real/null/gap metrics are batch-partition invariant.
-        real_sum, null_sum, gap_sum, mask_count = 0.0, 0.0, 0.0, 0
-        with torch.no_grad():
-            for (G, S), M in zip(self.batches, self.masks):
-                o1 = model(G, S, M, goal_mode="real")
-                o2 = model(G, S, M, goal_mode="null")
-                p1 = self._project(objective, o1["z_hat"])
-                p2 = self._project(objective, o2["z_hat"])
-                pt = self._project(objective, o1["z_y_raw"])
-                d1 = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(p1, dim=-1),
-                    torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
-                d2 = (1.0 - torch.nn.functional.cosine_similarity(
-                    torch.nn.functional.normalize(p2, dim=-1),
-                    torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
-                m1 = o1["mask"]
-                m2 = o2["mask"]
-                real_sum += float(d1[m1].sum(dtype=torch.float64).item())
-                null_sum += float(d2[m2].sum(dtype=torch.float64).item())
-                gap_sum += float(((o1["z_hat"] - o2["z_hat"]).norm(dim=-1)[m1])
-                                 .sum(dtype=torch.float64).item())
-                mask_count += int(m1.sum().item())
-        if was_training:
-            model.train()
+        identically (eval mode — model AND objective, see _acc_stats Phase-2 fix B;
+        same batches/masks/metric) as evaluate()."""
+        restore_modes = _eval_mode_restore(model, objective)
+        try:
+            # Bug #19: per-batch means replaced by global aggregation (identical rule
+            # to _acc_stats) so real/null/gap metrics are batch-partition invariant.
+            real_sum, null_sum, gap_sum, mask_count = 0.0, 0.0, 0.0, 0
+            with torch.no_grad():
+                for (G, S), M in zip(self.batches, self.masks):
+                    o1 = model(G, S, M, goal_mode="real")
+                    o2 = model(G, S, M, goal_mode="null")
+                    p1 = self._project(objective, o1["z_hat"])
+                    p2 = self._project(objective, o2["z_hat"])
+                    pt = self._project(objective, o1["z_y_raw"])
+                    d1 = (1.0 - torch.nn.functional.cosine_similarity(
+                        torch.nn.functional.normalize(p1, dim=-1),
+                        torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
+                    d2 = (1.0 - torch.nn.functional.cosine_similarity(
+                        torch.nn.functional.normalize(p2, dim=-1),
+                        torch.nn.functional.normalize(pt, dim=-1), dim=-1)).clamp(min=0)
+                    m1 = o1["mask"]
+                    m2 = o2["mask"]
+                    real_sum += float(d1[m1].sum(dtype=torch.float64).item())
+                    null_sum += float(d2[m2].sum(dtype=torch.float64).item())
+                    gap_sum += float(((o1["z_hat"] - o2["z_hat"]).norm(dim=-1)[m1])
+                                     .sum(dtype=torch.float64).item())
+                    mask_count += int(m1.sum().item())
+        finally:
+            restore_modes()
         return (float(real_sum / max(1, mask_count)),
                 float(null_sum / max(1, mask_count)),
                 float(gap_sum / max(1, mask_count)))
@@ -332,8 +368,14 @@ def build_deterministic_reference(build_fn, seed=REFS_SEED_DEFAULT):
 def healthy_references(model, fixed_val, objective=None):
     """Stats of a fresh released-init build on the SAME fixed validation set.
 
-    model must be in eval mode; only the EMA target (raw) and its projection are
-    measured. Deterministic given the fixed validation set.
+    Runs with model AND objective (when supplied) in eval mode — Phase-2
+    plumbing fix B: the reference projection passes through the candidate
+    objective's projector, whose BatchNorm layers must neither consume batch
+    statistics nor update their running statistics during reference
+    construction. Both modules' previous modes are restored in a finally block.
+
+    Only the EMA target (raw) and its projection are measured. Deterministic
+    given the fixed validation set.
 
     Projection is through the candidate OBJECTIVE's projector (spec §17, Bug #14
     analog): the released-init reference's raw EMA embeddings and pooled
@@ -347,26 +389,30 @@ def healthy_references(model, fixed_val, objective=None):
     projection; only the recorded stats tensors move to CPU.
     """
     proj = _objective_projection(objective)
-    zy_raw, zy_proj, zh_pooled = [], [], []
-    with torch.no_grad():
-        for (G, S), M in zip(fixed_val.batches, fixed_val.masks):
-            z_y = model.ema(G)
-            zy_raw.append(z_y.cpu())
-            if proj is not None:
-                zy_proj.append(proj(z_y).cpu())
-            out = model(G, S, M)
-            m = out["mask"].float()
-            # Bug #13 (same convention as _acc_stats): prediction-health stats pool
-            # the PROJECTED prediction, in the same space the cos_err metric lives.
-            z_hat = proj(out["z_hat"]) if proj is not None else out["z_hat"]
-            zh_pooled.append(((z_hat * m.unsqueeze(-1)).sum(1)
-                              / m.sum(1, keepdim=True).clamp(min=1)).cpu())
-    raw = token_space_stats(torch.cat(zy_raw, dim=0))
-    if proj is not None:
-        proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
-    else:
-        proj_stats = raw
-    pred = _pooled_pred_stats(torch.cat(zh_pooled, dim=0))
+    restore_modes = _eval_mode_restore(model, objective)
+    try:
+        zy_raw, zy_proj, zh_pooled = [], [], []
+        with torch.no_grad():
+            for (G, S), M in zip(fixed_val.batches, fixed_val.masks):
+                z_y = model.ema(G)
+                zy_raw.append(z_y.cpu())
+                if proj is not None:
+                    zy_proj.append(proj(z_y).cpu())
+                out = model(G, S, M)
+                m = out["mask"].float()
+                # Bug #13 (same convention as _acc_stats): prediction-health stats pool
+                # the PROJECTED prediction, in the same space the cos_err metric lives.
+                z_hat = proj(out["z_hat"]) if proj is not None else out["z_hat"]
+                zh_pooled.append(((z_hat * m.unsqueeze(-1)).sum(1)
+                                  / m.sum(1, keepdim=True).clamp(min=1)).cpu())
+        raw = token_space_stats(torch.cat(zy_raw, dim=0))
+        if proj is not None:
+            proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
+        else:
+            proj_stats = raw
+        pred = _pooled_pred_stats(torch.cat(zh_pooled, dim=0))
+    finally:
+        restore_modes()
     return {"raw": raw, "proj": proj_stats, "pred": pred}
 
 

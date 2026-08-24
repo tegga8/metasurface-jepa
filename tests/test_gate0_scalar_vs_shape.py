@@ -60,10 +60,31 @@ def test_build_geometries_matches_dataset_convention():
     assert torch.equal(g[0], grid)
 
 
+def test_build_geometries_multi_sample_batch():
+    """N > 1 regression: per-sample parameter columns must broadcast as (N,1,1),
+    not (1,1,1,N)."""
+    rng = np.random.RandomState(3)
+    n = 4
+    pat = (rng.rand(64, 64, n) < 0.25).astype(np.int8)
+    params = np.stack([rng.uniform(2.5, 3.0, n),
+                       rng.uniform(0.5, 1.0, n),
+                       rng.uniform(3.5, 5.0, n)], axis=1)   # [l, h, r]
+    g = build_geometries(pat, params)
+    assert g.shape == (n, 3, 64, 64) and g.dtype == torch.float32
+    occ_t = torch.from_numpy((pat == 1).transpose(2, 0, 1))
+    for i in range(n):
+        l, h, r = params[i]
+        assert torch.allclose(g[i, 0][occ_t[i]],
+                              torch.full((int(occ_t[i].sum()),), r / 5.0))
+        assert torch.allclose(g[i, 1][occ_t[i]],
+                              torch.full((int(occ_t[i].sum()),), h))
+        assert torch.allclose(g[i, 2], torch.full((64, 64), l / 3.0))
+
+
 def test_metrics_hand_values():
     pred = np.array([[1.0, 0.0], [0.0, 1.0]])
     true = np.array([[1.0, 0.0], [1.0, 0.0]])
-    assert abs(mse(pred, true) - 0.25) < 1e-12
+    assert abs(mse(pred, true) - 0.5) < 1e-12
     # per-sample rel L2: 0 and sqrt(2)/1 -> mean sqrt(2)/2
     assert abs(rel_l2(pred, true) - (np.sqrt(2.0) / 2.0)) < 1e-12
     assert abs(r2_score(true, true) - 1.0) < 1e-12

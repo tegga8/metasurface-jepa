@@ -255,8 +255,10 @@ def validate_checkpoint(cfg, args):
         for (G, S), M in zip(batches, masks):
             out = model(G, S, M, goal_mode="real")
             out_n = model(G, S, M, goal_mode="null")
-            perm = torch.randperm(G.shape[0], generator=torch.Generator(
-                device=device).manual_seed(args.mask_seed))
+            perm = torch.randperm(
+                G.shape[0],
+                generator=torch.Generator(device="cpu").manual_seed(args.mask_seed)
+            ).to(G.device)
             out_s = model(G, S[perm], M, goal_mode="real")
 
             mask = out["mask"]

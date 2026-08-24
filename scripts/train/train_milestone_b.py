@@ -45,6 +45,8 @@ from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
 from assembly import build_model, saveable_state_dict
 from losses.objectives import build_objective
+from runtime.device import resolve_device
+from train.engine import collect_ema_state, save_checkpoint, load_checkpoint
 
 PIXEL_GRID = 16
 
@@ -86,14 +88,24 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
+def validate_config(cfg, total_steps):
+    """Validate training config per hardening spec."""
+    val_every = cfg["train"].get("val_every_steps", 0)
+    if val_every <= 0:
+        raise ValueError("val_every_steps must be > 0")
+    if val_every >= total_steps:
+        raise ValueError(
+            f"val_every_steps ({val_every}) must be < total_steps ({total_steps}) "
+            "to allow multiple validations when best-checkpoint selection is enabled"
+        )
+
+
 def load_surrogate(path, device):
     """Frozen forward-EM surrogate, required only for half_sensitivity mask
     placement (§2: half of batches masked over resonance-relevant regions)."""
     METADIT_SRC = os.path.join(REPO_ROOT, "external", "metadit")
     if METADIT_SRC not in sys.path:
         sys.path.insert(0, METADIT_SRC)
-    # ``external/metadit`` is added to ``sys.path`` at runtime, so importing
-    # through the module loader avoids a false unresolved-import diagnostic.
     import importlib
 
     surrogate_s3 = importlib.import_module("model.surrogate").surrogate_s3
@@ -128,12 +140,13 @@ def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs, need_null=False)
     for r, fv in sorted(fixed_vals.items()):
         ref = refs[r]
         m, health = fv.evaluate(model, objective, ref["raw"], ref["proj"])
-        metrics[f"cos_err_r{r:g}"] = m["cos_err_r0.5"]
+        # Dynamic ratio key per hardening spec
+        ratio_key = f"cos_err_r{r:g}"
+        metrics[ratio_key] = m.get(ratio_key, m.get("cos_err_r0.5", 0.0))
         metrics[f"health_r{r:g}"] = health["status"]
         if need_null:
-            real, null, gap = fv.null_gap(model, objective)
-            metrics[f"null_cos_err_r{r:g}"] = null
-            metrics[f"null_gap_r{r:g}"] = gap
+            gap_metrics = fv.null_gap(model, objective)
+            metrics.update(gap_metrics)
     return metrics
 
 
@@ -141,10 +154,13 @@ def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs, need_null=False)
 # checkpoints (engine, spec §30)
 # ---------------------------------------------------------------------------
 
-def _load_train_checkpoint(path, model, objective, optimizer, scheduler, device):
-    from train.engine import load_checkpoint, restore_ema_state
+def _load_train_checkpoint(path, model, objective, optimizer, scheduler, device, masker):
     obj = load_checkpoint(path, model, objective, optimizer, scheduler, device)
+    from train.engine import restore_ema_state
     restore_ema_state(model, obj.get("ema_state"))
+    # Restore masker RNG state for exact resume
+    if "masker_rng_state" in obj and obj["masker_rng_state"] is not None:
+        masker.set_rng_state(obj["masker_rng_state"])
     return obj
 
 
@@ -293,18 +309,33 @@ def main():
           f"ratios={ratios} device={device} trainable_params={n_param:,} "
           f"steps_per_epoch={steps_per_epoch} total_steps={total_steps}")
 
-    from train.engine import collect_ema_state, save_checkpoint
+    # Validate config
+    validate_config(cfg, total_steps)
+
     ckpt_path = os.path.join(out_dir, f"{run_tag}_latest.pt")
     best_path = os.path.join(out_dir, f"{run_tag}_best_model.pt")
-    start_step, start_epoch, best = 0, 0, {}
+    best_weights_path = os.path.join(out_dir, f"{run_tag}_best_weights.pt")
+    start_step, start_epoch, start_micro_step = 0, 0, 0
+    best_prediction, best_healthy_prediction = {}, {}
     if args.resume:
         obj = _load_train_checkpoint(args.resume, model, objective, optimizer,
-                                     scheduler, device)
+                                     scheduler, device, masker)
         start_step = obj["step"] + 1
-        start_epoch = obj["epoch"] + 1
-        best = obj.get("best", {})
+        start_epoch = obj["epoch"]
+        start_micro_step = obj.get("micro_step", 0)
+        # Handle epoch-end vs mid-epoch resume
+        if not obj.get("is_epoch_end", False):
+            # Mid-epoch checkpoint: start_epoch is correct, micro_step tells us where in the epoch
+            pass
+        else:
+            # Epoch-end checkpoint: next epoch
+            start_epoch += 1
+            start_micro_step = 0
+        best_prediction = obj.get("best_prediction", {})
+        best_healthy_prediction = obj.get("best_healthy_prediction", {})
         print(f"[milestone_b] resumed from {args.resume}: step={start_step} "
-              f"epoch={start_epoch} objective={objective_name}")
+              f"epoch={start_epoch} micro_step={start_micro_step} "
+              f"objective={objective_name}")
 
     if args.eval_only:
         metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs,
@@ -321,7 +352,7 @@ def main():
     print(f"[milestone_b] training objective={objective_name} ({exp}) ...")
     optimizer.zero_grad(set_to_none=True)
     step = start_step
-    micro_step = 0
+    micro_step = start_micro_step
     t_start = time.time()
     accum = int(opt_cfg.get("grad_accum", 1))
     if accum < 1:
@@ -333,7 +364,7 @@ def main():
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
-        for bi, (G, S) in enumerate(loader):            
+        for bi, (G, S) in enumerate(loader):
             if args.max_steps and step >= args.max_steps:
                 break
             G, S = G.to(device), S.to(device)
@@ -376,43 +407,61 @@ def main():
                 val_metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals,
                                                       refs, need_null=False)
                 primary = val_metrics.get(f"cos_err_r{ratios[0]:g}", float("inf"))
-                if not best or primary < best.get("primary", float("inf")):
-                    best = {"primary": primary, "metrics": val_metrics,
+                if not best_prediction or primary < best_prediction.get("primary", float("inf")):
+                    best_prediction = {"primary": primary, "metrics": val_metrics,
                             "step": step}
-                    torch.save(saveable_state_dict(model), best_path)
+                    # Save full resumable checkpoint as best (not weights-only)
+                    save_checkpoint(best_path, model, objective, optimizer, scheduler,
+                                    cfg, step, epoch, micro_step=micro_step,
+                                    is_epoch_end=(bi == len(loader) - 1),
+                                    metrics=val_metrics, health=None,
+                                    ema_state=collect_ema_state(model),
+                                    best_prediction=best_prediction,
+                                    best_healthy_prediction=best_healthy_prediction,
+                                    masker_rng_state=masker.get_rng_state(),
+                                    device=device, artifact_type="best")
+                    # Also save weights-only export for convenience
+                    torch.save(saveable_state_dict(model), best_weights_path)
                 print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
 
+            is_epoch_end = (bi == len(loader) - 1)
             ckpt_now = (cfg["train"].get("ckpt_every_steps", 0)
                         and step % cfg["train"]["ckpt_every_steps"] == 0) or \
-                (bi == len(loader) - 1)
+                is_epoch_end
             if ckpt_now:
                 save_checkpoint(ckpt_path, model, objective, optimizer, scheduler,
-                                cfg, step, epoch, metrics=val_metrics if step % opt_cfg[
+                                cfg, step, epoch, micro_step=micro_step,
+                                is_epoch_end=is_epoch_end,
+                                metrics=val_metrics if step % opt_cfg[
                                     "val_every_steps"] == 0 else {},
                                 health=None, ema_state=collect_ema_state(model),
-                                best_state=best)
+                                best_prediction=best_prediction,
+                                best_healthy_prediction=best_healthy_prediction,
+                                masker_rng_state=masker.get_rng_state(),
+                                device=device, artifact_type="latest")
                 print(f"  [ckpt] saved {ckpt_path} (step {step})")
 
             step += 1
             if args.smoke and (step - start_step) >= cfg["train"].get("max_steps", 0):
                 break
         if micro_step % accum != 0:
-                        raise RuntimeError(
-                            f"Epoch {epoch} ended with {micro_step % accum} "
-                            f"unconsumed micro-batches for grad_accum={accum}"
-                        )    
+            raise RuntimeError(
+                f"Epoch {epoch} ended with {micro_step % accum} "
+                f"unconsumed micro-batches for grad_accum={accum}")
+        micro_step = 0  # Reset micro_step at epoch boundary
         if args.max_steps and step >= args.max_steps:
             break
 
     # final eval
     final = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs,
                                     need_null=True)
-    gaps = [final[k] for k in final if k.startswith("null_gap_r")
+    gaps = [final[k] for k in final if k.startswith("gap_cos_err_r")
             and isinstance(final[k], float)]
     final["null_gap"] = sum(gaps) / len(gaps) if gaps else float("nan")
     final_path = os.path.join(out_dir, f"{run_tag}_final_metrics.json")
     with open(final_path, "w") as f:
-        json.dump({"config": cfg, "metrics": final, "best": best,
+        json.dump({"config": cfg, "metrics": final, "best_prediction": best_prediction,
+                   "best_healthy_prediction": best_healthy_prediction,
                    "objective": objective_name,
                    "loss_components": {k: float(v / max(1, comp_counts.get(k, 1)))
                                        for k, v in comp_sums.items()},
@@ -420,8 +469,14 @@ def main():
     print(f"[milestone_b] final metrics -> {final_path}")
     print(json.dumps(final, indent=2))
     save_checkpoint(ckpt_path, model, objective, optimizer, scheduler, cfg,
-                    step - 1, epoch, metrics=final, health=None,
-                    ema_state=collect_ema_state(model), best_state=best)
+                    step - 1, epoch, micro_step=micro_step,
+                    is_epoch_end=True,
+                    metrics=final, health=None,
+                    ema_state=collect_ema_state(model),
+                    best_prediction=best_prediction,
+                    best_healthy_prediction=best_healthy_prediction,
+                    masker_rng_state=masker.get_rng_state(),
+                    device=device, artifact_type="final")
 
 
 if __name__ == "__main__":

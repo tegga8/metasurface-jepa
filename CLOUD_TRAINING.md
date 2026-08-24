@@ -1,4 +1,4 @@
-# CLOUD_TRAINING.md — Kaggle / Colab Training Runbook
+# CLOUD_TRAINING.md — Kaggle / Colab Training Runbook (Phase 2 Updated)
 
 This is the **canonical** cloud-training workflow referenced by `AGENTS.md`. Any milestone whose
 task prompt involves gradient-based training points here instead of re-deriving its own cloud
@@ -38,6 +38,14 @@ session on either platform — stage it once:
   (`/content/drive/MyDrive/<project>/data/metadit/`), and mount Drive each session instead of
   re-downloading.
 
+### Dependency contract
+The repository pins an explicitly tested PyTorch/Torchvision combination in `requirements.txt`:
+- **PyTorch 2.5.1**
+- **Torchvision 0.20.1**
+
+Do not change these without re-running the full preflight suite. The preflight script
+`scripts/preflight/milestone_b_preflight.py` will fail if the environment does not match.
+
 ---
 
 ## 1. Kaggle workflow
@@ -53,37 +61,49 @@ session on either platform — stage it once:
    %cd repo
    !pip install -r requirements.txt
    ```
-4. Symlink or point config paths at the Kaggle input dataset instead of `data/metadit/`:
+4. **Run preflight check** (mandatory before any training):
+   ```python
+   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml
+   ```
+   This verifies: environment contract, git state, dataset, model/objective, tiny training,
+   validation, physics controls, checkpoint save/load/resume, and config validation.
+   **Exit code 1 = DO NOT START TRAINING.**
+5. Symlink or point config paths at the Kaggle input dataset instead of `data/metadit/`:
    ```python
    !ln -s /kaggle/input/<dataset-name> data/metadit
    ```
-5. Confirm GPU:
+6. Confirm GPU:
    ```python
    !nvidia-smi
    ```
-6. Run the milestone's training script (resume if a checkpoint already exists from a prior
+7. Run the milestone's training script (resume if a checkpoint already exists from a prior
    session):
    ```python
    !python scripts/train/train_milestone_b.py \
        --config configs/milestone_b.yaml \
        --resume /kaggle/working/checkpoints/milestone_b/latest.pt   # omit if starting fresh
    ```
-7. Checkpoint into `/kaggle/working/checkpoints/...` throughout the run (the training script
+8. Checkpoint into `/kaggle/working/checkpoints/...` throughout the run (the training script
    handles this per its `--resume`-compatible checkpointing, per `AGENTS.md`'s "Training scripts
    must be resumable" requirement).
-8. **Before the session ends** (Kaggle sessions cap at ~9–12 hours, quota ~30 GPU-hrs/week):
-   - "Save Version" → "Save & Run All" to snapshot `/kaggle/working/` so it isn't lost, **or**
-   - push results directly back to GitHub from within the notebook:
-     ```python
-     %cd repo
-     !git config user.email "you@example.com"
-     !git config user.name "you"
-     !git add checkpoints/milestone_b/
-     !git commit -m "milestone B: cloud training run, see REPORT.md"
-     !git push
-     ```
-     (requires a GitHub personal access token set as a Kaggle Secret, referenced via
-     `!git remote set-url origin https://<token>@github.com/<you>/<repo>.git`)
+9. **Configure persistent checkpoint storage** (mandatory per Phase 2 §5):
+   - Before training, ensure `checkpoints/` is symlinked to persistent storage
+   - At every checkpoint: save → verify exists → verify loadable
+   - After training: checkpoint provenance validation + checkpoint integrity validation
+   - If persistent storage is not configured: **ABORT BEFORE TRAINING**
+10. **Before the session ends** (Kaggle sessions cap at ~9–12 hours, quota ~30 GPU-hrs/week):
+    - "Save Version" → "Save & Run All" to snapshot `/kaggle/working/` so it isn't lost, **or**
+    - push results directly back to GitHub from within the notebook:
+      ```python
+      %cd repo
+      !git config user.email "you@example.com"
+      !git config user.name "you"
+      !git add checkpoints/milestone_b/
+      !git commit -m "milestone B: cloud training run, see REPORT.md"
+      !git push
+      ```
+      (requires a GitHub personal access token set as a Kaggle Secret, referenced via
+      `!git remote set-url origin https://<token>@github.com/<you>/<repo>.git`)
 
 **Resuming after a session ends/quota resets:** start a new session, repeat steps 1–5, then pass
 `--resume` pointing at the last checkpoint pulled from GitHub (or restored from a saved notebook
@@ -110,17 +130,22 @@ version).
    %cd repo
    !pip install -r requirements.txt
    ```
-4. Symlink data and checkpoints to the persistent Drive folder:
+4. **Run preflight check** (mandatory before any training):
+   ```python
+   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml \
+       --data-root /content/drive/MyDrive/<project>/data/metadit
+   ```
+5. Symlink data and checkpoints to the persistent Drive folder:
    ```python
    !ln -s /content/drive/MyDrive/<project>/data/metadit data/metadit
    !mkdir -p /content/drive/MyDrive/<project>/checkpoints
    !ln -s /content/drive/MyDrive/<project>/checkpoints checkpoints
    ```
-5. Confirm GPU:
+6. Confirm GPU:
    ```python
    !nvidia-smi
    ```
-6. Run the milestone's training script, same as Kaggle:
+7. Run the milestone's training script, same as Kaggle:
    ```python
    !python scripts/train/train_milestone_b.py \
        --config configs/milestone_b.yaml \
@@ -129,11 +154,11 @@ version).
    Because `checkpoints/` is symlinked to Drive, checkpoints survive disconnects automatically —
    no separate save step needed, but do periodically confirm files are actually landing on Drive
    (Colab disconnects can occasionally drop the last few seconds of I/O).
-7. Push results back to GitHub when the run reaches a stopping point (same git commands as the
+8. Push results back to GitHub when the run reaches a stopping point (same git commands as the
    Kaggle section above), or just leave results on Drive and copy `REPORT.md` back manually.
 
 **Watch out for:** free-tier idle timeouts and ~12hr hard session caps — this is exactly why
-resumable checkpointing (step 6) matters more on Colab than almost anywhere else in this project.
+resumable checkpointing (step 7) matters more on Colab than almost anywhere else in this project.
 
 ---
 
@@ -166,3 +191,65 @@ No strict rule, but as a default:
 - [ ] If the milestone is not yet done, note in REPORT.md exactly what checkpoint to `--resume`
       from and what remains, so the next cloud session (possibly days later, possibly you've
       forgotten details) can pick up cleanly.
+
+---
+
+## 5. Post-training verification (Phase 2 §13)
+
+After training completes, verify the EXACT produced checkpoint:
+
+```bash
+python scripts/diagnostics/checkpoint_provenance_audit.py
+python scripts/preflight/checkpoint_integrity_check.py \
+    --checkpoint <EXACT_CHECKPOINT>
+python scripts/eval/eval_vicreg_sanity.py \
+    --checkpoint <EXACT_CHECKPOINT> \
+    --config configs/milestone_b.yaml \
+    --device cuda:0
+python scripts/eval/physics_conditioning_audit.py \
+    --checkpoint <EXACT_CHECKPOINT> \
+    --config configs/milestone_b.yaml \
+    --device cuda:0
+```
+
+Then compare final evaluation against in-loop validation. They must use the same
+validation/mask/metric implementation.
+
+---
+
+## 6. Final acceptance (Phase 2 §14)
+
+Create `checkpoints/milestone_b/FINAL_PIPELINE_ACCEPTANCE.md` recording:
+
+| Gate | Result |
+|------|--------|
+| Fresh clone | PASS/FAIL |
+| Dependency install | PASS/FAIL |
+| Dataset discovery | PASS/FAIL |
+| CPU preflight | PASS/FAIL |
+| CUDA preflight | PASS/FAIL |
+| One-step CUDA train | PASS/FAIL |
+| Checkpoint save/load | PASS/FAIL |
+| Resume | PASS/FAIL |
+| Persistent checkpoint | PASS/FAIL |
+| In-loop/final metric consistency | PASS/FAIL |
+| Physics-control consistency | PASS/FAIL |
+| Static audit | PASS/FAIL |
+| Full tests | PASS/FAIL |
+
+Phase 2 is complete only when this exact chain succeeds:
+```
+fresh clone
+→ fresh Kaggle session
+→ dataset discovered
+→ dependencies verified
+→ CUDA preflight PASS
+→ tiny CUDA training PASS
+→ checkpoint PASS
+→ resume PASS
+→ full training completes
+→ persistent checkpoint survives
+→ reload PASS
+→ final evaluation PASS
+```
+with **zero manual source-code edits inside Kaggle**.

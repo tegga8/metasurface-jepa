@@ -330,10 +330,12 @@ def test_null_gap_invariant_to_batch_partition():
     fv_a, fv_b = _same_masks_fv([(0, 32), (32, 64), (64, 96)],
                                 [(0, 16), (16, 56), (56, 96)])
     obj = _objective(1.0)
+    ratio_key = f"cos_err_r{fv_a.ratio:g}"
     a = fv_a.null_gap(FakeModel(), obj)
     b = fv_b.null_gap(FakeModel(), obj)
-    for i, name in enumerate(("real", "null", "gap")):
-        assert abs(a[i] - b[i]) < 1e-9, f"{name} metric depends on partitioning"
+    for name in ("real", "null", "gap"):
+        key = f"{name}_{ratio_key}"
+        assert abs(a[key] - b[key]) < 1e-9, f"{name} metric depends on partitioning"
 
 
 # --------------------------------------------------------------------------

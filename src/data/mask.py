@@ -123,6 +123,14 @@ class BlockMasker:
                                      self.min_side, self.k_range)
         return random_masks(self.rng, b, ratio, self.grid, self.min_side, self.k_range)
 
+    def get_rng_state(self) -> bytes:
+        """Get the internal torch.Generator state for checkpointing."""
+        return self.rng.get_state()
+
+    def set_rng_state(self, state: bytes) -> None:
+        """Restore the internal torch.Generator state from checkpoint."""
+        self.rng.set_state(state)
+
 
 def apply_mask_to_pixels(G, M, grid=DEFAULT_GRID):
     """G_c = M ⊙ G in pixel space. M: (B, grid, grid), 1 = visible; output (B, 3, 64, 64)."""

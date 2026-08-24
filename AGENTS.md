@@ -64,18 +64,30 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
      VICReg/LeJEPA-SIGReg objectives, phase transitions, and winner selection live inside
      Milestone B's adaptive controller by operator decision. Tracked and worked via
      `checkpoints/milestone_b/BUGLOG.md` (see the fix directive that originated this entry).
-   - **2026-08-24 — Physics-Guided Masked Retrofit sequence re-scoped mid-preflight.** The
-     operator replaced the previously provided retrofit "Phase 2 (Geometry Decoder)" content
-     with "Phase 2 — Fix VICReg Training/Validation Plumbing Before Cloud Run" (plumbing-only:
-     objective device placement + eval-mode hygiene in validation/reference paths), explicitly
-     forbidding decoder/inverse-design/swapped-spectrum work. Rationale: the verified VICReg
-     CPU/CUDA construction defect blocks the genuine Milestone-B cloud training run that all
-     checkpoint-gated preflight items depend on (`checkpoints/milestone_b/physics_validation/
-     PHYSICS_TARGET_SELECTION_TRAINED_REPORT.md`). Same session therefore closed retrofit
-     Phase 1 (Gate-0 PASS; Gate-2 candidate-freezing DEFERRED; target-health/Gate-1 stay
-     BLOCKED pending a genuine trained checkpoint) and then executed the new plumbing phase.
-     See `checkpoints/physics_retrofit/preflight/REPORT.md` and
-     `checkpoints/milestone_b/PHASE2_VICREG_PLUMBING_REPORT.md`.
+- **2026-08-24 — Physics-Guided Masked Retrofit sequence re-scoped mid-preflight.** The
+      operator replaced the previously provided retrofit "Phase 2 (Geometry Decoder)" content
+      with "Phase 2 — Fix VICReg Training/Validation Plumbing Before Cloud Run" (plumbing-only:
+      objective device placement + eval-mode hygiene in validation/reference paths), explicitly
+      forbidding decoder/inverse-design/swapped-spectrum work. Rationale: the verified VICReg
+      CPU/CUDA construction defect blocks the genuine Milestone-B cloud training run that all
+      checkpoint-gated preflight items depend on (`checkpoints/milestone_b/physics_validation/
+      PHYSICS_TARGET_SELECTION_TRAINED_REPORT.md`). Same session therefore closed retrofit
+      Phase 1 (Gate-0 PASS; Gate-2 candidate-freezing DEFERRED; target-health/Gate-1 stay
+      BLOCKED pending a genuine trained checkpoint) and then executed the new plumbing phase.
+      See `checkpoints/physics_retrofit/preflight/REPORT.md` and
+      `checkpoints/milestone_b/PHASE2_VICREG_PLUMBING_REPORT.md`.
+    - **2026-08-25 — Phase 2 Kaggle Preflight + Final Pipeline Acceptance completed.**
+      Repository hardening per Phase 2 spec: created `src/runtime/` device & reproducibility modules,
+      `src/runtime/physics_controls.py` for canonical physics controls, updated BlockMasker with
+      RNG state save/restore, overhauled checkpoint schema with atomic writes/validation,
+      exact mid-epoch resume, stale-projector fix in validation, dynamic ratio metrics, config
+      validation for val_every_steps, derangement controls for shuffled spectra, Barlow N<2
+      explicit contract, goal_mode validation, eval script device/ema fixes, checkpoint schema
+      validation, distinct best-prediction/best-healthy/latest/final artifacts, full pipeline
+      integration test. Added preflight scripts: `scripts/preflight/milestone_b_preflight.py`,
+      `scripts/preflight/checkpoint_integrity_check.py`, `scripts/preflight/repo_static_audit.py`.
+      Updated `CLOUD_TRAINING.md`, `notebooks/cloud_train_runner.ipynb`, `requirements.txt`
+      (PyTorch 2.5.1 + Torchvision 0.20.1). All Phase-1 tests pass (292 passed, 7 skipped).
 
 ---
 

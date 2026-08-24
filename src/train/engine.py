@@ -5,7 +5,7 @@ Owns everything the training loop and evaluators must NOT re-derive:
 
   - FixedValidation: one fixed validation subset + one fixed mask set
     (reproducible across objectives and calls), mask-statistics recording, and
-    the shared evaluation: prediction metric cos_err_r0.5, goal-token
+    the shared evaluation: prediction metric cos_err_r{ratio}, goal-token
     statistics, goal->spectrum attention statistics, and the three-space
     representation-health stats. Projection is provided by the OBJECTIVE's own
     projector — there is no `model.proj` anywhere (§17).
@@ -13,8 +13,8 @@ Owns everything the training loop and evaluators must NOT re-derive:
     through the candidate objective's projector (never a random-reference head).
   - Checkpoint save/load with mandatory metadata (objective_name,
     objective_state, optimizer param-shape ownership, scheduler state, EMA
-    momentum counters, RNG state) and strict objective-name / optimizer-ownership
-    validation on load (§30).
+    momentum counters, RNG state, masker RNG state, git commit, env versions)
+    and strict objective-name / optimizer-ownership validation on load (§30).
   - RNG collect/restore for exact resume (Bug #17).
   - IntervalLossAccumulator for exact per-interval loss means (Bug #18).
 
@@ -25,6 +25,10 @@ no adaptive-ladder, phase, or LOSS_LADDER machinery (all removed in the repair).
 import json
 import os
 import random
+import subprocess
+import sys
+import tempfile
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,8 +38,36 @@ from diagnostics.representation_health import (
     pairwise_cos_stats, token_space_stats,
 )
 from data.mask import BlockMasker
+from runtime.reproducibility import collect_rng_state as _collect_rng_state
+from runtime.reproducibility import restore_rng_state as _restore_rng_state
 
 PIXEL_GRID = 16
+
+CHECKPOINT_SCHEMA_VERSION = 1
+REQUIRED_CHECKPOINT_KEYS = (
+    "schema_version",
+    "objective_name",
+    "step",
+    "epoch",
+    "micro_step",
+    "is_epoch_end",
+    "cfg",
+    "best_prediction",
+    "best_healthy_prediction",
+    "model",
+    "objective_state",
+    "optimizer",
+    "optimizer_param_shapes",
+    "scheduler_state",
+    "ema_state",
+    "rng_state",
+    "masker_rng_state",
+    "git_commit",
+    "git_dirty",
+    "env_versions",
+    "device_info",
+    "artifact_type",
+)
 
 
 class IntervalLossAccumulator:
@@ -67,28 +99,16 @@ class IntervalLossAccumulator:
 
 def collect_rng_state():
     """CPU + numpy + python + (when CUDA available) CUDA RNG state for exact
-    resume (Bug #17). CUDA state is None on CPU-only machines, never an error."""
-    return {
-        "torch_rng": torch.get_rng_state(),
-        "numpy_rng": np.random.get_state(),
-        "python_rng": random.getstate(),
-        "torch_cuda_rng": (torch.cuda.get_rng_state_all()
-                           if torch.cuda.is_available() else None),
-    }
+    resume (Bug #17). CUDA state is None on CPU-only machines, never an error.
+    Delegates to runtime.reproducibility for canonical implementation."""
+    return _collect_rng_state()
 
 
 def restore_rng_state(state):
     """Inverse of collect_rng_state. Missing/None entries are skipped; a CUDA
-    state saved on a GPU machine is skipped safely when restoring on CPU."""
-    if state.get("torch_rng") is not None:
-        torch.set_rng_state(state["torch_rng"].cpu())
-    if state.get("numpy_rng") is not None:
-        np.random.set_state(state["numpy_rng"])
-    if state.get("python_rng") is not None:
-        random.setstate(state["python_rng"])
-    cuda = state.get("torch_cuda_rng")
-    if cuda is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all([s.cpu() for s in cuda])
+    state saved on a GPU machine is skipped safely when restoring on CPU.
+    Delegates to runtime.reproducibility for canonical implementation."""
+    _restore_rng_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +264,10 @@ class FixedValidation:
                     _, a_goal, w = model.spectrum_path(S, goal_mode, need_weights=True)
                     goal_tokens.append(a_goal.cpu())
                     goal_attns.append(w.cpu())
+            # Dynamic ratio key per the hardening spec
+            ratio_key = f"cos_err_r{self.ratio:g}"
             metrics = {
-                "cos_err_r0.5": float(loss_sum / max(1, mask_count)),
+                ratio_key: float(loss_sum / max(1, mask_count)),
             }
             raw = token_space_stats(torch.cat(zy_raw, dim=0))
             proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
@@ -303,9 +325,12 @@ class FixedValidation:
                     mask_count += int(m1.sum().item())
         finally:
             restore_modes()
-        return (float(real_sum / max(1, mask_count)),
-                float(null_sum / max(1, mask_count)),
-                float(gap_sum / max(1, mask_count)))
+        ratio_key = f"cos_err_r{self.ratio:g}"
+        return {
+            f"real_{ratio_key}": float(real_sum / max(1, mask_count)),
+            f"null_{ratio_key}": float(null_sum / max(1, mask_count)),
+            f"gap_{ratio_key}": float(gap_sum / max(1, mask_count)),
+        }
 
 
 def fixed_validation_from_loader(val_ds, n_samples, batch_size, device, ratio=0.5,
@@ -365,10 +390,10 @@ def build_deterministic_reference(build_fn, seed=REFS_SEED_DEFAULT):
         return build_fn()
 
 
-def healthy_references(model, fixed_val, objective=None):
+def healthy_references(ref_model, fixed_val, objective=None):
     """Stats of a fresh released-init build on the SAME fixed validation set.
 
-    Runs with model AND objective (when supplied) in eval mode — Phase-2
+    Runs with ref_model AND objective (when supplied) in eval mode — Phase-2
     plumbing fix B: the reference projection passes through the candidate
     objective's projector, whose BatchNorm layers must neither consume batch
     statistics nor update their running statistics during reference
@@ -389,16 +414,16 @@ def healthy_references(model, fixed_val, objective=None):
     projection; only the recorded stats tensors move to CPU.
     """
     proj = _objective_projection(objective)
-    restore_modes = _eval_mode_restore(model, objective)
+    restore_modes = _eval_mode_restore(ref_model, objective)
     try:
         zy_raw, zy_proj, zh_pooled = [], [], []
         with torch.no_grad():
             for (G, S), M in zip(fixed_val.batches, fixed_val.masks):
-                z_y = model.ema(G)
+                z_y = ref_model.ema(G)
                 zy_raw.append(z_y.cpu())
                 if proj is not None:
                     zy_proj.append(proj(z_y).cpu())
-                out = model(G, S, M)
+                out = ref_model(G, S, M)
                 m = out["mask"].float()
                 # Bug #13 (same convention as _acc_stats): prediction-health stats pool
                 # the PROJECTED prediction, in the same space the cos_err metric lives.
@@ -414,6 +439,71 @@ def healthy_references(model, fixed_val, objective=None):
     finally:
         restore_modes()
     return {"raw": raw, "proj": proj_stats, "pred": pred}
+
+
+# ---------------------------------------------------------------------------
+# git / environment metadata
+# ---------------------------------------------------------------------------
+
+def _git_info() -> dict[str, str]:
+    """Collect git commit hash and dirty status."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        commit = "unknown"
+    try:
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        is_dirty = bool(dirty)
+    except Exception:
+        is_dirty = False
+    return {"git_commit": commit, "git_dirty": is_dirty}
+
+
+def _env_versions() -> dict[str, str]:
+    """Collect key environment versions."""
+    info = {
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+    }
+    if torch.cuda.is_available():
+        info["cuda"] = torch.version.cuda
+        info["cudnn"] = torch.backends.cudnn.version()
+        info["gpu"] = torch.cuda.get_device_name(0)
+    return info
+
+
+def _device_info(device: torch.device | str | None = None) -> dict[str, Any]:
+    """Collect device information."""
+    dev = device if isinstance(device, torch.device) else torch.device(device or "cpu")
+    info = {"device_type": dev.type}
+    if dev.type == "cuda":
+        info["device_index"] = dev.index
+        info["device_name"] = torch.cuda.get_device_name(dev.index or 0)
+    return info
+
+
+# ---------------------------------------------------------------------------
+# checkpoint schema validation
+# ---------------------------------------------------------------------------
+
+def _validate_checkpoint_schema(obj: dict, path: str) -> None:
+    """Validate checkpoint has all required keys. Fails loudly on mismatch."""
+    missing = [k for k in REQUIRED_CHECKPOINT_KEYS if k not in obj]
+    if missing:
+        raise RuntimeError(
+            f"Checkpoint {path} missing required keys: {missing}. "
+            f"Expected schema version {CHECKPOINT_SCHEMA_VERSION}."
+        )
+    if obj.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Checkpoint {path} has schema version {obj.get('schema_version')}, "
+            f"expected {CHECKPOINT_SCHEMA_VERSION}."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -456,39 +546,6 @@ def _optimizer_param_shapes(optimizer):
             for group in optimizer.param_groups]
 
 
-def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_step,
-                    epoch=0, metrics=None, health=None, ema_state=None,
-                    best_state=None, extra=None):
-    """Save a resumable checkpoint (§30). Mandatory metadata: objective_name,
-    objective_state, optimizer state + param-shape ownership fingerprint,
-    scheduler state, EMA momentum counters, RNG state, cfg, step, best."""
-    metrics = metrics or {}
-    obj = {
-        "objective_name": objective.name,
-        "step": global_step,
-        "epoch": epoch,
-        "cfg": cfg,
-        "best": best_state or {
-            "primary": metrics.get("cos_err_r0.5", 0.0),
-            "metrics": metrics,
-            "step": global_step,
-            "health": health,
-        },
-        "model": _saveable(model),
-        "objective_state": objective.state_dict(),
-        "optimizer": optimizer.state_dict() if optimizer is not None else None,
-        "optimizer_param_shapes": _optimizer_param_shapes(optimizer),
-        "scheduler_state": (scheduler.state_dict()
-                            if scheduler is not None else None),
-        "ema_state": ema_state,
-        **collect_rng_state(),
-    }
-    if extra:
-        obj.update(extra)
-    torch.save(obj, path)
-    return path
-
-
 def _check_optimizer_ownership(optimizer, saved_shapes):
     if saved_shapes is None:
         return
@@ -500,12 +557,80 @@ def _check_optimizer_ownership(optimizer, saved_shapes):
             "(spec §30 ownership check)")
 
 
+def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_step,
+                    epoch=0, micro_step=0, is_epoch_end=False, metrics=None, health=None,
+                    ema_state=None, best_prediction=None, best_healthy_prediction=None,
+                    masker_rng_state=None, device=None, artifact_type="full", extra=None):
+    """Save a resumable checkpoint (§30). Mandatory metadata: objective_name,
+    objective_state, optimizer state + param-shape ownership fingerprint,
+    scheduler state, EMA momentum counters, RNG state, masker RNG state,
+    git commit, env versions, device info, cfg, step, epoch, micro_step,
+    is_epoch_end, best_prediction, best_healthy_prediction, artifact_type.
+
+    Writes atomically: writes to a temporary file then renames.
+    """
+    metrics = metrics or {}
+    git = _git_info()
+    env = _env_versions()
+    dev_info = _device_info(device)
+
+    # Separate best_prediction and best_healthy_prediction per hardening spec
+    if best_prediction is None:
+        ratio_key = f"cos_err_r{metrics.get('ratio', 0.5):g}" if 'ratio' in metrics else "cos_err_r0.5"
+        best_prediction = {
+            "primary": metrics.get(ratio_key, 0.0),
+            "metrics": metrics,
+            "step": global_step,
+            "health": health,
+        }
+    if best_healthy_prediction is None:
+        best_healthy_prediction = {}
+
+    obj = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "objective_name": objective.name,
+        "step": global_step,
+        "epoch": epoch,
+        "micro_step": micro_step,
+        "is_epoch_end": is_epoch_end,
+        "cfg": cfg,
+        "best_prediction": best_prediction,
+        "best_healthy_prediction": best_healthy_prediction,
+        "model": _saveable(model),
+        "objective_state": objective.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "optimizer_param_shapes": _optimizer_param_shapes(optimizer),
+        "scheduler_state": (scheduler.state_dict()
+                            if scheduler is not None else None),
+        "ema_state": ema_state,
+        "rng_state": collect_rng_state(),
+        "masker_rng_state": masker_rng_state,
+        "git_commit": git["git_commit"],
+        "git_dirty": git["git_dirty"],
+        "env_versions": env,
+        "device_info": dev_info,
+        "artifact_type": artifact_type,
+    }
+    if extra:
+        obj.update(extra)
+
+    # Atomic write: write to temp file then rename
+    dirname = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile(dir=dirname, delete=False, suffix=".pt") as tmp:
+        tmp_path = tmp.name
+        torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+    return path
+
+
 def load_checkpoint(path, model, objective, optimizer, scheduler, device,
-                    strict_objective=True):
+                    strict_objective=True, strict_optimizer=True):
     """Load a checkpoint saved by save_checkpoint. Fails loudly (§30) if the
     objective name does not match (strict) or the optimizer's parameter list has
-    diverged from what the checkpoint was saved with."""
+    diverged from what the checkpoint was saved with. Validates schema."""
     obj = torch.load(path, map_location="cpu", weights_only=False)
+    _validate_checkpoint_schema(obj, path)
+
     saved_name = obj.get("objective_name")
     if strict_objective and saved_name != objective.name:
         raise RuntimeError(
@@ -523,11 +648,12 @@ def load_checkpoint(path, model, objective, optimizer, scheduler, device,
             f"continue with a freshly-initialized projector (spec §12/§30: "
             f"fail loudly)")
     if optimizer is not None and obj.get("optimizer") is not None:
-        _check_optimizer_ownership(optimizer, obj.get("optimizer_param_shapes"))
+        if strict_optimizer:
+            _check_optimizer_ownership(optimizer, obj.get("optimizer_param_shapes"))
         optimizer.load_state_dict(obj["optimizer"])
     if scheduler is not None and obj.get("scheduler_state") is not None:
         scheduler.load_state_dict(obj["scheduler_state"])
-    restore_rng_state(obj)
+    restore_rng_state(obj.get("rng_state", {}))
     return obj
 
 

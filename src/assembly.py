@@ -50,14 +50,15 @@ class _JEPAForwardMixin:
         # Full-resolution context representation.
         z_x = self.context_encoder(G_c, M)
 
+        hidden = self.hidden
         assert z_x.ndim == 3, (
-            f"Context encoder output must be [B,256,384], got {tuple(z_x.shape)}"
+            f"Context encoder output must be [B,256,{hidden}], got {tuple(z_x.shape)}"
         )
         assert z_x.shape[1] == 256, (
             f"Context encoder must preserve 256 tokens, got {z_x.shape[1]}"
         )
-        assert z_x.shape[2] == 384, (
-            f"Context encoder embedding dim must be 384, got {z_x.shape[2]}"
+        assert z_x.shape[2] == hidden, (
+            f"Context encoder embedding dim must be {hidden}, got {z_x.shape[2]}"
         )
 
         c_physics, a_goal = self.spectrum_path(
@@ -93,14 +94,15 @@ class _JEPAForwardMixin:
             need_weights=need_attn,
         )
 
+        hidden = self.hidden
         assert z_hat.ndim == 3, (
-            f"Predictor output must be [B,256,384], got {tuple(z_hat.shape)}"
+            f"Predictor output must be [B,256,{hidden}], got {tuple(z_hat.shape)}"
         )
         assert z_hat.shape[1] == 256, (
             f"Predictor must output 256 tokens, got {z_hat.shape[1]}"
         )
-        assert z_hat.shape[2] == 384, (
-            f"Predictor output dim must be 384, got {z_hat.shape[2]}"
+        assert z_hat.shape[2] == hidden, (
+            f"Predictor output dim must be {hidden}, got {z_hat.shape[2]}"
         )
 
         assert z_x.shape == z_hat.shape, (
@@ -166,11 +168,12 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
         )
 
         b = G.shape[0]
-        assert c_physics.shape == (b, 384), (
-            f"c_physics must be [B,384], got {tuple(c_physics.shape)}"
+        hidden = self.hidden
+        assert c_physics.shape == (b, hidden), (
+            f"c_physics must be [B,{hidden}], got {tuple(c_physics.shape)}"
         )
-        assert a_goal.shape == (b, 16, 384), (
-            f"a_goal must be [B,16,384], got {tuple(a_goal.shape)}"
+        assert a_goal.shape == (b, 16, hidden), (
+            f"a_goal must be [B,16,{hidden}], got {tuple(a_goal.shape)}"
         )
         assert mask.shape == (b, 256), (
             f"mask must be [B,256], got {tuple(mask.shape)}"
@@ -189,13 +192,13 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
             z_y_raw = self.ema(G)
 
             assert z_y_raw.ndim == 3, (
-                f"EMA target output must be [B,256,384], got {tuple(z_y_raw.shape)}"
+                f"EMA target output must be [B,256,{hidden}], got {tuple(z_y_raw.shape)}"
             )
             assert z_y_raw.shape[1] == 256, (
                 f"EMA target must output 256 tokens, got {z_y_raw.shape[1]}"
             )
-            assert z_y_raw.shape[2] == 384, (
-                f"EMA target dim must be 384, got {z_y_raw.shape[2]}"
+            assert z_y_raw.shape[2] == hidden, (
+                f"EMA target dim must be {hidden}, got {z_y_raw.shape[2]}"
             )
 
             assert z_y_raw.shape == z_hat.shape, (
@@ -294,8 +297,10 @@ def load_into_model(model, sd, device, strict=True):
         model_keys = set(model.state_dict())
         released = {k for k in model_keys if any(x in k for x in SAVED_EXCLUDES)}
         expected = set(filtered)
-        missing = sorted(expected - model_keys)      # ckpt keys the model lacks
-        unexpected = sorted((model_keys - expected) - released)  # model keys the ckpt lacks
+        # missing: keys the model expects but checkpoint lacks
+        missing = sorted(model_keys - expected - released)
+        # unexpected: keys in checkpoint that model doesn't expect
+        unexpected = sorted(expected - model_keys)
         if missing or unexpected:
             raise RuntimeError(
                 "checkpoint/model key mismatch (refusing silent non-strict load; "

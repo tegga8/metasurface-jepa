@@ -124,10 +124,12 @@ def test_null_gap_real_equals_evaluate_cos_err():
     """null_gap's real-mode cos_err and evaluate's cos_err must be bit-identical
     (same batches, masks, formula, dim=-1 normalization, same objective projector)."""
     fv, model, obj, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model, obj)
+    ratio_key = f"cos_err_r{fv.ratio:g}"
+    gap_metrics = fv.null_gap(model, obj)
+    real = gap_metrics[f"real_{ratio_key}"]
     metrics, _ = fv.evaluate(model, obj, raw, proj_stats)
-    assert real == metrics["cos_err_r0.5"], (
-        f"null_gap real {real} != evaluate cos_err {metrics['cos_err_r0.5']}")
+    assert real == metrics[ratio_key], (
+        f"null_gap real {real} != evaluate cos_err {metrics[ratio_key]}")
 
 
 def test_null_gap_null_equals_evaluate_null_mode():
@@ -135,16 +137,20 @@ def test_null_gap_null_equals_evaluate_null_mode():
     target z_y is EMA-style (goal-independent, from the full geometry), so the
     null prediction is scored against the same target in both paths."""
     fv, model, obj, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model, obj)
+    ratio_key = f"cos_err_r{fv.ratio:g}"
+    gap_metrics = fv.null_gap(model, obj)
+    null = gap_metrics[f"null_{ratio_key}"]
     metrics, _ = fv.evaluate(model, obj, raw, proj_stats, goal_mode="null")
-    assert null == metrics["cos_err_r0.5"], (
-        f"null_gap null {null} != evaluate(null) {metrics['cos_err_r0.5']}")
+    assert null == metrics[ratio_key], (
+        f"null_gap null {null} != evaluate(null) {metrics[ratio_key]}")
 
 
 def test_null_gap_gap_positive_with_distinct_goals():
     """A non-null goal must change z_hat on masked tokens: gap > 0."""
     fv, model, obj, raw, proj_stats = _fixed_val_and_model()
-    real, null, gap = fv.null_gap(model, obj)
+    ratio_key = f"cos_err_r{fv.ratio:g}"
+    gap_metrics = fv.null_gap(model, obj)
+    gap = gap_metrics[f"gap_{ratio_key}"]
     assert gap > 0.0, f"goal gap collapsed: {gap}"
 
 
@@ -152,18 +158,19 @@ def test_order_invariance_evaluate_nullgap_evaluate():
     """Metric values must not depend on which path ran first (canonical →
     diagnostic → canonical), i.e. no hidden state pollution between paths."""
     fv, model, obj, raw, proj_stats = _fixed_val_and_model()
+    ratio_key = f"cos_err_r{fv.ratio:g}"
     m1, _ = fv.evaluate(model, obj, raw, proj_stats)
-    real, null, gap = fv.null_gap(model, obj)
+    gap_metrics = fv.null_gap(model, obj)
     m2, _ = fv.evaluate(model, obj, raw, proj_stats)
-    assert m1["cos_err_r0.5"] == m2["cos_err_r0.5"], (
-        f"cos_err changed across call order: {m1['cos_err_r0.5']} -> "
-        f"{m2['cos_err_r0.5']}")
+    assert m1[ratio_key] == m2[ratio_key], (
+        f"cos_err changed across call order: {m1[ratio_key]} -> "
+        f"{m2[ratio_key]}")
     # reversed order as well
     fv2, model2, obj2, _, _ = _fixed_val_and_model()
-    r2, n2, g2 = fv2.null_gap(model2, obj2)
+    gap_metrics2 = fv2.null_gap(model2, obj2)
     m3, _ = fv2.evaluate(model2, obj2, raw, proj_stats)
-    r3, n3, g3 = fv2.null_gap(model2, obj2)
-    assert (r2, n2, g2) == (r3, n3, g3) and m3["cos_err_r0.5"] == m1["cos_err_r0.5"]
+    gap_metrics3 = fv2.null_gap(model2, obj2)
+    assert gap_metrics2 == gap_metrics3 and m3[ratio_key] == m1[ratio_key]
 
 
 def test_evaluate_and_null_gap_do_not_mutate_inputs():

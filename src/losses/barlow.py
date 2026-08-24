@@ -32,13 +32,10 @@ def barlow_twins_loss(z_p, z_t, alpha=0.005, eps=1e-6):
     n, d = z_p.shape
 
     if n < 2:
-        return (
-            z_p.new_zeros(()),
-            {
-                "diag_term": 0.0,
-                "off_diag_term": 0.0,
-                "alpha": alpha,
-            },
+        raise ValueError(
+            f"Barlow Twins loss requires at least 2 samples (N >= 2), got N={n}. "
+            "This is an explicit contract violation — the loss is undefined for N < 2. "
+            "Call with a larger batch or handle the N < 2 case explicitly before calling."
         )
 
     zp = (

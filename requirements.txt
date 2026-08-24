@@ -1,5 +1,5 @@
-torch==2.13.0
-torchvision==0.28.0
+torch==2.5.1
+torchvision==0.20.1
 numpy==2.4.6
 scipy==1.17.1
 PyYAML==6.0.3

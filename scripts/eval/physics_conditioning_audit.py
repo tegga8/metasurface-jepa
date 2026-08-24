@@ -53,6 +53,7 @@ from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
 from losses.objectives import build_objective
 from train.engine import load_checkpoint
+from runtime.physics_controls import compute_physics_metrics, derangement_permutation
 
 PIXEL_GRID = 16
 
@@ -109,12 +110,6 @@ def feats_stats(X):
     return out
 
 
-def cosine_err(a, b, mask):
-    d = (1.0 - F.cosine_similarity(
-        F.normalize(a, dim=-1), F.normalize(b, dim=-1), dim=-1)).clamp(min=0)
-    return d[mask].mean().item()
-
-
 def case_verdict(emb_c, emb_g, deltas, eps=1e-4):
     """Cases A/B/C. Embeds collapsed if rank fraction < 0.02 or
     mean feature std < 0.05. Predictor dead if both real-vs-null and
@@ -160,7 +155,6 @@ def main():
     load_checkpoint(args.checkpoint, model, objective, None, None, device)
     model.eval()
     objective.eval()
-    P = objective.projector
 
     val_ds = MetaDiTDataset(os.path.join(REPO_ROOT, cfg["data"]["val_split"]))
     loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -170,8 +164,9 @@ def main():
 
     c_phys_all, a_goal_all = [], []
     deltas = {"real_vs_null": [], "real_vs_shuffled": []}
-    phys_err = {k: [] for k in ("real_raw", "null_raw", "shuf_raw",
-                                "real_proj", "null_proj", "shuf_proj")}
+    phys_err = {k: [] for k in ("L_real", "L_null", "L_shuffled",
+                                "gap_null", "gap_shuffled",
+                                "sensitivity_null", "sensitivity_shuffled")}
     n_done = 0
     with torch.no_grad():
         for G, S in loader:
@@ -180,33 +175,22 @@ def main():
             G, S = G.to(device), S.to(device)
             n_done += G.shape[0]
             M = masker.sample(G, args.mask_ratio).to(device)
-            perm = torch.randperm(G.shape[0], generator=torch.Generator(
-                device=device).manual_seed(args.mask_seed))
-            S_shuf = S[perm]
 
             c_real, a_real = model.spectrum_path(S, "real")
             _, a_null = model.spectrum_path(S, "null")
-            out_r = model(G, S, M, goal_mode="real")
-            out_n = model(G, S, M, goal_mode="null")
-            out_s = model(G, S_shuf, M, goal_mode="real")
-            mask = out_r["mask"]
 
             c_phys_all.append(c_real.cpu())
             a_goal_all.append(a_real.mean(1).cpu())          # (B, 384) pooled
-            mw = mask.float()
-            deltas["real_vs_null"].append(
-                ((out_r["z_hat"] - out_n["z_hat"]).norm(dim=-1)[mask].mean().item()))
-            deltas["real_vs_shuffled"].append(
-                ((out_r["z_hat"] - out_s["z_hat"]).norm(dim=-1)[mask].mean().item()))
 
-            zy = out_r["z_y_raw"]
-            p_zy, p_nz, p_sz = P(zy), P(out_n["z_hat"]), P(out_s["z_hat"])
-            phys_err["real_raw"].append(cosine_err(out_r["z_hat"], zy, mask))
-            phys_err["null_raw"].append(cosine_err(out_n["z_hat"], zy, mask))
-            phys_err["shuf_raw"].append(cosine_err(out_s["z_hat"], zy, mask))
-            phys_err["real_proj"].append(cosine_err(P(out_r["z_hat"]), p_zy, mask))
-            phys_err["null_proj"].append(cosine_err(P(out_n["z_hat"]), p_nz, mask))
-            phys_err["shuf_proj"].append(cosine_err(P(out_s["z_hat"]), p_sz, mask))
+            # Use centralized physics controls
+            metrics = compute_physics_metrics(
+                model, G, S, M, objective=objective, device=device,
+                generator=torch.Generator(device=device).manual_seed(args.mask_seed)
+            )
+            for k in phys_err:
+                phys_err[k].append(metrics[k])
+            deltas["real_vs_null"].append(metrics["sensitivity_null"])
+            deltas["real_vs_shuffled"].append(metrics["sensitivity_shuffled"])
 
     c_phys = torch.cat(c_phys_all, dim=0)
     a_goal = torch.cat(a_goal_all, dim=0)
@@ -223,8 +207,8 @@ def main():
         "a_goal": stats_g,
         "predictor_deltas": avg_deltas,
         "physics_cos_err": errs,
-        "physics_raw_real_vs_null_improvement": errs["null_raw"] - errs["real_raw"],
-        "physics_raw_real_vs_shuffled_improvement": errs["shuf_raw"] - errs["real_raw"],
+        "physics_raw_real_vs_null_improvement": errs["gap_null"],
+        "physics_raw_real_vs_shuffled_improvement": errs["gap_shuffled"],
         "case": verdict,
         "n_samples": n_done,
         "mask_ratio": args.mask_ratio,

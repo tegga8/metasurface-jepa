@@ -99,9 +99,14 @@ def test_full_roundtrip_restores_everything(tmp_path):
     # draw of that stream is what a restore must replay.
     torch.manual_seed(123)
     save_checkpoint(path, m1, obj1, opt1, sched1, {"lr": 1e-3}, global_step=7,
-                    epoch=2, metrics={"cos_err_r0.5": 0.1},
+                    epoch=2, micro_step=0, is_epoch_end=True,
+                    metrics={"cos_err_r0.5": 0.1},
                     health={"status": "HEALTHY"}, ema_state=ema1,
-                    best_state={"primary": 0.1, "step": 7})
+                    best_prediction={"primary": 0.1, "metrics": {"cos_err_r0.5": 0.1}, "step": 7, "health": {"status": "HEALTHY"}},
+                    best_healthy_prediction={},
+                    masker_rng_state=None,
+                    device="cpu", artifact_type="full",
+    )
     expected_next = torch.randn(3).clone()   # first draw of the seeded stream
 
     torch.manual_seed(999)
@@ -143,7 +148,11 @@ def test_strict_objective_name_mismatch_raises(tmp_path):
     path = str(tmp_path / "ckpt.pt")
     m1, obj1, opt1, sched1 = _model_and_opt(seed=0)
     save_checkpoint(path, m1, obj1, opt1, sched1, {}, global_step=1,
-                    ema_state=collect_ema_state(m1))
+                    epoch=0, micro_step=0, is_epoch_end=True,
+                    ema_state=collect_ema_state(m1),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None,
+                    device="cpu", artifact_type="full")
 
     m2 = _SmallModel()
     obj2 = _other_objective()
@@ -166,7 +175,11 @@ def test_optimizer_ownership_mismatch_raises(tmp_path):
     path = str(tmp_path / "ckpt.pt")
     m1, obj1, opt1, sched1 = _model_and_opt(seed=0, in_feat=4, out_feat=4)
     save_checkpoint(path, m1, obj1, opt1, sched1, {}, global_step=1,
-                    ema_state=collect_ema_state(m1))
+                    epoch=0, micro_step=0, is_epoch_end=True,
+                    ema_state=collect_ema_state(m1),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None,
+                    device="cpu", artifact_type="full")
 
     # Different-shaped model -> optimizer param fingerprint diverges -> refuse.
     m2, obj2, opt2, sched2 = _model_and_opt(seed=3, in_feat=8, out_feat=8)

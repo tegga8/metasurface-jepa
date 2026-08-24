@@ -198,8 +198,10 @@ def load_model_and_objective(cfg, checkpoint, device, name):
         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]),
     )
     objective = build_objective(
-        name, cfg.get("objective_params", {}).get(name, {}),
-        projector_input_dim=cfg["model"].get("hidden", 384))
+        name,
+        cfg.get("objective_params", {}).get(name, {}),
+        projector_input_dim=cfg["model"].get("hidden", 384),
+    ).to(device)
     ckpt = load_checkpoint(checkpoint, model, objective, None, None, device)
     model.eval()
     model.ema.eval()

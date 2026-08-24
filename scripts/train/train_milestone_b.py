@@ -195,9 +195,9 @@ def main():
         device = torch.device(args.device)
     elif torch.cuda.is_available():
         device = torch.device(cfg["train"].get("device", "cuda"))
+        if device.type == "cuda" and device.index is None:
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
     else:
-        device = torch.device("cpu")
-    if args.smoke:
         device = torch.device("cpu")
 
     seed = args.seed if args.seed is not None else cfg["train"]["seed"]

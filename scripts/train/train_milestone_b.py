@@ -300,7 +300,9 @@ def main():
     if args.resume:
         obj = _load_train_checkpoint(args.resume, model, objective, optimizer,
                                      scheduler, device)
-        start_step, start_epoch, best = obj["step"] + 1, obj["epoch"], obj.get("best", {})
+        start_step = obj["step"] + 1
+        start_epoch = obj["epoch"] + 1
+        best = obj.get("best", {})
         print(f"[milestone_b] resumed from {args.resume}: step={start_step} "
               f"epoch={start_epoch} objective={objective_name}")
 
@@ -331,12 +333,7 @@ def main():
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
-        for bi, (G, S) in enumerate(loader):
-            if micro_step % accum != 0:
-                raise RuntimeError(
-                    f"Epoch {epoch} ended with {micro_step % accum} "
-                    f"unconsumed micro-batches for grad_accum={accum}"
-                )            
+        for bi, (G, S) in enumerate(loader):            
             if args.max_steps and step >= args.max_steps:
                 break
             G, S = G.to(device), S.to(device)
@@ -358,8 +355,6 @@ def main():
                 if isinstance(v, torch.Tensor):
                     comp_sums[k] = comp_sums.get(k, 0.0) + v.item()
                     comp_counts[k] = comp_counts.get(k, 0) + 1
-
-            micro_step += 1
 
             if micro_step % accum != 0:
                 continue
@@ -401,6 +396,11 @@ def main():
             step += 1
             if args.smoke and (step - start_step) >= cfg["train"].get("max_steps", 0):
                 break
+        if micro_step % accum != 0:
+                        raise RuntimeError(
+                            f"Epoch {epoch} ended with {micro_step % accum} "
+                            f"unconsumed micro-batches for grad_accum={accum}"
+                        )    
         if args.max_steps and step >= args.max_steps:
             break
 

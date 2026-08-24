@@ -216,8 +216,12 @@ def main():
                         drop_last=True, collate_fn=collate_batch)
 
     steps_per_epoch = max(1, len(loader))
-    total_steps = args.max_steps or steps_per_epoch * cfg["train"]["epochs"]
+    accum = int(cfg["train"].get("grad_accum", 1))
+    if accum < 1:
+        raise ValueError(f"grad_accum must be >= 1, got {accum}")
 
+    optimizer_steps_per_epoch = math.ceil(steps_per_epoch / accum)
+    total_steps = args.max_steps or optimizer_steps_per_epoch * cfg["train"]["epochs"]
     # masker (+ frozen surrogate only if half_sensitivity placement needs it)
     masker = BlockMasker(placement=placement, grid=PIXEL_GRID,
                          min_side=cfg["mask"].get("min_side", 3),
@@ -315,8 +319,12 @@ def main():
     print(f"[milestone_b] training objective={objective_name} ({exp}) ...")
     optimizer.zero_grad(set_to_none=True)
     step = start_step
+    micro_step = 0
     t_start = time.time()
-    accum = opt_cfg.get("grad_accum", 1)
+    accum = int(opt_cfg.get("grad_accum", 1))
+    if accum < 1:
+        raise ValueError(f"grad_accum must be >= 1, got {accum}")
+
     loss_accum = 0.0
     comp_sums, comp_counts = {}, {}
     sigreg_info = None
@@ -324,6 +332,11 @@ def main():
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
         for bi, (G, S) in enumerate(loader):
+            if micro_step % accum != 0:
+                raise RuntimeError(
+                    f"Epoch {epoch} ended with {micro_step % accum} "
+                    f"unconsumed micro-batches for grad_accum={accum}"
+                )            
             if args.max_steps and step >= args.max_steps:
                 break
             G, S = G.to(device), S.to(device)
@@ -338,6 +351,7 @@ def main():
                 raise RuntimeError(f"non-finite total loss at step {step}: {total.item()}")
             total = total / accum
             total.backward()
+            micro_step += 1
             _assert_no_ema_gradients(model, objective_name, step)
             loss_accum += total.item() * accum
             for k, v in res["components"].items():
@@ -345,7 +359,9 @@ def main():
                     comp_sums[k] = comp_sums.get(k, 0.0) + v.item()
                     comp_counts[k] = comp_counts.get(k, 0) + 1
 
-            if (step + 1) % accum != 0:
+            micro_step += 1
+
+            if micro_step % accum != 0:
                 continue
             torch.nn.utils.clip_grad_norm_(trainable, opt_cfg["clip_grad_norm"])
             optimizer.step()

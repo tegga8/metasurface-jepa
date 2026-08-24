@@ -17,7 +17,7 @@ METADIT_SRC = os.path.join(REPO_ROOT, "external", "metadit")
 if METADIT_SRC not in sys.path:
     sys.path.insert(0, METADIT_SRC)
 
-from model.spec_encoder import VanillaSpectrumEncoder  # noqa: E402
+from model.spec_encoder import VanillaSpectrumEncoder  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 CKPT_PREFIX = "context_encoder."
 

@@ -17,7 +17,7 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "diagnostics"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
-from gate0_scalar_vs_shape import (  # noqa: E402
+from scripts.diagnostics.gate0_scalar_vs_shape import (  # noqa: E402
     build_geometries, build_scalars, rel_l2, r2_score, mse, score_arm,
     scalar_knn,
 )

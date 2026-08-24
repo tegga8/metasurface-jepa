@@ -92,7 +92,11 @@ def load_surrogate(path, device):
     METADIT_SRC = os.path.join(REPO_ROOT, "external", "metadit")
     if METADIT_SRC not in sys.path:
         sys.path.insert(0, METADIT_SRC)
-    from model.surrogate import surrogate_s3  # noqa: E402
+    # ``external/metadit`` is added to ``sys.path`` at runtime, so importing
+    # through the module loader avoids a false unresolved-import diagnostic.
+    import importlib
+
+    surrogate_s3 = importlib.import_module("model.surrogate").surrogate_s3
 
     m = surrogate_s3()
     m.load_state_dict(torch.load(path, map_location="cpu"), strict=True)

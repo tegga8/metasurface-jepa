@@ -276,68 +276,45 @@ def occupancy_binary(
     return occ.cpu().numpy().astype(np.uint8)
 
 
-def coarse_shape_features(
-    occ: np.ndarray,
-) -> np.ndarray:
+def coarse_shape_features(occ: np.ndarray) -> np.ndarray:
     """
     Shape-aware trivial baseline.
 
     Features:
-      1. overall occupancy fraction
-      2. 4x4 coarse occupancy grid = 16 block-occupancy features
+      - occupancy fraction: [N,1]
+      - 4x4 coarse occupancy grid: [N,16]
 
-    Each 64x64 image is partitioned into sixteen 16x16 blocks.
-
-    IMPORTANT:
-        This baseline contains no r_atom, h_atom, or l_lattice values.
+    Total: [N,17].
     """
+    if occ.ndim != 3:
+        raise ValueError(f"Expected [N,H,W], got {occ.shape}")
 
     n, h, w = occ.shape
 
-    if h != 64 or w != 64:
-        raise ValueError(
-            f"Expected 64x64 occupancy, got {occ.shape}"
-        )
+    if (h, w) != (64, 64):
+        raise ValueError(f"Expected 64x64 occupancy, got {occ.shape}")
 
-    # [N, 64, 64]
-    #
-    # -> [N, 4, 16, 4, 16]
-    #
-    # The last two dimensions are each a 16x16 block.
-    #
-    # Averaging axes 2 and 4 produces:
-    # [N, 4, 4]
-    coarse_2d = (
-        occ.reshape(
-            n,
-            4,
-            16,
-            4,
-            16,
-        )
-        .mean(axis=(2, 4))
-    )
+    # [N,64,64] -> [N,4,16,4,16] -> [N,4,4]
+    coarse_2d = occ.reshape(n, 4, 16, 4, 16).mean(axis=(2, 4))
 
     # [N,4,4] -> [N,16]
-    coarse = coarse_2d.reshape(
-        n,
-        16,
-    )
+    coarse = coarse_2d.reshape(n, 16)
 
-    # Overall occupancy fraction: [N,1]
-    occupancy_fraction = occ.mean(
-        axis=(1, 2),
-        keepdims=True,
-    )
+    # IMPORTANT: reduce BOTH spatial dimensions first.
+    # Result is [N,1], not [N,1,1].
+    occupancy_fraction = occ.mean(axis=(1, 2))[:, None]
 
-    return np.concatenate(
-        [
-            occupancy_fraction,
-            coarse,
-        ],
+    assert occupancy_fraction.shape == (n, 1)
+    assert coarse.shape == (n, 16)
+
+    features = np.concatenate(
+        [occupancy_fraction, coarse],
         axis=1,
     ).astype(np.float64)
 
+    assert features.shape == (n, 17)
+
+    return features
 
 def robust_quantize(
     params: np.ndarray,

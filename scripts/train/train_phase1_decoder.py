@@ -46,6 +46,7 @@ from runtime.device import resolve_device
 from runtime.reproducibility import set_seed
 
 OUT_DIR = os.path.join(REPO_ROOT, "checkpoints", "phase1_decoder")
+EPSILON = 1e-8
 
 
 # ---------------------------------------------------------------------------
@@ -114,26 +115,75 @@ def _derive_scalars(G):
     return torch.stack([l_lattice, h_atom, r_atom], dim=1)  # (B, 3)
 
 
-def _print_channel_stats(G, split_name):
-    """Print per-channel statistics of the dataset."""
-    occ = (G[:, 0] != 0) | (G[:, 1] != 0)
-    for ch, name in enumerate(["r_atom/5", "h_atom", "l_lattice/3"]):
+@torch.no_grad()
+def compute_training_scales(train_ds, epsilon=EPSILON):
+    """Compute per-channel absolute-mean scales from the TRAINING split only.
+
+    Returns:
+        scale_r: mean absolute value of channel 0 on occupied pixels
+        scale_h: mean absolute value of channel 1 on occupied pixels
+        stats:   dict with per-channel min/max/mean/std for printing
+    """
+    n = min(256, len(train_ds))
+    Gs = []
+    for i in range(n):
+        g, _ = train_ds[i]
+        Gs.append(g)
+    G = torch.stack(Gs, dim=0)  # (N, 3, 64, 64)
+
+    occ = (G[:, 0] != 0) | (G[:, 1] != 0)  # (N, 64, 64) bool
+
+    stats = {}
+    # Channel 0: r_atom/5 on occupied pixels
+    if occ.any():
+        vals_r = G[:, 0][occ]
+        scale_r = max(vals_r.abs().mean().item(), epsilon)
+        stats["ch0"] = {
+            "min": vals_r.min().item(), "max": vals_r.max().item(),
+            "mean": vals_r.mean().item(), "std": vals_r.std().item(),
+        }
+    else:
+        scale_r = 1.0
+        stats["ch0"] = {"min": 0, "max": 0, "mean": 0, "std": 0}
+
+    # Channel 1: h_atom on occupied pixels
+    if occ.any():
+        vals_h = G[:, 1][occ]
+        scale_h = max(vals_h.abs().mean().item(), epsilon)
+        stats["ch1"] = {
+            "min": vals_h.min().item(), "max": vals_h.max().item(),
+            "mean": vals_h.mean().item(), "std": vals_h.std().item(),
+        }
+    else:
+        scale_h = 1.0
+        stats["ch1"] = {"min": 0, "max": 0, "mean": 0, "std": 0}
+
+    # Channel 2: l_lattice/3 everywhere (for printing only)
+    vals_l = G[:, 2].reshape(-1)
+    stats["ch2"] = {
+        "min": vals_l.min().item(), "max": vals_l.max().item(),
+        "mean": vals_l.mean().item(), "std": vals_l.std().item(),
+    }
+
+    return scale_r, scale_h, stats
+
+
+def _print_channel_stats(stats, split_name):
+    """Print per-channel statistics."""
+    for ch, name, key in [
+        (0, "r_atom/5 occupied", "ch0"),
+        (1, "h_atom occupied", "ch1"),
+        (2, "l_lattice/3 global", "ch2"),
+    ]:
+        s = stats[key]
         if ch < 2:
-            mask = occ[:, ch] if ch == 0 else occ[:, ch]
-            mask_flat = occ.reshape(-1)
-            vals = G[:, ch].reshape(-1)
-            if mask_flat.any():
-                v = vals[mask_flat]
-                print(f"  [{split_name}] channel {ch} ({name}) occupied: "
-                      f"min={v.min():.4f} max={v.max():.4f} "
-                      f"mean={v.mean():.4f} std={v.std():.4f}")
-            else:
-                print(f"  [{split_name}] channel {ch} ({name}): no occupied pixels")
+            print(f"  [{split_name}] channel {ch} ({name}): "
+                  f"min={s['min']:.4f} max={s['max']:.4f} "
+                  f"mean={s['mean']:.4f} std={s['std']:.4f}")
         else:
-            vals = G[:, ch].reshape(-1)
-            print(f"  [{split_name}] channel {ch} ({name}) global: "
-                  f"min={vals.min():.4f} max={vals.max():.4f} "
-                  f"mean={vals.mean():.4f} std={vals.std():.4f}")
+            print(f"  [{split_name}] channel {ch} ({name}): "
+                  f"min={s['min']:.4f} max={s['max']:.4f} "
+                  f"mean={s['mean']:.4f} std={s['std']:.4f}")
 
 
 @torch.no_grad()
@@ -164,8 +214,14 @@ def _validate(decoder, val_loader, criterion, device, decoder_type="jepa"):
 
 
 def _save_phase1_checkpoint(path, decoder, optimizer, scheduler, step, epoch,
-                            base_jepa_path, best_metric, cfg):
-    """Save a lightweight Phase-1 checkpoint (no 515-MB base JEPA weights)."""
+                            base_jepa_path, best_metric, cfg,
+                            loss_config):
+    """Save a lightweight Phase-1 checkpoint (no 515-MB base JEPA weights).
+
+    The checkpoint stores the full loss configuration as the single source
+    of truth: scale_r, scale_h, lambda_occ, lambda_value, lambda_lattice,
+    lambda_r, lambda_h. Evaluation MUST read these from the checkpoint.
+    """
     state = {
         "phase": 1,
         "step": step,
@@ -176,12 +232,14 @@ def _save_phase1_checkpoint(path, decoder, optimizer, scheduler, step, epoch,
         "cfg": cfg,
         "base_jepa_checkpoint": base_jepa_path,
         "best_metric": best_metric,
+        "loss_config": loss_config,
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
 
 
-def _load_phase1_checkpoint(path, decoder, optimizer=None, scheduler=None, device="cpu"):
+def _load_phase1_checkpoint(path, decoder, optimizer=None, scheduler=None,
+                            device="cpu"):
     """Load a Phase-1 checkpoint."""
     obj = torch.load(path, map_location=device, weights_only=False)
     decoder.load_state_dict(obj["decoder_state"])
@@ -197,8 +255,9 @@ def _load_phase1_checkpoint(path, decoder, optimizer=None, scheduler=None, devic
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def _compute_metrics(decoder, val_loader, device, decoder_type="jepa"):
-    """Compute occupancy IoU, F1, and per-channel MAE."""
+def _compute_metrics(decoder, val_loader, device, decoder_type="jepa",
+                     loss_config=None):
+    """Compute occupancy IoU, F1, and per-channel MAE with normalized errors."""
     decoder.eval()
     total_iou = 0.0
     total_f1 = 0.0
@@ -237,7 +296,7 @@ def _compute_metrics(decoder, val_loader, device, decoder_type="jepa"):
         total_f1 += f1
 
         # Per-channel MAE on occupied pixels
-        mask = occ_target.bool()
+        mask = occ_target.squeeze(1).bool()  # (B, 64, 64)
         if mask.any():
             mae_r = (geom_pred[:, 0][mask] - G[:, 0][mask]).abs().mean()
             mae_h = (geom_pred[:, 1][mask] - G[:, 1][mask]).abs().mean()
@@ -255,11 +314,24 @@ def _compute_metrics(decoder, val_loader, device, decoder_type="jepa"):
 
     decoder.train()
     n = max(1, n_batches)
+    r_atom_mae = total_mae_r / n
+    h_atom_mae = total_mae_h / n
+
+    # Normalized combined occupied MAE using stored training scales
+    scale_r = loss_config["scale_r"] if loss_config else 1.0
+    scale_h = loss_config["scale_h"] if loss_config else 1.0
+    norm_r = r_atom_mae / scale_r
+    norm_h = h_atom_mae / scale_h
+    combined_occupied_mae = 0.5 * norm_r + 0.5 * norm_h
+
     return {
         "occupancy_iou": total_iou / n,
         "occupancy_f1": total_f1 / n,
-        "r_atom_mae": total_mae_r / n,
-        "h_atom_mae": total_mae_h / n,
+        "r_atom_mae": r_atom_mae,
+        "h_atom_mae": h_atom_mae,
+        "combined_occupied_mae": combined_occupied_mae,
+        "normalized_r_mae": norm_r,
+        "normalized_h_mae": norm_h,
         "lattice_mae": total_mae_lattice / n,
         "overall_mae": total_mae_overall / n,
     }
@@ -269,7 +341,8 @@ def _compute_metrics(decoder, val_loader, device, decoder_type="jepa"):
 # smoke test
 # ---------------------------------------------------------------------------
 
-def _run_smoke_test(jepa_model, decoder, scalar_decoder, cfg, device, base_ckpt):
+def _run_smoke_test(jepa_model, decoder, scalar_decoder, cfg, device,
+                    base_ckpt, loss_config):
     """Run a tiny 2-step smoke test verifying all interfaces."""
     print("=" * 60)
     print("SMOKE TEST")
@@ -308,11 +381,18 @@ def _run_smoke_test(jepa_model, decoder, scalar_decoder, cfg, device, base_ckpt)
     assert occ_s.shape == (B, 1, 64, 64), f"scalar occ shape: {occ_s.shape}"
     print("OK")
 
-    # Loss forward
-    criterion = GeometryReconstructionLoss()
+    # Loss forward with stored scales
+    criterion = GeometryReconstructionLoss(**loss_config)
     L, comps = criterion(geom_pred, occ_logits, G)
     assert torch.isfinite(L), f"Non-finite loss: {L.item()}"
     print(f"[smoke] loss forward: {L.item():.4f} ... OK")
+
+    # Stored loss scales check
+    print("[smoke] stored loss scales ... ", end="")
+    assert loss_config["scale_r"] > 0, "scale_r must be > 0"
+    assert loss_config["scale_h"] > 0, "scale_h must be > 0"
+    print(f"scale_r={loss_config['scale_r']:.4f} "
+          f"scale_h={loss_config['scale_h']:.4f} ... OK")
 
     # Backward
     print("[smoke] backward ... ", end="")
@@ -342,21 +422,43 @@ def _run_smoke_test(jepa_model, decoder, scalar_decoder, cfg, device, base_ckpt)
         ckpt_path = os.path.join(td, "smoke_ckpt.pt")
         _save_phase1_checkpoint(ckpt_path, decoder, optimizer, None,
                                 step=0, epoch=0, base_jepa_path=base_ckpt,
-                                best_metric=float("inf"), cfg=cfg)
+                                best_metric=float("inf"), cfg=cfg,
+                                loss_config=loss_config)
         decoder2 = GeometryDecoder().to(device)
         opt2 = torch.optim.AdamW(decoder2.parameters(), lr=1e-3)
         obj = _load_phase1_checkpoint(ckpt_path, decoder2, optimizer=opt2,
                                       device=device)
         assert obj["step"] == 0
         assert obj["base_jepa_checkpoint"] == base_ckpt
+        assert "loss_config" in obj, "Checkpoint missing loss_config"
+        assert obj["loss_config"]["scale_r"] == loss_config["scale_r"]
+        assert obj["loss_config"]["scale_h"] == loss_config["scale_h"]
         # Deterministic output on fixed input
         decoder.eval()
         decoder2.eval()
         with torch.no_grad():
             g1, _ = decoder(z_y_raw)
             g2, _ = decoder2(z_y_raw)
-        assert torch.allclose(g1, g2, atol=1e-5), "Checkpoint round-trip not deterministic"
+        assert torch.allclose(g1, g2, atol=1e-5), \
+            "Checkpoint round-trip not deterministic"
         print("[smoke] checkpoint round-trip ... OK")
+
+    # Strict checkpoint loading check
+    print("[smoke] strict checkpoint loading ... ", end="")
+    with tempfile.TemporaryDirectory() as td:
+        ckpt_path = os.path.join(td, "strict_ckpt.pt")
+        _save_phase1_checkpoint(ckpt_path, decoder, optimizer, None,
+                                step=0, epoch=0, base_jepa_path=base_ckpt,
+                                best_metric=float("inf"), cfg=cfg,
+                                loss_config=loss_config)
+        ckpt_obj = torch.load(ckpt_path, map_location="cpu",
+                              weights_only=False)
+        model_sd = ckpt_obj["decoder_state"]
+        decoder3 = GeometryDecoder().to(device)
+        missing, unexpected = decoder3.load_state_dict(model_sd, strict=True)
+        assert not missing and not unexpected, \
+            f"Strict load failed: missing={missing}, unexpected={unexpected}"
+        print("OK")
 
     print("=" * 60)
     print("SMOKE TEST PASSED")
@@ -430,15 +532,22 @@ def main():
         collate_fn=collate_batch,
     )
 
-    # ---- channel stats ----
-    print("[phase1] Dataset channel statistics:")
-    n_stats = min(256, len(train_ds))
-    stats_Gs = []
-    for si in range(n_stats):
-        g, _ = train_ds[si]
-        stats_Gs.append(g)
-    stats_G = torch.stack(stats_Gs, dim=0)
-    _print_channel_stats(stats_G, "train")
+    # ---- channel scales from training split ONLY ----
+    print("[phase1] Computing training-set channel scales ...")
+    scale_r, scale_h, stats = compute_training_scales(train_ds, epsilon=EPSILON)
+    _print_channel_stats(stats, "train")
+    print(f"[phase1] scale_r={scale_r:.6f}  scale_h={scale_h:.6f}")
+
+    # Loss config: single source of truth
+    loss_config = {
+        "lambda_occ": 1.0,
+        "lambda_value": 1.0,
+        "lambda_lattice": 0.25,
+        "lambda_r": 1.0,
+        "lambda_h": 1.0,
+        "scale_r": scale_r,
+        "scale_h": scale_h,
+    }
 
     # ---- load Milestone-B checkpoint and build model ----
     base_ckpt_path = os.path.abspath(args.checkpoint)
@@ -460,7 +569,6 @@ def main():
         init_from_metadit=cfg["model"].get("init_from_metadit", True),
         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]),
     )
-    # Load checkpoint weights (non-strict to handle EMA keys separately)
     load_into_model(jepa_model, model_sd, device, strict=False)
 
     # Restore EMA target weights from checkpoint
@@ -489,7 +597,7 @@ def main():
     # ---- smoke test ----
     if args.smoke:
         _run_smoke_test(jepa_model, decoder, scalar_decoder, cfg, device,
-                        base_ckpt_path)
+                        base_ckpt_path, loss_config)
         return
 
     # ---- eval-only ----
@@ -500,10 +608,11 @@ def main():
             print(f"[phase1] Loaded eval checkpoint: {eval_ckpt}")
         jepa_metrics = _compute_metrics(
             _JepaDecoderWrapper(jepa_model, decoder), val_loader, device,
-            decoder_type="jepa",
+            decoder_type="jepa", loss_config=loss_config,
         )
         scalar_metrics = _compute_metrics(scalar_decoder, val_loader, device,
-                                          decoder_type="scalar")
+                                          decoder_type="scalar",
+                                          loss_config=loss_config)
         _print_comparison(jepa_metrics, scalar_metrics)
         return
 
@@ -526,14 +635,14 @@ def main():
         optimizer_jepa, T_max=total_steps, eta_min=args.lr * 0.01,
     )
 
-    # Scalar baseline optimizer
+    # Scalar baseline optimizer — identical protocol
     optimizer_scalar = torch.optim.AdamW(scalar_decoder.parameters(),
                                          lr=args.lr, weight_decay=0.05)
     scheduler_scalar = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer_scalar, T_max=total_steps, eta_min=args.lr * 0.01,
     )
 
-    criterion = GeometryReconstructionLoss()
+    criterion = GeometryReconstructionLoss(**loss_config)
 
     # ---- train loop ----
     best_metric_jepa = float("inf")
@@ -567,7 +676,7 @@ def main():
             optimizer_jepa.step()
             scheduler_jepa.step()
 
-            # --- Scalar baseline ---
+            # --- Scalar baseline (identical protocol) ---
             scalar_decoder.zero_grad(set_to_none=True)
             scalars = _derive_scalars(G)
             geom_s, occ_s = scalar_decoder(scalars)
@@ -603,6 +712,15 @@ def main():
                         os.path.join(OUT_DIR, "best.pt"),
                         decoder, optimizer_jepa, scheduler_jepa,
                         step, epoch, base_ckpt_path, best_metric_jepa, cfg,
+                        loss_config,
+                    )
+                if val_scalar < best_metric_scalar:
+                    best_metric_scalar = val_scalar
+                    _save_phase1_checkpoint(
+                        os.path.join(OUT_DIR, "scalar_baseline_best.pt"),
+                        scalar_decoder, optimizer_scalar, scheduler_scalar,
+                        step, epoch, base_ckpt_path, best_metric_scalar, cfg,
+                        loss_config,
                     )
 
             step += 1
@@ -617,6 +735,13 @@ def main():
         os.path.join(OUT_DIR, "latest.pt"),
         decoder, optimizer_jepa, scheduler_jepa,
         step, epoch, base_ckpt_path, best_metric_jepa, cfg,
+        loss_config,
+    )
+    _save_phase1_checkpoint(
+        os.path.join(OUT_DIR, "scalar_baseline_latest.pt"),
+        scalar_decoder, optimizer_scalar, scheduler_scalar,
+        step, epoch, base_ckpt_path, best_metric_scalar, cfg,
+        loss_config,
     )
 
     # ---- final eval ----
@@ -625,9 +750,11 @@ def main():
         _load_phase1_checkpoint(os.path.join(OUT_DIR, "best.pt"), decoder,
                                 device=device)
     jepa_metrics = _compute_metrics(jepa_wrapper, val_loader, device,
-                                    decoder_type="jepa")
+                                    decoder_type="jepa",
+                                    loss_config=loss_config)
     scalar_metrics = _compute_metrics(scalar_decoder, val_loader, device,
-                                      decoder_type="scalar")
+                                      decoder_type="scalar",
+                                      loss_config=loss_config)
     _print_comparison(jepa_metrics, scalar_metrics)
 
     # Save metrics
@@ -635,6 +762,7 @@ def main():
         "jepa_latent": jepa_metrics,
         "scalar_baseline": scalar_metrics,
         "config": cfg,
+        "loss_config": loss_config,
         "base_jepa_checkpoint": base_ckpt_path,
     }
     metrics_path = os.path.join(OUT_DIR, "metrics.json")
@@ -680,7 +808,9 @@ def _print_comparison(jepa_m, scalar_m):
     print(f"{'metric':<25} {'scalar baseline':>16} {'JEPA latent':>16}")
     print("-" * 60)
     for key in ["occupancy_iou", "occupancy_f1", "r_atom_mae",
-                "h_atom_mae", "lattice_mae", "overall_mae"]:
+                "h_atom_mae", "combined_occupied_mae",
+                "normalized_r_mae", "normalized_h_mae",
+                "lattice_mae", "overall_mae"]:
         s = scalar_m.get(key, float("nan"))
         j = jepa_m.get(key, float("nan"))
         print(f"{key:<25} {s:>16.4f} {j:>16.4f}")
@@ -720,7 +850,8 @@ def _save_qualitative(jepa_wrapper, scalar_decoder, val_loader, device,
                 "predicted_occ_jepa": torch.sigmoid(occ_j[0]).cpu(),
                 "predicted_occ_scalar": torch.sigmoid(occ_s[0]).cpu(),
             }
-            torch.save(example, os.path.join(qualitative_dir, f"example_{idx:03d}.pt"))
+            torch.save(example, os.path.join(qualitative_dir,
+                                              f"example_{idx:03d}.pt"))
             saved += 1
             if saved >= n_examples:
                 break

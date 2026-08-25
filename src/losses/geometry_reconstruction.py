@@ -4,6 +4,11 @@ Separate channel handling for the three geometry channels:
   channel 0: r_atom/5 on occupied pixels only
   channel 1: h_atom   on occupied pixels only
   channel 2: l_lattice/3 everywhere (dense)
+
+Channel-scale normalization:
+  L_r = mean(|pred - target|) / scale_r
+  L_h = mean(|pred - target|) / scale_h
+where scale_r/scale_h are computed from training-set absolute means.
 """
 
 import torch
@@ -20,16 +25,20 @@ class GeometryReconstructionLoss(nn.Module):
         lambda_lattice: Weight for dense lattice-channel L1 loss.
         lambda_r:       Relative weight for channel 0 (r_atom/5) within L_value.
         lambda_h:       Relative weight for channel 1 (h_atom) within L_value.
+        scale_r:        Normalization divisor for channel 0 L1 loss (from training set).
+        scale_h:        Normalization divisor for channel 1 L1 loss (from training set).
     """
 
     def __init__(self, lambda_occ=1.0, lambda_value=1.0, lambda_lattice=0.25,
-                 lambda_r=1.0, lambda_h=1.0):
+                 lambda_r=1.0, lambda_h=1.0, scale_r=1.0, scale_h=1.0):
         super().__init__()
         self.lambda_occ = lambda_occ
         self.lambda_value = lambda_value
         self.lambda_lattice = lambda_lattice
         self.lambda_r = lambda_r
         self.lambda_h = lambda_h
+        self.scale_r = scale_r
+        self.scale_h = scale_h
 
     @staticmethod
     def occupancy_target(geometry):
@@ -68,19 +77,21 @@ class GeometryReconstructionLoss(nn.Module):
         else:
             L_occ = geometry_pred.new_zeros(())
 
-        # Channel 0: r_atom/5 on occupied pixels
+        # Channel 0: r_atom/5 on occupied pixels, normalized by scale_r
         if mask.any():
-            L_r = F.l1_loss(geometry_pred[:, 0][mask], geometry_target[:, 0][mask])
+            L_r = F.l1_loss(geometry_pred[:, 0][mask],
+                            geometry_target[:, 0][mask]) / self.scale_r
         else:
             L_r = geometry_pred.new_zeros(())
 
-        # Channel 1: h_atom on occupied pixels
+        # Channel 1: h_atom on occupied pixels, normalized by scale_h
         if mask.any():
-            L_h = F.l1_loss(geometry_pred[:, 1][mask], geometry_target[:, 1][mask])
+            L_h = F.l1_loss(geometry_pred[:, 1][mask],
+                            geometry_target[:, 1][mask]) / self.scale_h
         else:
             L_h = geometry_pred.new_zeros(())
 
-        # Channel 2: l_lattice/3 everywhere (dense)
+        # Channel 2: l_lattice/3 everywhere (dense, native scale)
         L_lattice = F.l1_loss(geometry_pred[:, 2], geometry_target[:, 2])
 
         # Combined

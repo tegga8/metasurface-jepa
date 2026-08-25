@@ -66,8 +66,12 @@ def log_fail(msg: str):
     print(f"  [FAIL] {msg}")
 
 
-def verify_environment(allow_cpu=False):
-    """Verify Python, PyTorch, Torchvision, CUDA, GPU, device contract."""
+def verify_environment(allow_cpu=False, device_request="auto"):
+    """Verify Python, PyTorch, Torchvision, CUDA, GPU, device contract.
+
+    device_request comes from the CLI (--device); 'auto' keeps the historical
+    resolve_device('auto') behavior. The resolved selection — not an internal
+    hardcoded one — is what every later preflight stage must use (A6)."""
     log_step("Environment Verification")
 
     # Python
@@ -98,8 +102,9 @@ def verify_environment(allow_cpu=False):
         log_info(f"cuDNN: {cudnn_ver}")
         log_info(f"GPU: {gpu_name} (count: {gpu_count})")
 
-    # Resolved device
-    device = resolve_device("auto")
+    # Resolved device (honors --device from the CLI; A6)
+    device = resolve_device(device_request)
+    log_info(f"Requested device: {device_request}")
     log_info(f"Resolved device: {device}")
 
     # Verify tested environment contract
@@ -209,6 +214,38 @@ def discover_dataset():
             + "\nEnsure dataset is mounted (Kaggle: attach as input; Colab: mount Drive)."
         )
 
+    # A9: pin the discovered dataset into the repo's canonical location
+    # (<repo>/data/metadit) via a directory symlink, so the training driver and
+    # configs can keep using the repo-relative path unchanged on Kaggle/Colab.
+    # Guards: skip when the found root already IS the canonical path; refuse to
+    # clobber a real (non-symlink) directory; surface OSError (e.g. Windows
+    # symlink privilege) as a PreflightError telling the operator to use
+    # --data-root instead.
+    link = REPO_ROOT / "data" / "metadit"
+    already_pinned = False
+    try:
+        if link.is_symlink() or link.exists():
+            already_pinned = link.resolve() == found.resolve()
+    except OSError:
+        already_pinned = False
+    if not already_pinned:
+        try:
+            if link.is_symlink():
+                link.unlink()
+            elif link.exists():
+                raise PreflightError(
+                    f"{link} exists and is not a symlink; refusing to replace it. "
+                    "Remove it manually or pass --data-root explicitly."
+                )
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(found, target_is_directory=True)
+            log_info(f"Pinned dataset: {link} -> {found}")
+        except OSError as e:
+            raise PreflightError(
+                f"Could not create dataset symlink {link} -> {found}: {e}. "
+                "Pass --data-root explicitly instead of relying on the pinned path."
+            )
+
     # Verify file sizes and load one sample
     log_info("Verifying dataset structure and loading sample...")
     train_path = found / "split_data" / "train_set.mat"
@@ -267,11 +304,14 @@ def verify_model_objective(device, data_root, full_cfg):
         raise PreflightError(f"Model on {model_device}, expected {device}")
     log_info(f"Model device: {model_device}")
 
+    # Use the CONFIGURED objective (A7): preflight must exercise the same
+    # objective the training run will use, not a hardcoded default.
+    objective_name = full_cfg.get("objective", "jepa_vicreg")
     objective = build_objective(
-        "jepa_vicreg", full_cfg.get("objective_params", {}).get("jepa_vicreg", {}),
+        objective_name, full_cfg.get("objective_params", {}).get(objective_name, {}),
         projector_input_dim=full_cfg["model"]["hidden"],
     ).to(device)
-    log_info("Objective built successfully")
+    log_info(f"Objective built successfully: {objective_name}")
 
     obj_device = next(objective.parameters()).device
     if obj_device != device:
@@ -634,6 +674,9 @@ def main():
     parser.add_argument("--config", default="configs/milestone_b.yaml", help="Config file path")
     parser.add_argument("--data-root", default=None, help="Override dataset root")
     parser.add_argument("--allow-cpu", action="store_true", help="Allow CPU mode for local testing")
+    parser.add_argument("--device", default="auto",
+                        help="Device selection passed to resolve_device "
+                             "(e.g. 'auto', 'cpu', 'cuda:0'). Default: auto.")
     args = parser.parse_args()
 
     # Load the REAL config at startup (Bug #5)
@@ -646,8 +689,9 @@ def main():
     print("="*60)
 
     try:
-        # 1. Environment
-        device = verify_environment(allow_cpu=args.allow_cpu)
+        # 1. Environment (device selection comes from --device, A6)
+        device = verify_environment(allow_cpu=args.allow_cpu,
+                                    device_request=args.device)
 
         # 2. Git state
         commit, dirty = verify_git_state()
@@ -679,10 +723,9 @@ def main():
         log_info(f"TOTAL optimizer steps: {total_steps}")
         log_info(f"val_every_steps: {full_cfg['train'].get('val_every_steps', 0)}")
 
-        # 4. Model + Objective (using REAL config)
-        model, objective, masker, cfg = verify_model_objective(device, data_root, full_cfg)
-
-        # 5. Tiny training
+        # 5. Tiny training — reuses the model/objective/masker/cfg already built
+        # by verify_model_objective above (A8: no duplicate construction, which
+        # would double GPU memory and diverge from the verified instances).
         optimizer, scheduler = run_tiny_training(model, objective, masker, device)
 
         # 6. Validation
@@ -711,15 +754,6 @@ def main():
         print(f"Dataset: {data_root}")
         print(f"Health: {health['status']}")
         return 0
-
-    except PreflightError as e:
-        print(f"\n[PREFLIGHT FAILED] {e}")
-        traceback.print_exc()
-        return 1
-    except Exception as e:
-        print(f"\n[PREFLIGHT ERROR] Unexpected error: {e}")
-        traceback.print_exc()
-        return 1
 
     except PreflightError as e:
         print(f"\n[PREFLIGHT FAILED] {e}")

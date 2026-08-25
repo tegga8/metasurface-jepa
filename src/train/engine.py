@@ -518,15 +518,27 @@ def _saveable(model):
 
 def collect_ema_state(model):
     """EMA momentum counters live as plain attributes (not in state_dict) — they
-    must be carried explicitly in the checkpoint for exact resume (§30)."""
+    must be carried explicitly in the checkpoint for exact resume (§30). The EMA
+    TARGET ENCODER WEIGHTS are equally required: the JEPA loss predicts the
+    target encoder's output, so a resume that rebuilds them from fresh init
+    silently trains against wrong targets. Stored CPU-cloned for portability."""
     ema = model.ema
-    return {"momentum_start": ema.momentum_start,
-            "momentum_end": ema.momentum_end,
-            "total_steps": ema.total_steps}
+    state = {"momentum_start": ema.momentum_start,
+             "momentum_end": ema.momentum_end,
+             "total_steps": ema.total_steps}
+    target = getattr(ema, "target", None)
+    if target is not None:
+        state["target"] = {k: v.detach().cpu().clone()
+                           for k, v in target.state_dict().items()}
+    return state
 
 
 def restore_ema_state(model, ema_state):
-    """Inverse of collect_ema_state; no-op if ema_state is missing/empty."""
+    """Inverse of collect_ema_state; no-op if ema_state is missing/empty.
+
+    A legacy checkpoint without 'target' cannot reconstruct the evolved EMA
+    weights — warn loudly rather than silently resuming against a freshly
+    initialized target encoder."""
     if not ema_state:
         return
     ema = model.ema
@@ -534,6 +546,16 @@ def restore_ema_state(model, ema_state):
     ema.momentum_end = float(ema_state["momentum_end"])
     if "total_steps" in ema_state:
         ema.set_total_steps(ema_state["total_steps"])
+    saved_target = ema_state.get("target")
+    target = getattr(ema, "target", None)
+    if target is not None:
+        if saved_target is None:
+            print("[checkpoint] WARNING: ema_state has no 'target' weights "
+                  "(legacy checkpoint) — EMA target encoder left at its "
+                  "current init; resumed training will NOT match an "
+                  "uninterrupted run.")
+        else:
+            target.load_state_dict(saved_target)
 
 
 def _optimizer_param_shapes(optimizer):

@@ -46,7 +46,8 @@ from data.mask import BlockMasker
 from assembly import build_model, saveable_state_dict
 from losses.objectives import build_objective
 from runtime.device import resolve_device, assert_module_device
-from train.engine import collect_ema_state, save_checkpoint, load_checkpoint
+from train.engine import (collect_ema_state, save_checkpoint, load_checkpoint,
+                          healthy_references)
 from runtime.reproducibility import set_seed
 
 PIXEL_GRID = 16
@@ -126,17 +127,18 @@ def _assert_no_ema_gradients(model, objective_name, step):
 # evaluation
 # ---------------------------------------------------------------------------
 
-def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw, need_null=False):
+def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_model, need_null=False):
     """Shared metric path via the engine's FixedValidation: in-loop validation,
-    eval-only, and final eval all use the exact same batches/masks/metric
-    (projection through objective.projector, never a model attribute).
-    refs_raw must contain raw healthy references per ratio; projection uses
-    the current objective's projector (Bug #10 fix)."""
+    eval-only, and final eval all use the exact same batches/masks/metric.
+    Production-path fix (exposed by the CLI smoke test): the healthy references'
+    raw AND projected stats are recomputed per call via `healthy_references(
+    refs_model, fv, objective=objective)` so the projection always goes through
+    the CURRENT objective's projector (Bug #10 intent) — never `healthy_proj=None`,
+    which crashed classify_health inside evaluate()."""
     metrics = {}
     for r, fv in sorted(fixed_vals.items()):
-        raw_ref = refs_raw[r]
-        # Pass None for healthy_proj so evaluate() projects with current objective's projector
-        m, health = fv.evaluate(model, objective, raw_ref, None)
+        refs = healthy_references(refs_model, fv, objective=objective)
+        m, health = fv.evaluate(model, objective, refs["raw"], refs["proj"])
         # Dynamic ratio key per hardening spec
         ratio_key = f"cos_err_r{r:g}"
         metrics[ratio_key] = m.get(ratio_key, m.get("cos_err_r0.5", 0.0))
@@ -233,7 +235,11 @@ def main():
         raise ValueError(f"grad_accum must be >= 1, got {accum}")
 
     optimizer_steps_per_epoch = math.ceil(steps_per_epoch / accum)
-    total_steps = args.max_steps or optimizer_steps_per_epoch * cfg["train"]["epochs"]
+    # Schedule horizon = CONFIGURED epoch budget only. --max-steps is a pure
+    # stop condition and must NOT shape the LR/EMA schedules, otherwise a
+    # truncated run evolves targets/lr differently than the same prefix of the
+    # full run and exact mid-epoch resume becomes impossible (A4).
+    total_steps = optimizer_steps_per_epoch * cfg["train"]["epochs"]
     # masker (+ frozen surrogate only if half_sensitivity placement needs it)
     masker = BlockMasker(placement=placement, grid=PIXEL_GRID,
                          min_side=cfg["mask"].get("min_side", 3),
@@ -262,14 +268,16 @@ def main():
     ).to(device)
     assert_module_device(objective, device, "objective")
 
-    # fixed validation + healthy released-init references (per ratio, same masks)
+    # fixed validation + healthy released-init reference (per ratio, same masks).
+    # One deterministic reference build; its raw/proj healthy stats are recomputed
+    # at every validation through the current objective's projector (Bug #10).
     from train.engine import (build_deterministic_reference,
                               fixed_validation_from_loader, healthy_references)
     val_bs = cfg["train"]["val_batches"]
     batch_size = cfg["train"]["batch_size"]
     n = max(1, min(val_bs * batch_size, len(val_ds)))
     mask_seed = cfg["mask"].get("mask_seed", 12345)
-    fixed_vals, refs_raw, refs_model = {}, {}, None
+    fixed_vals, refs_model = {}, None
     for r in ratios:
         fv = fixed_validation_from_loader(val_ds, n, batch_size, device,
                                           ratio=float(r), mask_seed=mask_seed)
@@ -283,9 +291,6 @@ def main():
                                                                  cfg["weights"]["metadit"])))
             refs_model.eval()
         fixed_vals[r] = fv
-        # Store only raw healthy references; projected stats computed at validation time
-        # using the current objective's projector (Bug #10)
-        refs_raw[r] = healthy_references(refs_model, fv, objective=None)["raw"]
 
     # optimizer owns model trainable params + objective trainable params, never EMA
     trainable = [p for p in model.parameters() if p.requires_grad] \
@@ -312,17 +317,27 @@ def main():
     best_path = os.path.join(out_dir, f"{run_tag}_best_model.pt")
     best_weights_path = os.path.join(out_dir, f"{run_tag}_best_weights.pt")
     start_step, start_epoch, start_micro_step, start_batch_index = 0, 0, 0, 0
+    # Raw metadata of the resume source (before epoch-end adjustment): used as the
+    # zero-batch fallback for the final checkpoint's actual-state tracking.
+    (start_global_step_raw, start_epoch_raw, start_batch_index_raw,
+     start_is_epoch_end_raw, start_micro_step_raw) = 0, 0, 0, False, 0
     best_prediction, best_healthy_prediction = {}, {}
     
     if args.resume:
         obj = _load_train_checkpoint(args.resume, model, objective, optimizer,
                                      scheduler, device, masker)
+        raw_is_epoch_end = bool(obj.get("is_epoch_end", False))
+        raw_batch_index = int(obj.get("batch_index", 0))
+        (start_global_step_raw, start_epoch_raw, start_batch_index_raw,
+         start_is_epoch_end_raw, start_micro_step_raw) = (
+            int(obj["step"]), int(obj["epoch"]), raw_batch_index,
+            raw_is_epoch_end, int(obj.get("micro_step", 0)))
         start_step = obj["step"] + 1
         start_epoch = obj["epoch"]
         start_micro_step = obj.get("micro_step", 0)
         start_batch_index = obj.get("batch_index", 0)
         # Handle epoch-end vs mid-epoch resume
-        if not obj.get("is_epoch_end", False):
+        if not raw_is_epoch_end:
             # Mid-epoch checkpoint: start_epoch is correct, batch_index tells us where in the epoch
             pass
         else:
@@ -338,7 +353,7 @@ def main():
     if args.eval_only:
         # For eval-only, we need to load checkpoint BEFORE building references
         # The checkpoint was already loaded above, so just evaluate
-        metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw,
+        metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_model,
                                           need_null=args.null_goal)
         tag = "eval" + ("_null_goal" if args.null_goal else "")
         eval_path = os.path.join(out_dir, f"{run_tag}_{tag}_metrics.json")
@@ -359,6 +374,16 @@ def main():
     if accum < 1:
         raise ValueError(f"grad_accum must be >= 1, got {accum}")
 
+    # Actual last-processed state (final-checkpoint resume-metadata fix): the
+    # final checkpoint must describe exactly where processing stopped — never a
+    # forced epoch-end marker. Initialized from the resume source so a run that
+    # processes zero batches still re-saves truthful metadata.
+    last_epoch = start_epoch_raw
+    last_batch_index_next = start_batch_index_raw
+    last_is_epoch_end = start_is_epoch_end_raw
+    last_micro_step = start_micro_step_raw
+    last_global_step = start_global_step_raw
+
     loss_accum = 0.0
     comp_sums, comp_counts = {}, {}
     sigreg_info = None
@@ -366,7 +391,13 @@ def main():
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
         train_sampler.set_epoch(epoch)
-        for bi, (G, S) in enumerate(loader):
+        # DataLoader iterator creation draws a base_seed from the GLOBAL torch
+        # RNG. Isolate it: the global stream must be affected only by explicit
+        # consumers, or a resumed run (new iterator after restore) drifts one
+        # draw ahead of an uninterrupted run and exact state equality breaks.
+        with torch.random.fork_rng():
+            epoch_iterator = iter(loader)
+        for bi, (G, S) in enumerate(epoch_iterator):
             # Skip batches until we reach the resume batch_index (for mid-epoch resume)
             if epoch == start_epoch and bi < start_batch_index:
                 continue
@@ -385,6 +416,9 @@ def main():
                 raise RuntimeError(f"non-finite total loss at step {step}: {total.item()}")
             total = total / accum
             total.backward()
+            # micro_step = micro-batches accumulated since the LAST optimizer step.
+            # Incremented before the step boundary; reset to 0 immediately after
+            # every successful optimizer step (never deferred to the epoch end).
             micro_step += 1
             _assert_no_ema_gradients(model, objective_name, step)
             loss_accum += total.item() * accum
@@ -400,6 +434,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             objective.on_optimizer_step(model, step)
             scheduler.step()
+            micro_step = 0
 
             if step % opt_cfg["log_every_steps"] == 0:
                 lr_now = optimizer.param_groups[0]["lr"]
@@ -410,39 +445,35 @@ def main():
                 loss_accum = 0.0
 
             if step % opt_cfg["val_every_steps"] == 0:
-                            val_metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals,
-                                                                  refs_raw, need_null=False)
-                            primary = val_metrics.get(f"cos_err_r{ratios[0]:g}", float("inf"))
-                            # Evaluate health for each ratio
-                            val_health = {}
-                            for r, fv in fixed_vals.items():
-                                raw_ref = refs_raw[r]
-                                m, health = fv.evaluate(model, objective, raw_ref, None)
-                                val_health[f"health_r{r:g}"] = health["status"]
-                
-                            if not best_prediction or primary < best_prediction.get("primary", float("inf")):
-                                best_prediction = {"primary": primary, "metrics": val_metrics,
-                                        "step": step, "health": val_health}
-# Save full resumable checkpoint as best (not weights-only)
-                            is_epoch_end = (bi == len(loader) - 1)
-                            next_batch_index = 0 if is_epoch_end else bi + 1
-                            save_checkpoint(best_path, model, objective, optimizer, scheduler,
-                                            cfg, step, epoch, micro_step=micro_step, batch_index=next_batch_index,
-                                            is_epoch_end=is_epoch_end,
-                                            metrics=val_metrics, health=val_health,
-                                            ema_state=collect_ema_state(model),
-                                            best_prediction=best_prediction,
-                                            best_healthy_prediction=best_healthy_prediction,
-                                            masker_rng_state=masker.get_rng_state(),
-                                            device=device, artifact_type="best")
-# Update best_healthy_prediction if health is HEALTHY
-                            first_ratio = ratios[0]
-                            if val_health.get(f"health_r{first_ratio:g}", "") == "HEALTHY":
-                                if not best_healthy_prediction or primary < best_healthy_prediction.get("primary", float("inf")):
-                                    best_healthy_prediction = {"primary": primary, "metrics": val_metrics,
-                                            "step": step, "health": val_health}
-                        
-                            print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
+                val_metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals,
+                                                      refs_model, need_null=False)
+                primary = val_metrics.get(f"cos_err_r{ratios[0]:g}", float("inf"))
+                # Health statuses are already recorded per ratio by the shared helper
+                val_health = {f"health_r{r:g}": val_metrics.get(f"health_r{r:g}",
+                                                                "UNKNOWN")
+                              for r in ratios}
+                if not best_prediction or primary < best_prediction.get("primary", float("inf")):
+                    best_prediction = {"primary": primary, "metrics": val_metrics,
+                                       "step": step, "health": val_health}
+                    # Save full resumable checkpoint as best (not weights-only)
+                    is_epoch_end = (bi == len(loader) - 1)
+                    next_batch_index = 0 if is_epoch_end else bi + 1
+                    save_checkpoint(best_path, model, objective, optimizer, scheduler,
+                                    cfg, step, epoch, micro_step=micro_step, batch_index=next_batch_index,
+                                    is_epoch_end=is_epoch_end,
+                                    metrics=val_metrics, health=val_health,
+                                    ema_state=collect_ema_state(model),
+                                    best_prediction=best_prediction,
+                                    best_healthy_prediction=best_healthy_prediction,
+                                    masker_rng_state=masker.get_rng_state(),
+                                    device=device, artifact_type="best")
+                    # Update best_healthy_prediction if health is HEALTHY
+                    first_ratio = ratios[0]
+                    if val_health.get(f"health_r{first_ratio:g}", "") == "HEALTHY":
+                        if not best_healthy_prediction or primary < best_healthy_prediction.get("primary", float("inf")):
+                            best_healthy_prediction = {"primary": primary, "metrics": val_metrics,
+                                                       "step": step, "health": val_health}
+                print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
 
             is_epoch_end = (bi == len(loader) - 1)
             next_batch_index = 0 if is_epoch_end else bi + 1
@@ -462,6 +493,16 @@ def main():
                                 device=device, artifact_type="latest")
                 print(f"  [ckpt] saved {ckpt_path} (step {step})")
 
+            # Track the actual last-processed state for the final checkpoint
+            # (final-checkpoint resume-metadata fix): is_epoch_end only when THIS
+            # batch really was the loader's last; otherwise resume points at the
+            # next batch index.
+            last_epoch = epoch
+            last_is_epoch_end = (bi == len(loader) - 1)
+            last_batch_index_next = 0 if last_is_epoch_end else bi + 1
+            last_micro_step = micro_step
+            last_global_step = step
+
             step += 1
             if args.smoke and (step - start_step) >= cfg["train"].get("max_steps", 0):
                 break
@@ -469,12 +510,14 @@ def main():
             raise RuntimeError(
                 f"Epoch {epoch} ended with {micro_step % accum} "
                 f"unconsumed micro-batches for grad_accum={accum}")
-        micro_step = 0  # Reset micro_step at epoch boundary
+        # No manual reset here: micro_step is reset to 0 inline immediately after
+        # every successful optimizer step, so it is already 0 whenever the guard
+        # above passes.
         if args.max_steps and step >= args.max_steps:
             break
 
     # final eval
-    final = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw,
+    final = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_model,
                                     need_null=True)
     gaps = [final[k] for k in final if k.startswith("gap_cos_err_r")
             and isinstance(final[k], float)]
@@ -489,9 +532,15 @@ def main():
                    "sigreg_info": sigreg_info}, f, indent=2)
     print(f"[milestone_b] final metrics -> {final_path}")
     print(json.dumps(final, indent=2))
+    # Final checkpoint carries the ACTUAL last-processed state: a --max-steps stop
+    # mid-epoch saves is_epoch_end=False and batch_index=<next batch>, so resume
+    # continues the epoch instead of silently skipping to the next one. Only an
+    # epoch that really ended on its last loader batch produces
+    # is_epoch_end=True / batch_index=0 here.
     save_checkpoint(ckpt_path, model, objective, optimizer, scheduler, cfg,
-                    step - 1, epoch, micro_step=micro_step, batch_index=0,
-                    is_epoch_end=True,
+                    last_global_step, last_epoch, micro_step=last_micro_step,
+                    batch_index=last_batch_index_next,
+                    is_epoch_end=last_is_epoch_end,
                     metrics=final, health=None,
                     ema_state=collect_ema_state(model),
                     best_prediction=best_prediction,

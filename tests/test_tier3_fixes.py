@@ -210,7 +210,7 @@ def test_no_cycle_in_training_path():
     assert "from itertools import" not in src, "itertools import still present"
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
     assert "cycle(" not in code, "cycle( still present in the training path"
-    assert "enumerate(loader)" in src, "explicit epoch iteration missing"
+    assert "enumerate(epoch_iterator)" in src, "explicit epoch iteration missing"
 
 
 # --------------------------------------------------------------------------

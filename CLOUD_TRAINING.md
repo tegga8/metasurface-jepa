@@ -63,16 +63,20 @@ Do not change these without re-running the full preflight suite. The preflight s
    ```
 4. **Run preflight check** (mandatory before any training):
    ```python
-   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml
+   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml --device cuda:0
    ```
    This verifies: environment contract, git state, dataset, model/objective, tiny training,
    validation, physics controls, checkpoint save/load/resume, and config validation.
+   `--device` selects the device explicitly (`auto`, `cpu`, or `cuda:0`) — on Kaggle GPUs use
+   `cuda:0`; the resolved selection is used by every later preflight stage.
    **Exit code 1 = DO NOT START TRAINING.**
 5. **Run preflight to discover and link dataset** (replaces manual symlink):
     ```python
-    !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml
+    !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml --device cuda:0
     ```
-    The preflight will auto-discover the dataset location and create the `data/metadit` symlink.
+    The preflight will auto-discover the dataset location and create the `data/metadit`
+    symlink (skipped if already pinned; a real directory at that path is never clobbered;
+    if symlink creation fails, pass `--data-root` explicitly instead).
 6. Confirm GPU:
    ```python
    !nvidia-smi
@@ -134,7 +138,8 @@ version).
 4. **Run preflight check** (mandatory before any training):
    ```python
    !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml \
-       --data-root /content/drive/MyDrive/<project>/data/metadit
+       --data-root /content/drive/MyDrive/<project>/data/metadit \
+       --device cuda:0
    ```
 5. Symlink data and checkpoints to the persistent Drive folder:
    ```python

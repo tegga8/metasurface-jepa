@@ -48,12 +48,29 @@ from torch.utils.data import DataLoader
 from assembly import build_model, load_into_model
 from data.dataset import MetaDiTDataset, collate_batch
 from encoders.geometry_encoder import GeometryEncoder
+from losses.objectives import build_objective
 
 from diagnostics.representation_health import (  # noqa: E402
     COLLAPSED_ANCHOR, MILESTONE_A_ANCHOR,
     eff_ranks, pairwise_cos_stats, same_token_cos, var_stats,
-    encoder_stats, verdict,
+    encoder_stats, token_space_stats, verdict,
 )
+
+
+def collect_embeddings(enc, geoms, device, max_geoms):
+    """Raw token embeddings (N, T, D) for an encoder over the SAME geometries."""
+    was_training = getattr(enc, "training", False)
+    if hasattr(enc, "eval"):
+        enc.eval()
+    with torch.no_grad():
+        embs = []
+        for G in geoms:
+            embs.append(enc(G.to(device)).cpu())
+            if sum(e.shape[0] for e in embs) >= max_geoms:
+                break
+    if hasattr(enc, "train") and was_training:
+        enc.train()
+    return torch.cat(embs, dim=0)[:max_geoms]
 
 
 def build_fresh_model(cfg, device, spec_path, metadit_path, init_from_metadit=True):
@@ -140,11 +157,40 @@ def main():
             "random_init": encoder_stats(random_enc, geoms, device, args.max_geoms)}
     v = verdict(target, COLLAPSED_ANCHOR, refs)
 
+    # B6: raw-vs-projector measurement (projection through the checkpoint's
+    # OWN objective projector — the space the VICReg loss actually lives in).
+    # Measurement only; no verdicts are derived here.
+    proj_stats = None
+    objective_name = ckpt.get("objective_name") if isinstance(ckpt, dict) else None
+    if isinstance(ckpt, dict) and ckpt.get("objective_state"):
+        obj_cfg = (ckpt.get("cfg") or cfg)
+        objective = build_objective(
+            objective_name or obj_cfg.get("objective", "jepa_vicreg"),
+            (obj_cfg.get("objective_params", {}) or {}).get(
+                objective_name or obj_cfg.get("objective", "jepa_vicreg"), {}),
+            projector_input_dim=obj_cfg["model"].get("hidden", 384),
+        )
+        # checkpoint stores the objective's full state_dict ("projector.*" keys)
+        objective.load_state_dict(ckpt["objective_state"])
+        objective.eval()
+        X_raw = collect_embeddings(model.ema, geoms, device, args.max_geoms)
+        with torch.no_grad():
+            X_proj = objective.projector(X_raw.to(args.device)).cpu()
+        proj_stats = token_space_stats(X_proj)
+
+    # B2/B4 four-way table: trained EMA target / released MetaDiT encoder /
+    # random-init encoder / collapsed anchor. The collapsed anchor is scalar-only
+    # (recorded at collapse time without token_std) — missing cells print 'n/a'.
+    def collapsed_cell(key):
+        return COLLAPSED_ANCHOR.get({"pairwise_cos.mean": "pairwise_cos",
+                                     "pairwise_cos.p05": "pairwise_p05"}.get(key, key))
+
     print(f"\ncheckpoint: {args.checkpoint}")
     print(f"step/epoch: {ckpt.get('step') if isinstance(ckpt, dict) and 'step' in ckpt else 'n/a'} / "
           f"{ckpt.get('epoch') if isinstance(ckpt, dict) and 'epoch' in ckpt else 'n/a'}")
     print(f"geometries: {target['n_geoms']}\n")
-    hdr = f"{'metric':<28}{'EMA target':>14}{'released ViT':>14}{'random init':>14}"
+    hdr = (f"{'metric':<28}{'EMA target':>14}{'released ViT':>14}"
+           f"{'random init':>14}{'collapsed':>14}")
     print(hdr)
     print("-" * len(hdr))
     for key, label in [("token_var", "token var"), ("token_std", "token std"),
@@ -163,10 +209,38 @@ def main():
             for part in k.split("."):
                 v2 = v2[part]
             return v2
+
+        def fmt(v):
+            return f"{v:>14.6g}" if isinstance(v, (int, float)) else f"{'n/a':>14}"
+
         row = f"{label:<28}"
-        for d in (target, refs["released_vit"], refs["random_init"]):
-            row += f"{get(d, key):>14.6g}"
+        row += fmt(get(target, key))
+        row += fmt(get(refs["released_vit"], key))
+        row += fmt(get(refs["random_init"], key))
+        row += fmt(collapsed_cell(key))
         print(row)
+
+    if proj_stats is not None:
+        print(f"\nraw-vs-projector ({objective_name or 'objective'} projector, "
+              f"measurement only):")
+        phdr = (f"{'metric':<28}{'raw EMA':>16}{'projected':>16}")
+        print(phdr)
+        print("-" * len(phdr))
+        for key, label in [("eff_rank_frac", "eff rank frac"),
+                           ("eff_rank_unnorm", "entropy eff rank"),
+                           ("token_std", "token std"),
+                           ("participation", "participation"),
+                           ("top_eig_frac", "top eig frac")]:
+            prow = f"{label:<28}{target[key]:>16.6g}{proj_stats[key]:>16.6g}"
+            print(prow)
+        prow = (f"{'pairwise cos p05':<28}"
+                f"{target['pairwise_cos']['p05']:>16.6g}"
+                f"{proj_stats['pairwise_cos']['p05']:>16.6g}")
+        print(prow)
+        prow = (f"{'same-token cos':<28}"
+                f"{target['same_token_cos']:>16.6g}"
+                f"{proj_stats['same_token_cos']:>16.6g}")
+        print(prow)
 
     print("\nAnchors:")
     print(f"  collapsed run (step 2687): pairwise cos mean {COLLAPSED_ANCHOR['pairwise_cos']:.6f} "
@@ -188,7 +262,12 @@ def main():
     print(f"  eff-rank ratio vs collapsed anchor: {v['ratio_eff_rank_vs_collapsed']:.2f}x (need > 5x)")
 
     if args.out:
+        from diagnostics.representation_health import grouped_view
         result = {"checkpoint": args.checkpoint, "target": target, "refs": refs,
+                  "grouped": {"target": grouped_view(target),
+                              "released_vit": grouped_view(refs["released_vit"]),
+                              "random_init": grouped_view(refs["random_init"])},
+                  "proj_vs_raw": proj_stats,
                   "anchors": {"collapsed": COLLAPSED_ANCHOR, "milestone_a": MILESTONE_A_ANCHOR},
                   "verdict": v}
         with open(args.out, "w") as f:

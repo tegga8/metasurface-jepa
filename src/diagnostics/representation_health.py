@@ -151,6 +151,38 @@ def token_space_stats(X):
     return stats
 
 
+def grouped_view(stats):
+    """B1 (calibration spec): grouped schema over a flat token_space_stats dict.
+
+    Reorganizes — never recomputes — the existing statistics into the three
+    calibration groups:
+      mean_pooled : cross-sample structure of geometry-level pooled embeddings
+                    (computed on X.mean(dim=1) inside token_space_stats)
+      token_level : per-token-position variability + same-token-position cosine
+      n_geoms     : sample count the stats were computed over
+
+    The flat dict remains the source of truth consumed by classify_health /
+    classify_failure_mode; this view exists so calibration reports can present
+    raw-vs-released-vs-random-vs-collapsed comparisons without flattening
+    nested pairwise_cos sub-dicts ad hoc.
+    """
+    return {
+        "mean_pooled": {
+            "pairwise_cos": stats["pairwise_cos"],
+            "eff_rank_unnorm": stats["eff_rank_unnorm"],
+            "eff_rank_frac": stats["eff_rank_frac"],
+            "participation": stats["participation"],
+            "top_eig_frac": stats["top_eig_frac"],
+        },
+        "token_level": {
+            "token_var": stats["token_var"],
+            "token_std": stats["token_std"],
+            "same_token_cos": stats["same_token_cos"],
+        },
+        "n_geoms": stats.get("n_geoms"),
+    }
+
+
 def encoder_stats(encoder, geoms, device, max_geoms):
     """Run an encoder over geometry batches and collect token-space stats."""
     with torch.no_grad():

@@ -262,5 +262,124 @@ def test_milestone_b_full_pipeline_contract():
     print("PASS: test_milestone_b_full_pipeline_contract")
 
 
+# ---------------------------------------------------------------------------
+# Real production CLI smoke test (production-path hardening A3).
+#
+# Executes the ACTUAL scripts/train/train_milestone_b.py in a subprocess:
+#   python scripts/train/train_milestone_b.py --config <tiny-config> \
+#       --device cpu --max-steps 2
+# and asserts exit code 0, checkpoint existence, loadability, and full schema.
+# The training loop is NOT recreated inside the test.
+# ---------------------------------------------------------------------------
+
+import json
+import subprocess
+
+import yaml
+
+from train.engine import REQUIRED_CHECKPOINT_KEYS
+
+
+def _make_tiny_mat(path, n=8, seed=0):
+    """Write a hermetic tiny MetaDiT-convention .mat file."""
+    import numpy as np
+    from scipy import io as sio
+    rng = np.random.RandomState(seed)
+    pattern = (rng.rand(64, 64, n) > 0.5).astype("int8")
+    sio.savemat(str(path), {
+        "pattern": pattern,
+        "parameter": rng.rand(n, 3),
+        "real": rng.randn(n, 301),
+        "imag": rng.randn(n, 301),
+    })
+    return str(path)
+
+
+def _write_tiny_cli_config(tmpdir, train_mat, val_mat, out_subdir="out"):
+    """Tiny deterministic production config exercising grad_accum=2 on CPU."""
+    cfg = {
+        "experiment": "minimal",
+        "objective": "jepa_vicreg",
+        "minimal": {"mask_ratio": 0.5, "mask_placement": "random"},
+        "sweep": {"mask_ratios": [0.2, 0.4, 0.6, 0.8, 1.0],
+                  "mask_placement": "random"},
+        "objective_params": {
+            "jepa_vicreg": {
+                "projector": {"input_dim": 384, "hidden_dim": 384, "output_dim": 384},
+                "lambda_inv": 25.0, "lambda_var": 25.0, "lambda_cov": 1.0,
+                "gamma": 1.0, "eps": 1.0e-4,
+            },
+        },
+        "model": {
+            "variant": "jepa", "patch_size": 4, "token_grid": 16,
+            "hidden": 384, "num_heads": 6, "num_predictor_heads": 2,
+            "geo_depth": 1, "predictor_depth": 1,
+            "goal_tokens": 16, "num_goal_heads": 4,
+            "ema_momentum_start": 0.99, "ema_momentum_end": 0.999,
+            "init_from_metadit": False,
+        },
+        "mask": {"min_side": 3, "k_range": [1, 2], "mask_seed": 12345},
+        "data": {"train_split": train_mat, "val_split": val_mat,
+                 "max_train_samples": 8, "num_workers": 0},
+        "weights": {
+            "metadit": os.path.join(REPO_ROOT, "data/metadit/weights/metadit-small.bin"),
+            "spectrum": os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth"),
+            "surrogate": os.path.join(REPO_ROOT, "data/metadit/weights/surrogate_model.bin"),
+        },
+        "train": {
+            "batch_size": 2, "grad_accum": 2, "epochs": 1,
+            "lr": 1e-3, "wd": 1e-4, "warmup_steps": 0, "clip_grad_norm": 1.0,
+            "save_optimizer": True, "ckpt_every_steps": 0,
+            "val_every_steps": 1, "val_batches": 1, "log_every_steps": 1,
+            "seed": 0, "device": "cpu",
+        },
+        "out_dir": os.path.join(tmpdir, out_subdir),
+    }
+    cfg_path = os.path.join(tmpdir, f"tiny_{out_subdir}.yaml")
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return cfg_path, cfg
+
+
+def _run_training_cli(config_path, extra_args, env_threads="1"):
+    """Run the actual production CLI as a subprocess. Returns CompletedProcess."""
+    cmd = [sys.executable,
+           os.path.join(REPO_ROOT, "scripts", "train", "train_milestone_b.py"),
+           "--config", config_path,
+           "--device", "cpu",
+           *extra_args]
+    env = dict(os.environ)
+    env["OMP_NUM_THREADS"] = env_threads
+    env["MKL_NUM_THREADS"] = env_threads
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT,
+                          env=env, timeout=900)
+
+
+def test_production_cli_smoke_max_steps_2():
+    """A3: the real CLI runs 2 optimizer steps end-to-end and writes a full-schema checkpoint."""
+    import torch
+    with tempfile.TemporaryDirectory() as td:
+        train_mat = _make_tiny_mat(os.path.join(td, "train.mat"), n=8, seed=42)
+        val_mat = _make_tiny_mat(os.path.join(td, "val.mat"), n=4, seed=123)
+        cfg_path, _ = _write_tiny_cli_config(td, train_mat, val_mat)
+
+        proc = _run_training_cli(cfg_path, ["--max-steps", "2"])
+        assert proc.returncode == 0, (
+            f"CLI failed (exit {proc.returncode})\nstdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}")
+
+        ckpt_path = os.path.join(td, "out", "minimal_jepa_vicreg_latest.pt")
+        assert os.path.exists(ckpt_path), f"checkpoint not created: {ckpt_path}"
+
+        obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        missing = [k for k in REQUIRED_CHECKPOINT_KEYS if k not in obj]
+        assert not missing, f"checkpoint missing schema keys: {missing}"
+        # Two optimizer steps ran (global_step is the last completed step index)
+        assert obj["step"] == 1, f"expected last completed step index 1, got {obj['step']}"
+        assert obj["artifact_type"] == "final"
+        assert obj["is_epoch_end"] is True  # 4 batches of 8 -> exactly one flushed epoch
+
+
 if __name__ == "__main__":
     test_milestone_b_full_pipeline_contract()
+    test_production_cli_smoke_max_steps_2()

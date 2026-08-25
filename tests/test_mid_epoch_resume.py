@@ -227,6 +227,219 @@ def test_epoch_end_resume():
     print("PASS: test_epoch_end_resume")
 
 
+# ---------------------------------------------------------------------------
+# Production-path hardening A4: real-CLI mid-epoch stop -> resume equivalence.
+#
+# Run A: production CLI, tiny deterministic config, stops MID-EPOCH (--max-steps).
+#   -> final checkpoint must carry is_epoch_end=False and batch_index=<next>.
+# Run B: same config + --resume <checkpoint>, continues to the same final step.
+# Reference: uninterrupted CLI run to the same final step.
+#
+# Resumed vs uninterrupted CPU runs must match exactly on: next batch order,
+# next mask (both subsumed by exact state equality given the deterministic
+# sampler + restored masker RNG), model, objective, optimizer, scheduler, EMA
+# state, and final global step.
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+import numpy as np
+import yaml
+
+from train.engine import REQUIRED_CHECKPOINT_KEYS
+
+
+def _make_tiny_mat(path, n=8, seed=0):
+    import numpy as np
+    from scipy import io as sio
+    rng = np.random.RandomState(seed)
+    pattern = (rng.rand(64, 64, n) > 0.5).astype("int8")
+    sio.savemat(str(path), {
+        "pattern": pattern,
+        "parameter": rng.rand(n, 3),
+        "real": rng.randn(n, 301),
+        "imag": rng.randn(n, 301),
+    })
+    return str(path)
+
+
+def _write_cli_config(tmpdir, train_mat, val_mat):
+    """Tiny deterministic config: 8 samples / batch 2 / accum 1 -> 4 steps per epoch."""
+    cfg = {
+        "experiment": "minimal",
+        "objective": "jepa_vicreg",
+        "minimal": {"mask_ratio": 0.5, "mask_placement": "random"},
+        "sweep": {"mask_ratios": [0.5], "mask_placement": "random"},
+        "objective_params": {
+            "jepa_vicreg": {
+                "projector": {"input_dim": 384, "hidden_dim": 384, "output_dim": 384},
+                "lambda_inv": 25.0, "lambda_var": 25.0, "lambda_cov": 1.0,
+                "gamma": 1.0, "eps": 1.0e-4,
+            },
+        },
+        "model": {
+            "variant": "jepa", "patch_size": 4, "token_grid": 16,
+            "hidden": 384, "num_heads": 6, "num_predictor_heads": 2,
+            "geo_depth": 1, "predictor_depth": 1,
+            "goal_tokens": 16, "num_goal_heads": 4,
+            "ema_momentum_start": 0.99, "ema_momentum_end": 0.999,
+            "init_from_metadit": False,
+        },
+        "mask": {"min_side": 3, "k_range": [1, 2], "mask_seed": 12345},
+        "data": {"train_split": train_mat, "val_split": val_mat,
+                 "max_train_samples": 8, "num_workers": 0},
+        "weights": {
+            "metadit": os.path.join(REPO_ROOT, "data/metadit/weights/metadit-small.bin"),
+            "spectrum": os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth"),
+            "surrogate": os.path.join(REPO_ROOT, "data/metadit/weights/surrogate_model.bin"),
+        },
+        "train": {
+            "batch_size": 2, "grad_accum": 1, "epochs": 1,
+            "lr": 1e-3, "wd": 1e-4, "warmup_steps": 0, "clip_grad_norm": 1.0,
+            "save_optimizer": True, "ckpt_every_steps": 1,
+            "val_every_steps": 1, "val_batches": 1, "log_every_steps": 1,
+            "seed": 0, "device": "cpu",
+        },
+        "out_dir": os.path.join(tmpdir, "out"),
+    }
+    cfg_path = os.path.join(tmpdir, "tiny.yaml")
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return cfg_path
+
+
+def _run_cli(config_path, out_dir, extra_args):
+    cmd = [sys.executable,
+           os.path.join(REPO_ROOT, "scripts", "train", "train_milestone_b.py"),
+           "--config", config_path,
+           "--device", "cpu",
+           *extra_args]
+    env = dict(os.environ)
+    env["OMP_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT,
+                          env=env, timeout=900)
+
+
+def _deep_equal(x, y):
+    """Exact equality across tensors / numpy arrays / nested containers."""
+    if isinstance(x, torch.Tensor):
+        return isinstance(y, torch.Tensor) and torch.equal(x, y)
+    if isinstance(x, np.ndarray):
+        return isinstance(y, np.ndarray) and np.array_equal(x, y)
+    if isinstance(x, dict):
+        return (isinstance(y, dict) and set(x.keys()) == set(y.keys())
+                and all(_deep_equal(x[k], y[k]) for k in x))
+    if isinstance(x, (list, tuple)):
+        return (isinstance(y, type(x)) and len(x) == len(y)
+                and all(_deep_equal(xi, yi) for xi, yi in zip(x, y)))
+    if x is None or isinstance(x, (int, float, str, bool)):
+        return x == y and type(x) is type(y)
+    return x == y
+
+
+def _assert_states_equal(a, b, label):
+    """Deep-compare two loaded checkpoint dicts' training-relevant state."""
+    assert a["step"] == b["step"], f"{label}: final global step mismatch"
+    assert a["epoch"] == b["epoch"], f"{label}: epoch mismatch"
+    assert a["micro_step"] == b["micro_step"], f"{label}: micro_step mismatch"
+    assert a["batch_index"] == b["batch_index"], f"{label}: batch_index mismatch"
+    assert a["is_epoch_end"] == b["is_epoch_end"], f"{label}: is_epoch_end mismatch"
+
+    # Next batch order + next mask equivalence: the deterministic epoch sampler
+    # plus restored global/masker RNG make any divergence here propagate to the
+    # weights, so exact equality of everything below SUBSUMES both.
+    assert set(a["model"].keys()) == set(b["model"].keys())
+    for k in a["model"]:
+        assert torch.equal(a["model"][k], b["model"][k]), f"{label}: model param {k}"
+    for k in a["objective_state"]:
+        assert torch.equal(a["objective_state"][k], b["objective_state"][k]), \
+            f"{label}: objective state {k}"
+
+    oa, ob = a["optimizer"], b["optimizer"]
+    assert oa["param_groups"] == ob["param_groups"], f"{label}: optimizer groups"
+    assert set(oa["state"].keys()) == set(ob["state"].keys()), \
+        f"{label}: optimizer state keys (steps seen differ)"
+    for pid in oa["state"]:
+        for sk in oa["state"][pid]:
+            va, vb = oa["state"][pid][sk], ob["state"][pid][sk]
+            if isinstance(va, torch.Tensor):
+                assert torch.equal(va, vb), f"{label}: optimizer state {pid}.{sk}"
+            else:
+                assert va == vb, f"{label}: optimizer state {pid}.{sk}"
+
+    assert a["scheduler_state"] == b["scheduler_state"], \
+        f"{label}: scheduler state (lr trajectory differs)"
+    # EMA: scalar counters by value; target-encoder weights by tensor equality
+    ea, eb = a["ema_state"], b["ema_state"]
+    for k in ("momentum_start", "momentum_end", "total_steps"):
+        assert ea[k] == eb[k], f"{label}: EMA counter {k}"
+    ta, tb = ea.get("target"), eb.get("target")
+    assert (ta is None) == (tb is None), f"{label}: EMA target presence"
+    if ta is not None:
+        assert set(ta.keys()) == set(tb.keys()), f"{label}: EMA target keys"
+        for k in ta:
+            assert torch.equal(ta[k], tb[k]), f"{label}: EMA target {k}"
+    for key in ("rng_state", "masker_rng_state"):
+        ra, rb = a.get(key), b.get(key)
+        if ra is not None or rb is not None:
+            assert _deep_equal(ra, rb), f"{label}: {key}"
+
+
+def test_production_cli_mid_epoch_stop_then_resume_matches_uninterrupted():
+    """A4: stop mid-epoch via CLI, resume via CLI, compare against one clean run."""
+    with tempfile.TemporaryDirectory() as td_runA, \
+         tempfile.TemporaryDirectory() as td_runB, \
+         tempfile.TemporaryDirectory() as td_ref:
+        train_mat = _make_tiny_mat(os.path.join(td_ref, "train.mat"), n=8, seed=42)
+        val_mat = _make_tiny_mat(os.path.join(td_ref, "val.mat"), n=4, seed=123)
+
+        # ---- Run A: stop after 2 of 4 optimizer steps (mid-epoch) ----
+        cfg_a = _write_cli_config(td_runA, train_mat, val_mat)
+        proc_a = _run_cli(cfg_a, td_runA, ["--max-steps", "2"])
+        assert proc_a.returncode == 0, (
+            f"Run A failed\nstdout:\n{proc_a.stdout}\nstderr:\n{proc_a.stderr}")
+        ckpt_a_path = os.path.join(td_runA, "out", "minimal_jepa_vicreg_latest.pt")
+        assert os.path.exists(ckpt_a_path)
+
+        ckpt_a = torch.load(ckpt_a_path, map_location="cpu", weights_only=False)
+        missing = [k for k in REQUIRED_CHECKPOINT_KEYS if k not in ckpt_a]
+        assert not missing, f"Run A checkpoint missing schema keys: {missing}"
+        # A2 regression: stopped mid-epoch -> actual state, NOT forced epoch-end.
+        assert ckpt_a["is_epoch_end"] is False, (
+            "final checkpoint of a mid-epoch --max-steps stop must have "
+            "is_epoch_end=False")
+        assert ckpt_a["batch_index"] == 2, (
+            f"final checkpoint must point at the NEXT batch (2), got "
+            f"{ckpt_a['batch_index']}")
+        assert ckpt_a["epoch"] == 0
+        assert ckpt_a["step"] == 1
+
+        # ---- Run B: resume from Run A's final checkpoint to the same final step ----
+        cfg_b = _write_cli_config(td_runB, train_mat, val_mat)
+        proc_b = _run_cli(cfg_b, td_runB,
+                          ["--resume", ckpt_a_path, "--max-steps", "4"])
+        assert proc_b.returncode == 0, (
+            f"Run B failed\nstdout:\n{proc_b.stdout}\nstderr:\n{proc_b.stderr}")
+
+        # ---- Reference: uninterrupted run to the same final step ----
+        cfg_r = _write_cli_config(td_ref, train_mat, val_mat)
+        proc_r = _run_cli(cfg_r, td_ref, ["--max-steps", "4"])
+        assert proc_r.returncode == 0, (
+            f"Reference run failed\nstdout:\n{proc_r.stdout}\nstderr:\n{proc_r.stderr}")
+
+        ckpt_b = torch.load(os.path.join(td_runB, "out",
+                                         "minimal_jepa_vicreg_latest.pt"),
+                            map_location="cpu", weights_only=False)
+        ckpt_r = torch.load(os.path.join(td_ref, "out",
+                                         "minimal_jepa_vicreg_latest.pt"),
+                            map_location="cpu", weights_only=False)
+        _assert_states_equal(ckpt_b, ckpt_r, "resumed vs uninterrupted")
+
+        print("PASS: test_production_cli_mid_epoch_stop_then_resume_matches_uninterrupted")
+
+
 if __name__ == "__main__":
     test_mid_epoch_resume()
     test_epoch_end_resume()
+    test_production_cli_mid_epoch_stop_then_resume_matches_uninterrupted()

@@ -1,37 +1,58 @@
 #!/usr/bin/env python3
 """
-Within-bucket spatial-structure probe.
+Rigorous within-bucket spatial-structure probe.
 
-Question:
-    At matched (l_lattice, h_atom, r_atom), does a representation preserve
-    differences in the 64x64 occupancy pattern?
+Scientific question
+-------------------
+At approximately matched (l_lattice, h_atom, r_atom), does a representation
+preserve differences in the 64x64 occupancy pattern?
 
-Protocol:
-  1. Check bucket viability using quantized physical parameters.
-  2. Adaptively widen quantization bins until enough buckets/pairs exist.
-  3. Freeze all buckets and pair indices using ground-truth parameters/occupancy.
-  4. For the SAME pairs, compare:
-       - occupancy Hamming distance (ground-truth shape distance)
-       - trivial shape-aware feature distance
-       - trained EMA representation distance
-       - released ViT representation distance
-       - random-init representation distance
-  5. Compute Spearman rho separately inside each bucket.
-  6. Aggregate only AFTER within-bucket correlations are computed:
-       - median rho
-       - mean rho
-       - number of usable buckets
-  7. Verify checkpoint parameters are unchanged.
+This diagnostic is intentionally independent of the earlier mean-pooled
+collapse gate and scalar-parameter R2 probe.
 
-No training, no backward, no optimizer, no gate verdict.
+Protocol
+--------
+A. Ground-truth-only viability analysis:
+   - Load a deterministic validation prefix.
+   - Quantize each physical parameter into bins.
+   - Try progressively wider bins.
+   - For every candidate bin width, compute the FINAL bucket/pair set exactly
+     as it will be used for the correlation analysis.
+   - Do not select a width using "possible pairs" and then discover later that
+     the final pair set is too small.
+   - Report all candidate widths before choosing one.
 
-Trivial shape-aware baseline:
-    occupancy fraction + 4x4 coarse occupancy grid (16 values)
+B. Pair-set construction:
+   - Buckets are formed only from ground-truth parameters.
+   - Pairs are selected only from those buckets.
+   - The pair set is frozen before loading any representation.
+   - No representation-dependent filtering is permitted.
 
-Representation distance:
-    mean token-wise cosine distance over the 256 aligned tokens.
-    This preserves spatial token alignment and avoids the mean-pooling issue
-    that motivated this experiment.
+C. Shape distance:
+   - Binary occupancy Hamming distance.
+
+D. Representation distance:
+   - Mean aligned-token cosine distance over all spatial tokens.
+   - No mean-pooling of tokens before the distance.
+
+E. Trivial shape baseline:
+   - occupancy fraction
+   - 4x4 coarse occupancy grid
+   - no physical parameter channels.
+
+F. Statistics:
+   - Spearman rho is computed independently inside each bucket.
+   - Aggregate only the valid within-bucket rho values afterward.
+   - Report median and pair-count-weighted mean rho.
+   - Report bucket-level sample/pair counts and parameter spread.
+
+Important:
+This script never trains anything, never backpropagates, never changes the
+checkpoint, and never issues an automatic HEALTHY/COLLAPSED verdict.
+
+A dataset with sparse matched buckets is a DATA LIMITATION, not a reason to
+silently loosen the matching criterion. The script therefore reports the
+selected bin widths and the actual physical spread inside matched buckets.
 
 Usage:
   python scripts/diagnostics/within_bucket_spatial_probe.py \
@@ -61,9 +82,9 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
-for p in (REPO_ROOT, SRC_ROOT):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from assembly import build_model, load_into_model  # noqa: E402
 from data.dataset import MetaDiTDataset, collate_batch  # noqa: E402
@@ -71,75 +92,74 @@ from encoders.geometry_encoder import GeometryEncoder  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Within-bucket spatial-structure probe"
-    )
+    ap = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--checkpoint",
-        required=True,
-    )
-
-    parser.add_argument(
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument(
         "--config",
-        default=str(
-            REPO_ROOT / "configs" / "milestone_b.yaml"
-        ),
+        default=str(REPO_ROOT / "configs/milestone_b.yaml"),
     )
+    ap.add_argument("--data-root", default=None)
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--max-geoms", type=int, default=4096)
+    ap.add_argument("--probe-seed", type=int, default=0)
 
-    parser.add_argument(
-        "--data-root",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--device",
-        default="cpu",
-    )
-
-    parser.add_argument(
-        "--max-geoms",
-        type=int,
-        default=4096,
-    )
-
-    parser.add_argument(
-        "--probe-seed",
-        type=int,
-        default=0,
-    )
-
-    parser.add_argument(
+    # Matching controls.
+    ap.add_argument(
         "--min-bucket-size",
         type=int,
         default=2,
     )
-
-    parser.add_argument(
+    ap.add_argument(
         "--min-usable-buckets",
         type=int,
         default=10,
     )
-
-    parser.add_argument(
-        "--min-total-pairs",
+    ap.add_argument(
+        "--min-rho-buckets",
         type=int,
-        default=100,
+        default=8,
     )
-
-    parser.add_argument(
+    ap.add_argument(
+        "--min-pairs-total",
+        type=int,
+        default=50,
+    )
+    ap.add_argument(
         "--max-pairs-per-bucket",
         type=int,
-        default=200,
+        default=0,
+        help="0 means use all pairs; otherwise deterministic cap.",
     )
-
-    parser.add_argument(
+    ap.add_argument(
         "--min-pairs-for-rho",
         type=int,
         default=3,
     )
 
-    parser.add_argument(
+    # Bins are fractions of each parameter's observed range.
+    ap.add_argument(
+        "--bin-fractions",
+        type=str,
+        default=(
+            "0.001,0.0025,0.005,0.01,0.02,0.05,0.10,0.20,0.30,0.50,0.75,1.0"
+        ),
+    )
+
+    # To keep bins genuinely "matched", reject pairs whose actual normalized
+    # parameter difference is larger than this. This is a stricter criterion
+    # than merely sharing the same quantized bucket.
+    ap.add_argument(
+        "--max-normalized-param-distance",
+        type=float,
+        default=0.25,
+        help=(
+            "Maximum Euclidean distance between the three normalized physical "
+            "parameters for a pair. 0 disables this secondary check."
+        ),
+    )
+
+    ap.add_argument(
         "--out",
         default=str(
             REPO_ROOT
@@ -149,27 +169,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    return ap.parse_args()
 
 
 def resolve_val_mat(
     cfg: dict,
     data_root: str | None,
 ) -> Path:
-    """
-    Resolve the validation MAT file.
-
-    --data-root may point to:
-      - data/metadit/
-      - a direct .mat file
-    """
-
     if data_root:
         root = Path(data_root)
 
         if root.is_dir():
             candidate = root / "split_data" / "val_set.mat"
-
             if candidate.exists():
                 return candidate
 
@@ -177,32 +188,28 @@ def resolve_val_mat(
             return root
 
         raise FileNotFoundError(
-            f"Cannot resolve val_set.mat from --data-root={data_root}"
+            f"Cannot resolve validation MAT from --data-root={data_root}"
         )
 
     raw = Path(cfg["data"]["val_split"])
 
-    if raw.is_absolute():
-        return raw
-
-    return REPO_ROOT / raw
+    return (
+        raw
+        if raw.is_absolute()
+        else REPO_ROOT / raw
+    )
 
 
 def load_geometries(
     mat_path: Path,
     max_geoms: int,
 ) -> Tuple[torch.Tensor, np.ndarray]:
-    """
-    Load a deterministic prefix of the validation set.
-
-    Returns:
-        geometries: [N, 3, 64, 64]
-        params:     [N, 3] ordered [l_lattice, h_atom, r_atom]
-    """
-
     ds = MetaDiTDataset(str(mat_path))
 
-    n = min(int(max_geoms), len(ds))
+    n = min(
+        int(max_geoms),
+        len(ds),
+    )
 
     if n < 8:
         raise RuntimeError(
@@ -218,14 +225,17 @@ def load_geometries(
         collate_fn=collate_batch,
     )
 
-    chunks: List[torch.Tensor] = []
+    geometry_chunks: List[torch.Tensor] = []
     remaining = n
 
-    for G, _S in loader:
-        take = min(remaining, G.shape[0])
+    for geometry, _spectrum in loader:
+        take = min(
+            remaining,
+            geometry.shape[0],
+        )
 
-        chunks.append(
-            G[:take].clone()
+        geometry_chunks.append(
+            geometry[:take].clone()
         )
 
         remaining -= take
@@ -234,14 +244,13 @@ def load_geometries(
             break
 
     geometries = torch.cat(
-        chunks,
+        geometry_chunks,
         dim=0,
     )
 
     if geometries.shape[0] != n:
         raise RuntimeError(
-            f"Collected {geometries.shape[0]} geometries, "
-            f"expected {n}"
+            f"Collected {geometries.shape[0]} geometries, expected {n}"
         )
 
     params = np.asarray(
@@ -251,8 +260,7 @@ def load_geometries(
 
     if params.shape != (n, 3):
         raise RuntimeError(
-            f"Expected parameter array [{n},3], "
-            f"got {params.shape}"
+            f"Expected params shape {(n, 3)}, got {params.shape}"
         )
 
     return geometries, params
@@ -262,126 +270,167 @@ def occupancy_binary(
     geometries: torch.Tensor,
 ) -> np.ndarray:
     """
-    Recover binary occupancy from the geometry tensor.
+    Recover occupancy from the geometry tensor.
 
-    The dataset loader writes nonzero r_atom/h_atom values only at occupied
-    locations, while the third channel is global.
+    The dataset writes r_atom/h_atom only at occupied positions.
+    Channel 2 is global and must NOT be used for occupancy.
     """
 
-    occ = (
+    occupied = (
         (geometries[:, 0] != 0)
         | (geometries[:, 1] != 0)
     )
 
-    return occ.cpu().numpy().astype(np.uint8)
+    return occupied.cpu().numpy().astype(
+        np.uint8
+    )
 
 
-def coarse_shape_features(occ: np.ndarray) -> np.ndarray:
+def coarse_shape_features(
+    occupancy: np.ndarray,
+) -> np.ndarray:
     """
-    Shape-aware trivial baseline.
+    Shape-only trivial baseline.
 
     Features:
-      - occupancy fraction: [N,1]
-      - 4x4 coarse occupancy grid: [N,16]
+      - occupancy fraction: 1 feature
+      - 4x4 coarse occupancy grid: 16 features
 
-    Total: [N,17].
+    Total = 17 features.
+
+    No physical parameter values are included.
     """
-    if occ.ndim != 3:
-        raise ValueError(f"Expected [N,H,W], got {occ.shape}")
 
-    n, h, w = occ.shape
+    if occupancy.ndim != 3:
+        raise ValueError(
+            f"Expected [N,H,W], got {occupancy.shape}"
+        )
+
+    n, h, w = occupancy.shape
 
     if (h, w) != (64, 64):
-        raise ValueError(f"Expected 64x64 occupancy, got {occ.shape}")
+        raise ValueError(
+            f"Expected 64x64 occupancy, got {occupancy.shape}"
+        )
 
-    # [N,64,64] -> [N,4,16,4,16] -> [N,4,4]
-    coarse_2d = occ.reshape(n, 4, 16, 4, 16).mean(axis=(2, 4))
+    # [N,64,64]
+    # -> [N,4,16,4,16]
+    # -> [N,4,4]
+    coarse_grid = occupancy.reshape(
+        n,
+        4,
+        16,
+        4,
+        16,
+    ).mean(axis=(2, 4))
 
     # [N,4,4] -> [N,16]
-    coarse = coarse_2d.reshape(n, 16)
+    coarse_features = coarse_grid.reshape(
+        n,
+        16,
+    )
 
-    # IMPORTANT: reduce BOTH spatial dimensions first.
-    # Result is [N,1], not [N,1,1].
-    occupancy_fraction = occ.mean(axis=(1, 2))[:, None]
+    # IMPORTANT: reduce both spatial dimensions before adding singleton dim.
+    occupancy_fraction = occupancy.mean(
+        axis=(1, 2)
+    )[:, None]
 
-    assert occupancy_fraction.shape == (n, 1)
-    assert coarse.shape == (n, 16)
+    assert occupancy_fraction.shape == (
+        n,
+        1,
+    )
+    assert coarse_features.shape == (
+        n,
+        16,
+    )
 
     features = np.concatenate(
-        [occupancy_fraction, coarse],
+        [
+            occupancy_fraction,
+            coarse_features,
+        ],
         axis=1,
     ).astype(np.float64)
 
-    assert features.shape == (n, 17)
+    assert features.shape == (
+        n,
+        17,
+    )
 
     return features
 
-def robust_quantize(
-    params: np.ndarray,
-    fractions: List[float],
-) -> list:
-    """
-    Try relative bin widths as fractions of the observed parameter ranges.
 
-    We start with narrow bins and widen only if necessary.
-    """
+def parse_bin_fractions(
+    value: str,
+) -> List[float]:
+    fractions = []
 
-    spans = (
-        params.max(axis=0)
-        - params.min(axis=0)
+    for token in value.split(","):
+        x = float(token.strip())
+
+        if x <= 0:
+            raise ValueError(
+                "Bin fractions must be > 0"
+            )
+
+        fractions.append(x)
+
+    fractions = sorted(
+        set(fractions)
     )
 
-    scales = np.maximum(
-        spans,
+    return fractions
+
+
+def quantize_parameters(
+    params: np.ndarray,
+    fraction: float,
+):
+    """
+    Quantize each physical parameter independently.
+
+    Bins are fractions of the observed range of that parameter.
+    """
+
+    mins = params.min(
+        axis=0
+    )
+
+    maxs = params.max(
+        axis=0
+    )
+
+    spans = np.maximum(
+        maxs - mins,
         1e-12,
     )
 
-    candidates = []
+    widths = spans * fraction
 
-    for fraction in fractions:
+    keys = np.floor(
+        (params - mins)
+        / widths
+    ).astype(np.int64)
 
-        widths = (
-            scales * fraction
-        )
-
-        mins = params.min(axis=0)
-
-        keys = np.floor(
-            (params - mins)
-            / widths
-        ).astype(np.int64)
-
-        candidates.append(
-            (
-                fraction,
-                widths,
-                mins,
-                keys,
-            )
-        )
-
-    return candidates
+    return (
+        keys,
+        mins,
+        maxs,
+        spans,
+        widths,
+    )
 
 
-def bucket_map(
+def build_buckets(
     keys: np.ndarray,
     min_bucket_size: int,
-) -> Dict[
-    Tuple[int, int, int],
-    np.ndarray,
-]:
-    """
-    Convert quantized parameter keys to buckets.
-
-    Only buckets with at least min_bucket_size members survive.
-    """
-
+):
     buckets: Dict[
         Tuple[int, int, int],
         List[int],
     ] = {}
 
-    for i, key_array in enumerate(keys):
+    for index, key_array in enumerate(keys):
 
         key = (
             int(key_array[0]),
@@ -392,7 +441,7 @@ def bucket_map(
         buckets.setdefault(
             key,
             [],
-        ).append(i)
+        ).append(index)
 
     return {
         key: np.asarray(
@@ -404,91 +453,180 @@ def bucket_map(
     }
 
 
-def pair_indices(
+def build_frozen_pairs(
     buckets: Dict[
         Tuple[int, int, int],
         np.ndarray,
     ],
+    params: np.ndarray,
+    parameter_spans: np.ndarray,
     seed: int,
     max_pairs_per_bucket: int,
-) -> Dict[
-    Tuple[int, int, int],
-    np.ndarray,
-]:
+    max_normalized_param_distance: float,
+):
     """
-    Freeze the exact pair set using bucket membership only.
+    Create the exact representation-independent pair set.
 
-    Representation values are never consulted here.
+    Pair eligibility:
+      1. both samples belong to the same quantized bucket;
+      2. if max_normalized_param_distance > 0, their normalized
+         [l,h,r] distance must also be <= that threshold.
+
+    This second check ensures "same bucket" cannot hide a large physical
+    parameter difference.
     """
 
     rng = np.random.RandomState(
         seed
     )
 
-    output = {}
+    pairs_by_bucket = {}
 
-    for key in sorted(buckets):
+    normalization = np.maximum(
+        parameter_spans,
+        1e-12,
+    )
 
-        indices = buckets[key]
+    for bucket_key in sorted(
+        buckets
+    ):
 
-        pairs = []
+        members = buckets[
+            bucket_key
+        ]
 
-        for a in range(
-            len(indices) - 1
+        candidates = []
+
+        for ai in range(
+            len(members) - 1
         ):
-            for b in range(
-                a + 1,
-                len(indices),
+
+            a = int(
+                members[ai]
+            )
+
+            for bi in range(
+                ai + 1,
+                len(members),
             ):
-                pairs.append(
-                    (
-                        int(indices[a]),
-                        int(indices[b]),
-                    )
+
+                b = int(
+                    members[bi]
                 )
 
-        if len(pairs) > max_pairs_per_bucket:
+                if (
+                    max_normalized_param_distance
+                    > 0
+                ):
+
+                    delta = (
+                        params[a]
+                        - params[b]
+                    ) / normalization
+
+                    normalized_distance = float(
+                        np.linalg.norm(delta)
+                    )
+
+                    if (
+                        normalized_distance
+                        > max_normalized_param_distance
+                    ):
+                        continue
+
+                candidates.append(
+                    (a, b)
+                )
+
+        if (
+            max_pairs_per_bucket > 0
+            and len(candidates)
+            > max_pairs_per_bucket
+        ):
 
             chosen = rng.choice(
-                len(pairs),
+                len(candidates),
                 size=max_pairs_per_bucket,
                 replace=False,
             )
 
-            pairs = [
-                pairs[int(i)]
+            candidates = [
+                candidates[int(i)]
                 for i in np.sort(chosen)
             ]
 
-        if len(pairs) >= 1:
-            output[key] = np.asarray(
-                pairs,
+        if candidates:
+
+            pairs_by_bucket[
+                bucket_key
+            ] = np.asarray(
+                candidates,
                 dtype=np.int64,
             )
 
-    return output
+    return pairs_by_bucket
 
 
-def viability(
-    buckets: Dict[
-        Tuple[int, int, int],
-        np.ndarray,
-    ],
-    min_total_pairs: int,
-) -> Dict[str, int]:
+def evaluate_candidate_bins(
+    params: np.ndarray,
+    fraction: float,
+    min_bucket_size: int,
+    min_pairs_for_rho: int,
+    min_normalized_distance: float,
+    seed: int,
+    max_pairs_per_bucket: int,
+):
+    """
+    Fully evaluate a candidate bin width using the EXACT final pair-selection
+    procedure. This avoids the previous bug where "possible pair" counts were
+    checked before later pair filtering/capping.
+    """
+
+    keys, mins, maxs, spans, widths = (
+        quantize_parameters(
+            params,
+            fraction,
+        )
+    )
+
+    buckets = build_buckets(
+        keys,
+        min_bucket_size,
+    )
+
+    pairs = build_frozen_pairs(
+        buckets,
+        params,
+        spans,
+        seed,
+        max_pairs_per_bucket,
+        min_normalized_distance,
+    )
+
+    valid_pair_buckets = {
+        key: value
+        for key, value in pairs.items()
+        if len(value) >= min_pairs_for_rho
+    }
 
     total_pairs = sum(
-        len(values)
-        * (len(values) - 1)
-        // 2
-        for values in buckets.values()
+        len(value)
+        for value in valid_pair_buckets.values()
     )
 
     return {
+        "fraction": float(fraction),
+        "mins": mins,
+        "maxs": maxs,
+        "spans": spans,
+        "widths": widths,
+        "keys": keys,
+        "buckets": buckets,
+        "pairs": valid_pair_buckets,
         "usable_buckets": int(
-            len(buckets)
+            len(valid_pair_buckets)
         ),
-        "total_possible_pairs": int(
+        "total_pairs": int(
             total_pairs
         ),
         "max_bucket_size": int(
@@ -500,182 +638,84 @@ def viability(
                 default=0,
             )
         ),
-        "n_geometries_in_usable_buckets": int(
-            sum(
-                len(v)
-                for v in buckets.values()
-            )
-        ),
-        "viable": int(
-            (
-                len(buckets) >= 1
-                and total_pairs >= min_total_pairs
-            )
-        ),
     }
 
 
-def select_bucket_width(
+def select_bucket_candidate(
     params: np.ndarray,
+    fractions: List[float],
     min_bucket_size: int,
     min_usable_buckets: int,
-    min_total_pairs: int,
+    min_rho_buckets: int,
+    min_pairs_total: int,
+    min_pairs_for_rho: int,
+    max_normalized_distance: float,
+    seed: int,
+    max_pairs_per_bucket: int,
 ):
-    """
-    Select the narrowest parameter quantization that gives enough
-    within-bucket pairs.
+    trials = []
 
-    No representation is loaded during this stage.
-    """
+    best = None
 
-    fractions = [
-        0.001,
-        0.0025,
-        0.005,
-        0.01,
-        0.02,
-        0.05,
-        0.10,
-        0.20,
-        0.30,
-        0.50,
-    ]
+    for fraction in fractions:
 
-    candidates = robust_quantize(
-        params,
-        fractions,
-    )
-
-    report = []
-
-    for (
-        fraction,
-        widths,
-        mins,
-        keys,
-    ) in candidates:
-
-        buckets = bucket_map(
-            keys,
-            min_bucket_size,
+        result = evaluate_candidate_bins(
+            params=params,
+            fraction=fraction,
+            min_bucket_size=min_bucket_size,
+            min_pairs_for_rho=min_pairs_for_rho,
+            min_normalized_distance=max_normalized_distance,
+            seed=seed,
+            max_pairs_per_bucket=max_pairs_per_bucket,
         )
 
-        result = viability(
-            buckets,
-            min_total_pairs,
-        )
+        report = {
+            "fraction": result["fraction"],
+            "bin_widths": result["widths"].tolist(),
+            "usable_buckets": result["usable_buckets"],
+            "total_pairs": result["total_pairs"],
+            "max_bucket_size": result["max_bucket_size"],
+        }
 
-        result.update(
-            {
-                "relative_bin_fraction": float(
-                    fraction
-                ),
-                "bin_width_l_lattice": float(
-                    widths[0]
-                ),
-                "bin_width_h_atom": float(
-                    widths[1]
-                ),
-                "bin_width_r_atom": float(
-                    widths[2]
-                ),
-            }
+        trials.append(
+            report
         )
-
-        report.append(result)
 
         if (
             result["usable_buckets"]
             >= min_usable_buckets
-            and result["total_possible_pairs"]
-            >= min_total_pairs
+            and result["total_pairs"]
+            >= min_pairs_total
+            and result["usable_buckets"]
+            >= min_rho_buckets
         ):
-            return (
-                fraction,
-                widths,
-                mins,
-                keys,
-                buckets,
-                report,
-            )
+            best = result
+            break
 
-    raise RuntimeError(
-        "Bucket viability failed. "
-        "No tested quantization width produced "
-        f">={min_usable_buckets} usable buckets and "
-        f">={min_total_pairs} possible pairs. "
-        "Increase --max-geoms or widen the candidate fractions."
-    )
+    # If no candidate reaches the requested threshold, choose the candidate
+    # with the largest number of valid buckets/pairs and STOP with a clear
+    # message rather than silently running an underpowered test.
+    if best is None:
 
-
-def cosine_token_distance(
-    X: torch.Tensor,
-    pairs: np.ndarray,
-) -> np.ndarray:
-    """
-    Representation distance:
-
-        1 - mean tokenwise cosine similarity
-
-    over aligned 256 spatial tokens.
-
-    X shape:
-        [N, T, D]
-    """
-
-    output = np.empty(
-        len(pairs),
-        dtype=np.float64,
-    )
-
-    for j, (
-        a,
-        b,
-    ) in enumerate(pairs):
-
-        xa = X[a].float()
-        xb = X[b].float()
-
-        cosine = torch.nn.functional.cosine_similarity(
-            xa,
-            xb,
-            dim=-1,
-        ).mean()
-
-        output[j] = float(
-            1.0 - cosine.item()
+        ranked = sorted(
+            trials,
+            key=lambda x: (
+                x["usable_buckets"],
+                x["total_pairs"],
+            ),
+            reverse=True,
         )
 
-    return output
-
-
-def euclidean_distance(
-    X: np.ndarray,
-    pairs: np.ndarray,
-) -> np.ndarray:
-
-    output = np.empty(
-        len(pairs),
-        dtype=np.float64,
-    )
-
-    for j, (
-        a,
-        b,
-    ) in enumerate(pairs):
-
-        delta = X[a] - X[b]
-
-        output[j] = float(
-            np.sqrt(
-                np.dot(
-                    delta,
-                    delta,
-                )
-            )
+        raise RuntimeError(
+            "No quantization produced the requested statistical viability.\n"
+            f"Best candidate: {ranked[0] if ranked else 'none'}\n"
+            "This is a DATA-AVAILABILITY limitation. Do not loosen the "
+            "thresholds silently. Either increase --max-geoms if more "
+            "validation geometries exist, or explicitly adjust the matching "
+            "criteria and document the change."
         )
 
-    return output
+    return best, trials
 
 
 def hamming_distance(
@@ -683,7 +723,7 @@ def hamming_distance(
     pairs: np.ndarray,
 ) -> np.ndarray:
 
-    output = np.empty(
+    result = np.empty(
         len(pairs),
         dtype=np.float64,
     )
@@ -693,50 +733,249 @@ def hamming_distance(
         b,
     ) in enumerate(pairs):
 
-        output[j] = float(
+        result[j] = float(
             np.mean(
                 occupancy[a]
                 != occupancy[b]
             )
         )
 
-    return output
+    return result
 
 
-def spearman_for_pairs(
+def euclidean_distance(
+    features: np.ndarray,
+    pairs: np.ndarray,
+) -> np.ndarray:
+
+    result = np.empty(
+        len(pairs),
+        dtype=np.float64,
+    )
+
+    for j, (
+        a,
+        b,
+    ) in enumerate(pairs):
+
+        delta = (
+            features[a]
+            - features[b]
+        )
+
+        result[j] = float(
+            np.linalg.norm(
+                delta
+            )
+        )
+
+    return result
+
+
+def aligned_token_cosine_distance(
+    embeddings: torch.Tensor,
+    pairs: np.ndarray,
+) -> np.ndarray:
+    """
+    No token mean-pooling.
+
+    Distance for pair (a,b):
+        1 - mean_t cosine(z_a,t, z_b,t)
+    """
+
+    result = np.empty(
+        len(pairs),
+        dtype=np.float64,
+    )
+
+    for j, (
+        a,
+        b,
+    ) in enumerate(pairs):
+
+        za = embeddings[a].float()
+        zb = embeddings[b].float()
+
+        cosine = (
+            torch.nn.functional
+            .cosine_similarity(
+                za,
+                zb,
+                dim=-1,
+            )
+            .mean()
+        )
+
+        result[j] = (
+            1.0
+            - float(cosine.item())
+        )
+
+    return result
+
+
+def within_bucket_spearman(
     shape_distance: np.ndarray,
     representation_distance: np.ndarray,
-) -> float:
+):
     """
-    Spearman rho for a single bucket.
+    Compute Spearman rho for ONE bucket only.
 
-    Returns NaN if either distance vector has insufficient variation.
+    No cross-bucket pooling occurs here.
     """
 
     if len(shape_distance) < 3:
-        return float("nan")
+        return None
 
-    if np.allclose(
-        shape_distance,
-        shape_distance[0],
+    if (
+        np.allclose(
+            shape_distance,
+            shape_distance[0],
+        )
+        or np.allclose(
+            representation_distance,
+            representation_distance[0],
+        )
     ):
-        return float("nan")
+        return None
 
-    if np.allclose(
-        representation_distance,
-        representation_distance[0],
-    ):
-        return float("nan")
-
-    result = spearmanr(
+    rho = spearmanr(
         shape_distance,
         representation_distance,
     ).statistic
 
-    if result is None or not np.isfinite(result):
-        return float("nan")
+    if rho is None or not np.isfinite(rho):
+        return None
 
-    return float(result)
+    return float(rho)
+
+
+def aggregate_rhos(
+    bucket_results: List[dict],
+    rho_key: str,
+):
+    """
+    Aggregate per-bucket rho values only.
+
+    Provides:
+      - median rho
+      - unweighted mean rho
+      - pair-count-weighted mean rho
+      - number of valid buckets
+      - total pairs contributing to valid buckets
+    """
+
+    values = []
+    weighted_values = []
+    weights = []
+
+    for record in bucket_results:
+
+        rho = record[rho_key]
+
+        if rho is None or not np.isfinite(rho):
+            continue
+
+        pair_count = int(
+            record["n_pairs"]
+        )
+
+        values.append(
+            float(rho)
+        )
+
+        weighted_values.append(
+            float(rho)
+            * pair_count
+        )
+
+        weights.append(
+            pair_count
+        )
+
+    if not values:
+        return {
+            "n_valid_buckets": 0,
+            "total_pairs": 0,
+            "median_rho": None,
+            "mean_rho": None,
+            "weighted_mean_rho": None,
+        }
+
+    total_weight = sum(
+        weights
+    )
+
+    return {
+        "n_valid_buckets": int(
+            len(values)
+        ),
+        "total_pairs": int(
+            total_weight
+        ),
+        "median_rho": float(
+            np.median(values)
+        ),
+        "mean_rho": float(
+            np.mean(values)
+        ),
+        "weighted_mean_rho": float(
+            np.average(
+                values,
+                weights=weights,
+            )
+        ),
+    }
+
+
+def parameter_spread_stats(
+    params: np.ndarray,
+    pairs: np.ndarray,
+    spans: np.ndarray,
+):
+    if len(pairs) == 0:
+        return {
+            "max_normalized_distance": None,
+            "mean_normalized_distance": None,
+            "median_normalized_distance": None,
+        }
+
+    distances = []
+
+    normalization = np.maximum(
+        spans,
+        1e-12,
+    )
+
+    for a, b in pairs:
+
+        delta = (
+            params[a]
+            - params[b]
+        ) / normalization
+
+        distances.append(
+            np.linalg.norm(
+                delta
+            )
+        )
+
+    values = np.asarray(
+        distances,
+        dtype=np.float64,
+    )
+
+    return {
+        "max_normalized_distance": float(
+            values.max()
+        ),
+        "mean_normalized_distance": float(
+            values.mean()
+        ),
+        "median_normalized_distance": float(
+            np.median(values)
+        ),
+    }
 
 
 def checksum(
@@ -752,27 +991,42 @@ def checksum(
     )
 
 
+def build_random_encoder(
+    hidden: int,
+    heads: int,
+    depth: int,
+    seed: int,
+    device: torch.device,
+):
+    with torch.random.fork_rng(
+        devices=[]
+    ):
+        torch.manual_seed(
+            seed
+        )
+
+        return GeometryEncoder(
+            hidden=hidden,
+            num_heads=heads,
+            depth=depth,
+        ).to(device)
+
+
 def collect_embeddings(
     encoder: torch.nn.Module,
     geometry_batches: List[torch.Tensor],
     device: torch.device,
-) -> torch.Tensor:
-    """
-    Run a frozen encoder over deterministic geometry batches.
-    """
-
+):
     actual_device = next(
         encoder.parameters()
     ).device
 
     if actual_device != device:
         raise RuntimeError(
-            f"Encoder is on {actual_device}, "
-            f"requested {device}"
+            f"Encoder is on {actual_device}, requested {device}"
         )
 
     was_training = encoder.training
-
     encoder.eval()
 
     try:
@@ -781,11 +1035,11 @@ def collect_embeddings(
 
             chunks = [
                 encoder(
-                    geometries.to(device)
+                    batch.to(device)
                 )
                 .detach()
                 .cpu()
-                for geometries in geometry_batches
+                for batch in geometry_batches
             ]
 
         return torch.cat(
@@ -800,34 +1054,7 @@ def collect_embeddings(
         )
 
 
-def build_random_encoder(
-    hidden: int,
-    heads: int,
-    depth: int,
-    seed: int,
-    device: torch.device,
-) -> GeometryEncoder:
-    """
-    Build random encoder without changing global RNG state.
-    """
-
-    with torch.random.fork_rng(
-        devices=[]
-    ):
-
-        torch.manual_seed(
-            seed
-        )
-
-        return GeometryEncoder(
-            hidden=hidden,
-            num_heads=heads,
-            depth=depth,
-        ).to(device)
-
-
-def main() -> None:
-
+def main():
     args = parse_args()
 
     device = torch.device(
@@ -868,16 +1095,16 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------
-    # Load ground-truth data BEFORE representations.
+    # 1. Ground-truth data
     # ------------------------------------------------------------
 
-    validation_mat = resolve_val_mat(
+    val_mat = resolve_val_mat(
         cfg,
         args.data_root,
     )
 
     geometries, params = load_geometries(
-        validation_mat,
+        val_mat,
         args.max_geoms,
     )
 
@@ -889,142 +1116,93 @@ def main() -> None:
         occupancy
     )
 
-    # ------------------------------------------------------------
-    # Phase 1: bucket viability
-    #
-    # Absolutely no learned representation is used here.
-    # ------------------------------------------------------------
-
-    (
-        selected_fraction,
-        bin_widths,
-        parameter_mins,
-        bucket_keys,
-        buckets,
-        viability_report,
-    ) = select_bucket_width(
-        params=params,
-        min_bucket_size=args.min_bucket_size,
-        min_usable_buckets=args.min_usable_buckets,
-        min_total_pairs=args.min_total_pairs,
-    )
-
-    frozen_pairs = pair_indices(
-        buckets=buckets,
-        seed=args.probe_seed,
-        max_pairs_per_bucket=args.max_pairs_per_bucket,
-    )
-
-    usable_pair_buckets = {
-        key: pairs
-        for key, pairs in frozen_pairs.items()
-        if len(pairs)
-        >= args.min_pairs_for_rho
-    }
-
-    total_frozen_pairs = sum(
-        len(pairs)
-        for pairs in usable_pair_buckets.values()
-    )
-
-    if (
-        len(usable_pair_buckets)
-        < args.min_usable_buckets
-        or total_frozen_pairs
-        < args.min_total_pairs
+    if shape_features.shape != (
+        len(geometries),
+        17,
     ):
         raise RuntimeError(
-            "After pair capping the frozen pair set is still too sparse: "
-            f"buckets={len(usable_pair_buckets)}, "
-            f"pairs={total_frozen_pairs}. "
-            "Increase --max-geoms or --max-pairs-per-bucket."
+            f"Shape baseline has wrong shape: "
+            f"{shape_features.shape}"
         )
 
-    print()
-    print(
-        "BUCKET VIABILITY"
-    )
-    print(
-        "=" * 78
+    # ------------------------------------------------------------
+    # 2. Select and FREEZE bucket/pair set using only ground truth
+    # ------------------------------------------------------------
+
+    fractions = parse_bin_fractions(
+        args.bin_fractions
     )
 
+    selected, viability_trials = (
+        select_bucket_candidate(
+            params=params,
+            fractions=fractions,
+            min_bucket_size=args.min_bucket_size,
+            min_usable_buckets=args.min_usable_buckets,
+            min_rho_buckets=args.min_rho_buckets,
+            min_pairs_total=args.min_pairs_total,
+            min_pairs_for_rho=args.min_pairs_for_rho,
+            max_normalized_distance=(
+                args.max_normalized_param_distance
+            ),
+            seed=args.probe_seed,
+            max_pairs_per_bucket=(
+                args.max_pairs_per_bucket
+            ),
+        )
+    )
+
+    frozen_pairs = selected[
+        "pairs"
+    ]
+
+    selected_spans = selected[
+        "spans"
+    ]
+
+    total_frozen_pairs = sum(
+        len(v)
+        for v in frozen_pairs.values()
+    )
+
+    print()
+    print("=" * 78)
+    print("GROUND-TRUTH BUCKET VIABILITY")
+    print("=" * 78)
+
     print(
-        f"validation geometries used : "
+        f"geometries used          : "
         f"{len(geometries)}"
     )
 
     print(
-        f"selected relative bin width: "
-        f"{selected_fraction:.6g} × parameter range"
+        f"selected bin fraction    : "
+        f"{selected['fraction']:.6g}"
     )
 
     print(
-        "bin widths [l,h,r]         : "
-        f"{bin_widths[0]:.8g}, "
-        f"{bin_widths[1]:.8g}, "
-        f"{bin_widths[2]:.8g}"
+        "bin widths [l,h,r]       : "
+        f"{selected['widths'][0]:.8g}, "
+        f"{selected['widths'][1]:.8g}, "
+        f"{selected['widths'][2]:.8g}"
     )
 
     print(
-        f"usable buckets             : "
-        f"{len(buckets)}"
+        f"usable rho buckets      : "
+        f"{selected['usable_buckets']}"
     )
 
     print(
-        f"usable pair buckets        : "
-        f"{len(usable_pair_buckets)}"
-    )
-
-    print(
-        f"frozen pair count          : "
+        f"frozen pair count       : "
         f"{total_frozen_pairs}"
     )
 
     print(
-        "[OK] bucket/pair set is viable"
+        "[OK] pair set frozen before representation loading"
     )
 
-    bucket_report = {
-        "selected_relative_bin_fraction": float(
-            selected_fraction
-        ),
-        "bin_widths": {
-            "l_lattice": float(
-                bin_widths[0]
-            ),
-            "h_atom": float(
-                bin_widths[1]
-            ),
-            "r_atom": float(
-                bin_widths[2]
-            ),
-        },
-        "parameter_min": (
-            parameter_mins
-            .tolist()
-        ),
-        "parameter_max": (
-            params.max(
-                axis=0
-            ).tolist()
-        ),
-        "viability_trials": viability_report,
-        "usable_buckets": int(
-            len(buckets)
-        ),
-        "usable_pair_buckets": int(
-            len(
-                usable_pair_buckets
-            )
-        ),
-        "frozen_pair_count": int(
-            total_frozen_pairs
-        ),
-    }
-
     # ------------------------------------------------------------
-    # Phase 2: load trained / released / random representations.
-    # The pair set is already frozen.
+    # 3. Load representations only after freezing pairs
     # ------------------------------------------------------------
 
     spectrum_path = (
@@ -1075,7 +1253,6 @@ def main() -> None:
         )
     ]
 
-    # Trained EMA representation.
     trained_embeddings = collect_embeddings(
         model.ema,
         geometry_batches,
@@ -1083,30 +1260,26 @@ def main() -> None:
     )
 
     hidden = int(
-        checkpoint_cfg["model"]
-        .get(
+        checkpoint_cfg["model"].get(
             "hidden",
             384,
         )
     )
 
     heads = int(
-        checkpoint_cfg["model"]
-        .get(
+        checkpoint_cfg["model"].get(
             "num_heads",
             6,
         )
     )
 
     depth = int(
-        checkpoint_cfg["model"]
-        .get(
+        checkpoint_cfg["model"].get(
             "geo_depth",
             6,
         )
     )
 
-    # Released MetaDiT encoder.
     released_encoder = GeometryEncoder(
         hidden=hidden,
         num_heads=heads,
@@ -1130,13 +1303,12 @@ def main() -> None:
         device,
     )
 
-    # Random-init encoder.
     random_encoder = build_random_encoder(
-        hidden=hidden,
-        heads=heads,
-        depth=depth,
-        seed=args.probe_seed,
-        device=device,
+        hidden,
+        heads,
+        depth,
+        args.probe_seed,
+        device,
     )
 
     random_embeddings = collect_embeddings(
@@ -1146,174 +1318,115 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------
-    # Phase 3: same frozen pairs, same ground-truth shape distance.
+    # 4. Same frozen pairs for every method
     # ------------------------------------------------------------
 
-    bucket_results = []
+    bucket_records = []
 
-    rho_lists = {
-        "trained_ema": [],
-        "released_vit": [],
-        "random_init": [],
-        "trivial_shape": [],
-    }
-
-    for bucket_id in sorted(
-        usable_pair_buckets
+    for bucket_key in sorted(
+        frozen_pairs
     ):
 
-        pairs = (
-            usable_pair_buckets[
-                bucket_id
-            ]
-        )
+        pairs = frozen_pairs[
+            bucket_key
+        ]
 
-        # Ground-truth occupancy distance.
         shape_distance = hamming_distance(
             occupancy,
             pairs,
         )
 
-        # Shape-only trivial baseline distance.
         trivial_distance = euclidean_distance(
             shape_features,
             pairs,
         )
 
-        # Learned representation distances.
-        trained_distance = cosine_token_distance(
+        trained_distance = aligned_token_cosine_distance(
             trained_embeddings,
             pairs,
         )
 
-        released_distance = cosine_token_distance(
+        released_distance = aligned_token_cosine_distance(
             released_embeddings,
             pairs,
         )
 
-        random_distance = cosine_token_distance(
+        random_distance = aligned_token_cosine_distance(
             random_embeddings,
             pairs,
         )
 
-        rho_trained = spearman_for_pairs(
-            shape_distance,
-            trained_distance,
-        )
-
-        rho_released = spearman_for_pairs(
-            shape_distance,
-            released_distance,
-        )
-
-        rho_random = spearman_for_pairs(
-            shape_distance,
-            random_distance,
-        )
-
-        rho_trivial = spearman_for_pairs(
-            shape_distance,
-            trivial_distance,
-        )
-
-        bucket_results.append(
-            {
-                "bucket": list(
-                    bucket_id
-                ),
-                "n_samples": int(
-                    len(
-                        buckets[
-                            bucket_id
-                        ]
-                    )
-                ),
-                "n_pairs": int(
-                    len(pairs)
-                ),
-                "rho_trained_ema": (
-                    rho_trained
-                ),
-                "rho_released_vit": (
-                    rho_released
-                ),
-                "rho_random_init": (
-                    rho_random
-                ),
-                "rho_trivial_shape": (
-                    rho_trivial
-                ),
-            }
-        )
-
-        rho_lists[
-            "trained_ema"
-        ].append(
-            rho_trained
-        )
-
-        rho_lists[
-            "released_vit"
-        ].append(
-            rho_released
-        )
-
-        rho_lists[
-            "random_init"
-        ].append(
-            rho_random
-        )
-
-        rho_lists[
-            "trivial_shape"
-        ].append(
-            rho_trivial
-        )
-
-    # ------------------------------------------------------------
-    # Aggregate ONLY AFTER within-bucket correlations.
-    # ------------------------------------------------------------
-
-    def aggregate(
-        values: List[float],
-    ) -> dict:
-
-        valid = np.asarray(
-            [
-                value
-                for value in values
-                if np.isfinite(value)
-            ],
-            dtype=np.float64,
-        )
-
-        if len(valid) == 0:
-            return {
-                "n_buckets": 0,
-                "median_rho": float("nan"),
-                "mean_rho": float("nan"),
-            }
-
-        return {
-            "n_buckets": int(
-                len(valid)
+        record = {
+            "bucket": list(
+                bucket_key
             ),
-            "median_rho": float(
-                np.median(valid)
+            "n_samples": int(
+                len(
+                    selected["buckets"][
+                        bucket_key
+                    ]
+                )
             ),
-            "mean_rho": float(
-                np.mean(valid)
+            "n_pairs": int(
+                len(pairs)
+            ),
+            **parameter_spread_stats(
+                params,
+                pairs,
+                selected_spans,
+            ),
+            "rho_trained_ema": (
+                within_bucket_spearman(
+                    shape_distance,
+                    trained_distance,
+                )
+            ),
+            "rho_released_vit": (
+                within_bucket_spearman(
+                    shape_distance,
+                    released_distance,
+                )
+            ),
+            "rho_random_init": (
+                within_bucket_spearman(
+                    shape_distance,
+                    random_distance,
+                )
+            ),
+            "rho_trivial_shape": (
+                within_bucket_spearman(
+                    shape_distance,
+                    trivial_distance,
+                )
             ),
         }
 
-    aggregate_results = {
-        key: aggregate(values)
-        for key, values in rho_lists.items()
-    }
+        bucket_records.append(
+            record
+        )
 
     # ------------------------------------------------------------
-    # Read-only integrity check.
+    # 5. Aggregate only within-bucket correlations
     # ------------------------------------------------------------
+
+    aggregates = {
+        "trained_ema": aggregate_rhos(
+            bucket_records,
+            "rho_trained_ema",
+        ),
+        "released_vit": aggregate_rhos(
+            bucket_records,
+            "rho_released_vit",
+        ),
+        "random_init": aggregate_rhos(
+            bucket_records,
+            "rho_random_init",
+        ),
+        "trivial_shape": aggregate_rhos(
+            bucket_records,
+            "rho_trivial_shape",
+        ),
+    }
 
     checksum_after = checksum(
         model
@@ -1321,126 +1434,102 @@ def main() -> None:
 
     if checksum_after != checksum_before:
         raise RuntimeError(
-            "Checkpoint model parameters changed "
-            "during the spatial probe."
+            "Checkpoint parameters changed during this read-only diagnostic."
         )
 
     # ------------------------------------------------------------
-    # Print final result.
+    # 6. Human-readable output
     # ------------------------------------------------------------
 
     print()
-    print(
-        "WITHIN-BUCKET SPATIAL-STRUCTURE RESULT"
-    )
-    print(
-        "=" * 78
-    )
+    print("=" * 78)
+    print("WITHIN-BUCKET SPATIAL-STRUCTURE RESULT")
+    print("=" * 78)
 
     print(
         f"{'representation':<22}"
         f"{'median rho':>14}"
         f"{'mean rho':>14}"
-        f"{'buckets':>12}"
+        f"{'weighted rho':>16}"
+        f"{'valid buckets':>15}"
     )
 
-    print(
-        "-" * 78
-    )
+    print("-" * 78)
 
-    labels = [
-        (
-            "trained_ema",
-            "trained EMA",
-        ),
-        (
-            "released_vit",
-            "released ViT",
-        ),
-        (
-            "random_init",
-            "random init",
-        ),
-        (
-            "trivial_shape",
-            "trivial shape",
-        ),
-    ]
+    for key, label in [
+        ("trained_ema", "trained EMA"),
+        ("released_vit", "released ViT"),
+        ("random_init", "random init"),
+        ("trivial_shape", "trivial shape"),
+    ]:
 
-    for key, label in labels:
-
-        result = (
-            aggregate_results[
-                key
-            ]
-        )
+        result = aggregates[key]
 
         print(
             f"{label:<22}"
-            f"{result['median_rho']:>14.6f}"
-            f"{result['mean_rho']:>14.6f}"
-            f"{result['n_buckets']:>12d}"
+            f"{result['median_rho'] if result['median_rho'] is not None else float('nan'):>14.6f}"
+            f"{result['mean_rho'] if result['mean_rho'] is not None else float('nan'):>14.6f}"
+            f"{result['weighted_mean_rho'] if result['weighted_mean_rho'] is not None else float('nan'):>16.6f}"
+            f"{result['n_valid_buckets']:>15d}"
         )
 
-    trained_mean = (
-        aggregate_results[
-            "trained_ema"
-        ]["mean_rho"]
-    )
+    trained = aggregates[
+        "trained_ema"
+    ]["weighted_mean_rho"]
 
-    trivial_mean = (
-        aggregate_results[
-            "trivial_shape"
-        ]["mean_rho"]
-    )
+    trivial = aggregates[
+        "trivial_shape"
+    ]["weighted_mean_rho"]
 
-    random_mean = (
-        aggregate_results[
-            "random_init"
-        ]["mean_rho"]
-    )
+    random_value = aggregates[
+        "random_init"
+    ]["weighted_mean_rho"]
 
-    released_mean = (
-        aggregate_results[
-            "released_vit"
-        ]["mean_rho"]
-    )
+    released_value = aggregates[
+        "released_vit"
+    ]["weighted_mean_rho"]
+
+    print()
+    print("WEIGHTED WITHIN-BUCKET COMPARISONS")
+    print("-" * 78)
+
+    if (
+        trained is not None
+        and trivial is not None
+    ):
+        print(
+            f"trained - trivial shape : "
+            f"{trained - trivial:+.6f}"
+        )
+
+    if (
+        trained is not None
+        and random_value is not None
+    ):
+        print(
+            f"trained - random       : "
+            f"{trained - random_value:+.6f}"
+        )
+
+    if (
+        trained is not None
+        and released_value is not None
+    ):
+        print(
+            f"trained - released     : "
+            f"{trained - released_value:+.6f}"
+        )
 
     print()
     print(
-        "COMPARISONS"
+        "No automatic HEALTHY/COLLAPSED verdict is issued."
     )
     print(
-        "-" * 78
-    )
-
-    print(
-        f"trained - trivial shape : "
-        f"{trained_mean - trivial_mean:+.6f}"
-    )
-
-    print(
-        f"trained - random       : "
-        f"{trained_mean - random_mean:+.6f}"
-    )
-
-    print(
-        f"trained - released     : "
-        f"{trained_mean - released_mean:+.6f}"
-    )
-
-    print()
-    print(
-        "Interpretation must use only the within-bucket results."
-    )
-
-    print(
-        "Do not use variation between parameter buckets or the "
-        "earlier mean-pooled collapse gate to infer spatial geometry."
+        "Interpret only the within-bucket results."
     )
 
     # ------------------------------------------------------------
-    # JSON report.
+    # 7. Save complete audit report
     # ------------------------------------------------------------
 
     output_path = Path(
@@ -1458,7 +1547,7 @@ def main() -> None:
         exist_ok=True,
     )
 
-    payload = {
+    report = {
         "checkpoint": str(
             checkpoint_path
         ),
@@ -1471,28 +1560,79 @@ def main() -> None:
         "n_geometries": int(
             len(geometries)
         ),
-        "probe_seed": int(
-            args.probe_seed
-        ),
-        "bucket_selection": bucket_report,
+        "configuration": {
+            "probe_seed": int(
+                args.probe_seed
+            ),
+            "min_bucket_size": int(
+                args.min_bucket_size
+            ),
+            "min_usable_buckets": int(
+                args.min_usable_buckets
+            ),
+            "min_rho_buckets": int(
+                args.min_rho_buckets
+            ),
+            "min_pairs_total": int(
+                args.min_pairs_total
+            ),
+            "min_pairs_for_rho": int(
+                args.min_pairs_for_rho
+            ),
+            "max_pairs_per_bucket": int(
+                args.max_pairs_per_bucket
+            ),
+            "max_normalized_param_distance": float(
+                args.max_normalized_param_distance
+            ),
+            "bin_fractions": fractions,
+        },
+        "bucket_selection": {
+            "trials": viability_trials,
+            "selected_fraction": float(
+                selected["fraction"]
+            ),
+            "selected_bin_widths": (
+                selected["widths"].tolist()
+            ),
+            "selected_parameter_min": (
+                selected["mins"].tolist()
+            ),
+            "selected_parameter_max": (
+                selected["maxs"].tolist()
+            ),
+            "selected_parameter_spans": (
+                selected["spans"].tolist()
+            ),
+            "usable_buckets": int(
+                selected["usable_buckets"]
+            ),
+            "total_frozen_pairs": int(
+                total_frozen_pairs
+            ),
+        },
         "protocol": {
-            "shape_distance": (
+            "ground_truth_shape_distance": (
                 "binary occupancy Hamming distance"
             ),
             "representation_distance": (
                 "mean aligned-token cosine distance"
             ),
-            "trivial_baseline": (
-                "occupancy fraction + 4x4 coarse occupancy"
+            "trivial_shape_baseline": (
+                "occupancy fraction + 4x4 coarse occupancy grid"
             ),
             "correlation": (
-                "Spearman within each bucket; "
-                "aggregate only afterward"
+                "Spearman within bucket"
             ),
-            "pair_set_locked_from_ground_truth": True,
+            "aggregation": (
+                "median, mean, and pair-count-weighted mean "
+                "of valid within-bucket rho"
+            ),
+            "pair_set_locked_before_representation_loading": True,
+            "representation_independent_pair_selection": True,
         },
-        "aggregate_results": aggregate_results,
-        "bucket_results": bucket_results,
+        "aggregate_results": aggregates,
+        "bucket_results": bucket_records,
         "read_only_verified": True,
     }
 
@@ -1502,7 +1642,7 @@ def main() -> None:
         encoding="utf-8",
     ) as f:
         json.dump(
-            payload,
+            report,
             f,
             indent=2,
         )

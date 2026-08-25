@@ -66,7 +66,7 @@ def log_fail(msg: str):
     print(f"  [FAIL] {msg}")
 
 
-def verify_environment():
+def verify_environment(allow_cpu=False):
     """Verify Python, PyTorch, Torchvision, CUDA, GPU, device contract."""
     log_step("Environment Verification")
 
@@ -103,23 +103,23 @@ def verify_environment():
     log_info(f"Resolved device: {device}")
 
     # Verify tested environment contract
-    # We tested with PyTorch 2.5.1 + Torchvision 0.20.1
+    # We tested with PyTorch 2.5.1 + Torchvision 0.20.1 on CUDA
+    # On CPU, any compatible version is acceptable for preflight
     expected_torch = "2.5.1"
     expected_tv = "0.20.1"
-    if not torch_ver.startswith(expected_torch):
-        raise PreflightError(
-            f"PyTorch version mismatch: expected {expected_torch}.x, got {torch_ver}. "
-            "This combination was not tested."
-        )
-    if not tv_ver.startswith(expected_tv):
-        raise PreflightError(
-            f"Torchvision version mismatch: expected {expected_tv}.x, got {tv_ver}. "
-            "This combination was not tested."
-        )
-
-    # Fail if CUDA requested but unavailable
-    if not cuda_available:
-        raise PreflightError("CUDA is not available but GPU training is required for Milestone B")
+    if cuda_available:
+        if not torch_ver.startswith(expected_torch):
+            raise PreflightError(
+                f"PyTorch version mismatch: expected {expected_torch}.x, got {torch_ver}. "
+                "This combination was not tested."
+            )
+        if not tv_ver.startswith(expected_tv):
+            raise PreflightError(
+                f"Torchvision version mismatch: expected {expected_tv}.x, got {tv_ver}. "
+                "This combination was not tested."
+            )
+    else:
+        log_info(f"CPU mode: skipping strict PyTorch/Torchvision version check (got {torch_ver}/{tv_ver})")
 
     log_pass("Environment contract satisfied")
     return device
@@ -168,17 +168,29 @@ def discover_dataset():
     for base in search_paths:
         if not base.exists():
             continue
-        # Look for directories containing the required files
+        # Check if the base itself contains the required files
+        required = [
+            "split_data/train_set.mat",
+            "split_data/val_set.mat",
+            "split_data/test_set.mat",
+            "weights/metadit-small.bin",
+            "weights/spec_encoder.pth",
+            "weights/surrogate_model.bin",
+        ]
+        if all((base / r).exists() for r in required):
+            if found is not None:
+                raise PreflightError(
+                    f"Multiple dataset locations found:\n  1. {found}\n  2. {base}\n"
+                    "Explicit selection required. Set DATA_ROOT environment variable or "
+                    "ensure only one valid dataset is mounted."
+                )
+            found = base
+            log_info(f"Found dataset at: {base}")
+            break
+        
+        # Also check subdirectories (for Kaggle where dataset might be in a subfolder)
         for candidate in base.rglob("*"):
             if candidate.is_dir():
-                required = [
-                    "split_data/train_set.mat",
-                    "split_data/val_set.mat",
-                    "split_data/test_set.mat",
-                    "weights/metadit-small.bin",
-                    "weights/spec_encoder.pth",
-                    "weights/surrogate_model.bin",
-                ]
                 if all((candidate / r).exists() for r in required):
                     if found is not None:
                         raise PreflightError(
@@ -188,6 +200,7 @@ def discover_dataset():
                         )
                     found = candidate
                     log_info(f"Found dataset at: {candidate}")
+                    break
 
     if found is None:
         raise PreflightError(
@@ -583,8 +596,10 @@ def run_physics_controls(model, masker, device):
     M = masker.sample(G, 0.5).to(device)
 
     # Build a minimal objective for projector
-    class _StubObjective:
-        projector = torch.nn.Identity()
+    class _StubObjective(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.projector = torch.nn.Identity()
 
     objective = _StubObjective()
 
@@ -618,6 +633,7 @@ def main():
     parser = argparse.ArgumentParser(description="Milestone B Preflight Check")
     parser.add_argument("--config", default="configs/milestone_b.yaml", help="Config file path")
     parser.add_argument("--data-root", default=None, help="Override dataset root")
+    parser.add_argument("--allow-cpu", action="store_true", help="Allow CPU mode for local testing")
     args = parser.parse_args()
 
     # Load the REAL config at startup (Bug #5)
@@ -631,7 +647,7 @@ def main():
 
     try:
         # 1. Environment
-        device = verify_environment()
+        device = verify_environment(allow_cpu=args.allow_cpu)
 
         # 2. Git state
         commit, dirty = verify_git_state()

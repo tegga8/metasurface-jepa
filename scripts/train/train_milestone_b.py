@@ -219,8 +219,12 @@ def main():
     ds = MetaDiTDataset(os.path.join(REPO_ROOT, cfg["data"]["train_split"]),
                         max_samples=cfg["data"].get("max_train_samples", 0), seed=seed)
     val_ds = MetaDiTDataset(os.path.join(REPO_ROOT, cfg["data"]["val_split"]))
-    loader = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True,
-                        num_workers=cfg["data"].get("num_workers", 0),
+
+    # Use deterministic epoch sampler for exact resume (Bug #3)
+    from data.epoch_sampler import DeterministicEpochSampler
+    train_sampler = DeterministicEpochSampler(len(ds), seed=seed, epoch=0)
+    loader = DataLoader(ds, batch_size=cfg["train"]["batch_size"], sampler=train_sampler,
+                        shuffle=False, num_workers=cfg["data"].get("num_workers", 0),
                         drop_last=True, collate_fn=collate_batch)
 
     steps_per_epoch = max(1, len(loader))
@@ -334,7 +338,7 @@ def main():
     if args.eval_only:
         # For eval-only, we need to load checkpoint BEFORE building references
         # The checkpoint was already loaded above, so just evaluate
-        metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs,
+        metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw,
                                           need_null=args.null_goal)
         tag = "eval" + ("_null_goal" if args.null_goal else "")
         eval_path = os.path.join(out_dir, f"{run_tag}_{tag}_metrics.json")
@@ -361,6 +365,7 @@ def main():
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
+        train_sampler.set_epoch(epoch)
         for bi, (G, S) in enumerate(loader):
             # Skip batches until we reach the resume batch_index (for mid-epoch resume)
             if epoch == start_epoch and bi < start_batch_index:
@@ -418,35 +423,35 @@ def main():
                             if not best_prediction or primary < best_prediction.get("primary", float("inf")):
                                 best_prediction = {"primary": primary, "metrics": val_metrics,
                                         "step": step, "health": val_health}
-                                # Save full resumable checkpoint as best (not weights-only)
-                                save_checkpoint(best_path, model, objective, optimizer, scheduler,
-                                                cfg, step, epoch, micro_step=micro_step, batch_index=bi,
-                                                is_epoch_end=(bi == len(loader) - 1),
-                                                metrics=val_metrics, health=val_health,
-                                                ema_state=collect_ema_state(model),
-                                                best_prediction=best_prediction,
-                                                best_healthy_prediction=best_healthy_prediction,
-                                                masker_rng_state=masker.get_rng_state(),
-                                                device=device, artifact_type="best")
-                                # Also save weights-only export for convenience
-                                torch.save(saveable_state_dict(model), best_weights_path)
-                
-                            # Update best_healthy_prediction if health is HEALTHY
+# Save full resumable checkpoint as best (not weights-only)
+                            is_epoch_end = (bi == len(loader) - 1)
+                            next_batch_index = 0 if is_epoch_end else bi + 1
+                            save_checkpoint(best_path, model, objective, optimizer, scheduler,
+                                            cfg, step, epoch, micro_step=micro_step, batch_index=next_batch_index,
+                                            is_epoch_end=is_epoch_end,
+                                            metrics=val_metrics, health=val_health,
+                                            ema_state=collect_ema_state(model),
+                                            best_prediction=best_prediction,
+                                            best_healthy_prediction=best_healthy_prediction,
+                                            masker_rng_state=masker.get_rng_state(),
+                                            device=device, artifact_type="best")
+# Update best_healthy_prediction if health is HEALTHY
                             first_ratio = ratios[0]
                             if val_health.get(f"health_r{first_ratio:g}", "") == "HEALTHY":
                                 if not best_healthy_prediction or primary < best_healthy_prediction.get("primary", float("inf")):
                                     best_healthy_prediction = {"primary": primary, "metrics": val_metrics,
                                             "step": step, "health": val_health}
-                
+                        
                             print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
 
             is_epoch_end = (bi == len(loader) - 1)
+            next_batch_index = 0 if is_epoch_end else bi + 1
             ckpt_now = (cfg["train"].get("ckpt_every_steps", 0)
                         and step % cfg["train"]["ckpt_every_steps"] == 0) or \
                 is_epoch_end
             if ckpt_now:
                 save_checkpoint(ckpt_path, model, objective, optimizer, scheduler,
-                                cfg, step, epoch, micro_step=micro_step, batch_index=bi,
+                                cfg, step, epoch, micro_step=micro_step, batch_index=next_batch_index,
                                 is_epoch_end=is_epoch_end,
                                 metrics=val_metrics if step % opt_cfg[
                                     "val_every_steps"] == 0 else {},
@@ -469,7 +474,7 @@ def main():
             break
 
     # final eval
-    final = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs,
+    final = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw,
                                     need_null=True)
     gaps = [final[k] for k in final if k.startswith("gap_cos_err_r")
             and isinstance(final[k], float)]

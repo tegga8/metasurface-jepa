@@ -106,6 +106,7 @@ ALLOWED_CONTEXT = {
         "src/data/mask.py",  # BlockMasker uses Generator
         "src/losses/sigreg.py",  # SIGReg uses Generator
         "src/runtime/physics_controls.py",  # Physics controls use Generator
+        "src/data/epoch_sampler.py",  # DeterministicEpochSampler uses Generator
         "scripts/train/train_milestone_b.py",  # Seed setting in training script
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests

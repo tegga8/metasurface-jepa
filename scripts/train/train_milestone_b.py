@@ -45,8 +45,9 @@ from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
 from assembly import build_model, saveable_state_dict
 from losses.objectives import build_objective
-from runtime.device import resolve_device
+from runtime.device import resolve_device, assert_module_device
 from train.engine import collect_ema_state, save_checkpoint, load_checkpoint
+from runtime.reproducibility import set_seed
 
 PIXEL_GRID = 16
 
@@ -80,12 +81,6 @@ def build_scheduler(optimizer, base_lr, warmup_steps, total_steps):
     cos = CosineWarmup(base_lr, warmup_steps, total_steps)
     return torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=lambda e: cos.factor(max(0, int(e))))
-
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed_all(seed)
 
 
 def validate_config(cfg, total_steps):
@@ -131,15 +126,17 @@ def _assert_no_ema_gradients(model, objective_name, step):
 # evaluation
 # ---------------------------------------------------------------------------
 
-def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs, need_null=False):
+def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_raw, need_null=False):
     """Shared metric path via the engine's FixedValidation: in-loop validation,
     eval-only, and final eval all use the exact same batches/masks/metric
-    (projection through objective.projector, never a model attribute). refs
-    must contain a healthy released-init reference per ratio (precomputed)."""
+    (projection through objective.projector, never a model attribute).
+    refs_raw must contain raw healthy references per ratio; projection uses
+    the current objective's projector (Bug #10 fix)."""
     metrics = {}
     for r, fv in sorted(fixed_vals.items()):
-        ref = refs[r]
-        m, health = fv.evaluate(model, objective, ref["raw"], ref["proj"])
+        raw_ref = refs_raw[r]
+        # Pass None for healthy_proj so evaluate() projects with current objective's projector
+        m, health = fv.evaluate(model, objective, raw_ref, None)
         # Dynamic ratio key per hardening spec
         ratio_key = f"cos_err_r{r:g}"
         metrics[ratio_key] = m.get(ratio_key, m.get("cos_err_r0.5", 0.0))
@@ -155,12 +152,10 @@ def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs, need_null=False)
 # ---------------------------------------------------------------------------
 
 def _load_train_checkpoint(path, model, objective, optimizer, scheduler, device, masker):
-    obj = load_checkpoint(path, model, objective, optimizer, scheduler, device)
+    obj = load_checkpoint(path, model, objective, optimizer, scheduler, device, masker=masker)
     from train.engine import restore_ema_state
     restore_ema_state(model, obj.get("ema_state"))
-    # Restore masker RNG state for exact resume
-    if "masker_rng_state" in obj and obj["masker_rng_state"] is not None:
-        masker.set_rng_state(obj["masker_rng_state"])
+    # Masker RNG is now restored inside load_checkpoint (Bug #9)
     return obj
 
 
@@ -207,14 +202,11 @@ def main():
         cfg["data"]["max_train_samples"] = 8
         cfg["data"]["num_workers"] = 0
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device(cfg["train"].get("device", "cuda"))
-        if device.type == "cuda" and device.index is None:
-            device = torch.device(f"cuda:{torch.cuda.current_device()}")
-    else:
-        device = torch.device("cpu")
+    requested_device = args.device or cfg["train"].get("device", "auto")
+    device = resolve_device(requested_device)
+
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"Resolved CUDA device {device}, but CUDA is unavailable")
 
     seed = args.seed if args.seed is not None else cfg["train"]["seed"]
     set_seed(seed)
@@ -254,6 +246,8 @@ def main():
                         init_from_metadit=cfg["model"].get("init_from_metadit", True),
                         metadit_weights=os.path.join(REPO_ROOT, cfg["weights"]["metadit"]))
     model.ema.set_total_steps(total_steps)
+    assert_module_device(model, device, "model")
+
     # Phase-2 plumbing fix A: the objective owns trainable projector parameters
     # (VICReg/Barlow/LeJEPA projectors) and must live on the SAME device as the
     # model — a CPU-resident objective crashes on the first CUDA forward
@@ -262,11 +256,7 @@ def main():
         objective_name, cfg.get("objective_params", {}).get(objective_name, {}),
         projector_input_dim=cfg["model"].get("hidden", 384),
     ).to(device)
-    objective_params = list(objective.parameters())
-    if objective_params:  # every registered objective owns projector parameters
-        objective_device = objective_params[0].device
-        assert objective_device == device, (
-            f"Objective parameters are on {objective_device}, expected {device}")
+    assert_module_device(objective, device, "objective")
 
     # fixed validation + healthy released-init references (per ratio, same masks)
     from train.engine import (build_deterministic_reference,
@@ -275,7 +265,7 @@ def main():
     batch_size = cfg["train"]["batch_size"]
     n = max(1, min(val_bs * batch_size, len(val_ds)))
     mask_seed = cfg["mask"].get("mask_seed", 12345)
-    fixed_vals, refs, refs_model = {}, {}, None
+    fixed_vals, refs_raw, refs_model = {}, {}, None
     for r in ratios:
         fv = fixed_validation_from_loader(val_ds, n, batch_size, device,
                                           ratio=float(r), mask_seed=mask_seed)
@@ -289,7 +279,9 @@ def main():
                                                                  cfg["weights"]["metadit"])))
             refs_model.eval()
         fixed_vals[r] = fv
-        refs[r] = healthy_references(refs_model, fv, objective=objective)
+        # Store only raw healthy references; projected stats computed at validation time
+        # using the current objective's projector (Bug #10)
+        refs_raw[r] = healthy_references(refs_model, fv, objective=None)["raw"]
 
     # optimizer owns model trainable params + objective trainable params, never EMA
     trainable = [p for p in model.parameters() if p.requires_grad] \
@@ -315,29 +307,33 @@ def main():
     ckpt_path = os.path.join(out_dir, f"{run_tag}_latest.pt")
     best_path = os.path.join(out_dir, f"{run_tag}_best_model.pt")
     best_weights_path = os.path.join(out_dir, f"{run_tag}_best_weights.pt")
-    start_step, start_epoch, start_micro_step = 0, 0, 0
+    start_step, start_epoch, start_micro_step, start_batch_index = 0, 0, 0, 0
     best_prediction, best_healthy_prediction = {}, {}
+    
     if args.resume:
         obj = _load_train_checkpoint(args.resume, model, objective, optimizer,
                                      scheduler, device, masker)
         start_step = obj["step"] + 1
         start_epoch = obj["epoch"]
         start_micro_step = obj.get("micro_step", 0)
+        start_batch_index = obj.get("batch_index", 0)
         # Handle epoch-end vs mid-epoch resume
         if not obj.get("is_epoch_end", False):
-            # Mid-epoch checkpoint: start_epoch is correct, micro_step tells us where in the epoch
+            # Mid-epoch checkpoint: start_epoch is correct, batch_index tells us where in the epoch
             pass
         else:
-            # Epoch-end checkpoint: next epoch
+            # Epoch-end checkpoint: next epoch, start from batch 0
             start_epoch += 1
-            start_micro_step = 0
+            start_batch_index = 0
         best_prediction = obj.get("best_prediction", {})
         best_healthy_prediction = obj.get("best_healthy_prediction", {})
         print(f"[milestone_b] resumed from {args.resume}: step={start_step} "
-              f"epoch={start_epoch} micro_step={start_micro_step} "
+              f"epoch={start_epoch} micro_step={start_micro_step} batch_index={start_batch_index} "
               f"objective={objective_name}")
 
     if args.eval_only:
+        # For eval-only, we need to load checkpoint BEFORE building references
+        # The checkpoint was already loaded above, so just evaluate
         metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals, refs,
                                           need_null=args.null_goal)
         tag = "eval" + ("_null_goal" if args.null_goal else "")
@@ -348,11 +344,12 @@ def main():
         print(json.dumps(metrics, indent=2))
         return
 
-    # ---- training loop ----
+# ---- training loop ----
     print(f"[milestone_b] training objective={objective_name} ({exp}) ...")
     optimizer.zero_grad(set_to_none=True)
     step = start_step
     micro_step = start_micro_step
+    batch_index = start_batch_index
     t_start = time.time()
     accum = int(opt_cfg.get("grad_accum", 1))
     if accum < 1:
@@ -365,6 +362,10 @@ def main():
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
         for bi, (G, S) in enumerate(loader):
+            # Skip batches until we reach the resume batch_index (for mid-epoch resume)
+            if epoch == start_epoch and bi < start_batch_index:
+                continue
+                
             if args.max_steps and step >= args.max_steps:
                 break
             G, S = G.to(device), S.to(device)
@@ -404,25 +405,40 @@ def main():
                 loss_accum = 0.0
 
             if step % opt_cfg["val_every_steps"] == 0:
-                val_metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals,
-                                                      refs, need_null=False)
-                primary = val_metrics.get(f"cos_err_r{ratios[0]:g}", float("inf"))
-                if not best_prediction or primary < best_prediction.get("primary", float("inf")):
-                    best_prediction = {"primary": primary, "metrics": val_metrics,
-                            "step": step}
-                    # Save full resumable checkpoint as best (not weights-only)
-                    save_checkpoint(best_path, model, objective, optimizer, scheduler,
-                                    cfg, step, epoch, micro_step=micro_step,
-                                    is_epoch_end=(bi == len(loader) - 1),
-                                    metrics=val_metrics, health=None,
-                                    ema_state=collect_ema_state(model),
-                                    best_prediction=best_prediction,
-                                    best_healthy_prediction=best_healthy_prediction,
-                                    masker_rng_state=masker.get_rng_state(),
-                                    device=device, artifact_type="best")
-                    # Also save weights-only export for convenience
-                    torch.save(saveable_state_dict(model), best_weights_path)
-                print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
+                            val_metrics = _jepa_fixed_val_metrics(model, objective, fixed_vals,
+                                                                  refs_raw, need_null=False)
+                            primary = val_metrics.get(f"cos_err_r{ratios[0]:g}", float("inf"))
+                            # Evaluate health for each ratio
+                            val_health = {}
+                            for r, fv in fixed_vals.items():
+                                raw_ref = refs_raw[r]
+                                m, health = fv.evaluate(model, objective, raw_ref, None)
+                                val_health[f"health_r{r:g}"] = health["status"]
+                
+                            if not best_prediction or primary < best_prediction.get("primary", float("inf")):
+                                best_prediction = {"primary": primary, "metrics": val_metrics,
+                                        "step": step, "health": val_health}
+                                # Save full resumable checkpoint as best (not weights-only)
+                                save_checkpoint(best_path, model, objective, optimizer, scheduler,
+                                                cfg, step, epoch, micro_step=micro_step, batch_index=bi,
+                                                is_epoch_end=(bi == len(loader) - 1),
+                                                metrics=val_metrics, health=val_health,
+                                                ema_state=collect_ema_state(model),
+                                                best_prediction=best_prediction,
+                                                best_healthy_prediction=best_healthy_prediction,
+                                                masker_rng_state=masker.get_rng_state(),
+                                                device=device, artifact_type="best")
+                                # Also save weights-only export for convenience
+                                torch.save(saveable_state_dict(model), best_weights_path)
+                
+                            # Update best_healthy_prediction if health is HEALTHY
+                            first_ratio = ratios[0]
+                            if val_health.get(f"health_r{first_ratio:g}", "") == "HEALTHY":
+                                if not best_healthy_prediction or primary < best_healthy_prediction.get("primary", float("inf")):
+                                    best_healthy_prediction = {"primary": primary, "metrics": val_metrics,
+                                            "step": step, "health": val_health}
+                
+                            print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
 
             is_epoch_end = (bi == len(loader) - 1)
             ckpt_now = (cfg["train"].get("ckpt_every_steps", 0)
@@ -430,7 +446,7 @@ def main():
                 is_epoch_end
             if ckpt_now:
                 save_checkpoint(ckpt_path, model, objective, optimizer, scheduler,
-                                cfg, step, epoch, micro_step=micro_step,
+                                cfg, step, epoch, micro_step=micro_step, batch_index=bi,
                                 is_epoch_end=is_epoch_end,
                                 metrics=val_metrics if step % opt_cfg[
                                     "val_every_steps"] == 0 else {},
@@ -469,7 +485,7 @@ def main():
     print(f"[milestone_b] final metrics -> {final_path}")
     print(json.dumps(final, indent=2))
     save_checkpoint(ckpt_path, model, objective, optimizer, scheduler, cfg,
-                    step - 1, epoch, micro_step=micro_step,
+                    step - 1, epoch, micro_step=micro_step, batch_index=0,
                     is_epoch_end=True,
                     metrics=final, health=None,
                     ema_state=collect_ema_state(model),

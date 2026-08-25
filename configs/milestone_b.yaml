@@ -93,7 +93,7 @@ train:
   clip_grad_norm: 1.0
   save_optimizer: true         # false on Kaggle if checkpoint push size matters
   ckpt_every_steps: 0          # 0 = every epoch
-  val_every_steps: 2000
+  val_every_steps: 200
   val_batches: 50
   log_every_steps: 25
   seed: 0

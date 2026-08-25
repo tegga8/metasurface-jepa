@@ -68,10 +68,11 @@ Do not change these without re-running the full preflight suite. The preflight s
    This verifies: environment contract, git state, dataset, model/objective, tiny training,
    validation, physics controls, checkpoint save/load/resume, and config validation.
    **Exit code 1 = DO NOT START TRAINING.**
-5. Symlink or point config paths at the Kaggle input dataset instead of `data/metadit/`:
-   ```python
-   !ln -s /kaggle/input/<dataset-name> data/metadit
-   ```
+5. **Run preflight to discover and link dataset** (replaces manual symlink):
+    ```python
+    !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml
+    ```
+    The preflight will auto-discover the dataset location and create the `data/metadit` symlink.
 6. Confirm GPU:
    ```python
    !nvidia-smi

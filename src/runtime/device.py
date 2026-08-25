@@ -23,18 +23,34 @@ def resolve_device(device_spec: str | torch.device | None = None) -> torch.devic
         explicit "cuda:N" is respected.
     """
     if device_spec is None or device_spec == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{torch.cuda.current_device()}")
+        return torch.device("cpu")
 
     if isinstance(device_spec, torch.device):
+        if device_spec.type == "cuda":
+            index = (
+                torch.cuda.current_device()
+                if device_spec.index is None
+                else device_spec.index
+            )
+            return torch.device(f"cuda:{index}")
         return device_spec
 
     if isinstance(device_spec, str):
         s = device_spec.strip().lower()
+
         if s == "cpu":
             return torch.device("cpu")
+
         if s == "cuda":
-            return torch.device("cuda")
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA requested but CUDA is unavailable")
+            return torch.device(f"cuda:{torch.cuda.current_device()}")
+
         if s.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                raise RuntimeError(f"{s} requested but CUDA is unavailable")
             return torch.device(s)
 
     raise ValueError(f"Unrecognized device specification: {device_spec!r}")

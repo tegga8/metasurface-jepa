@@ -12,6 +12,7 @@ Exit codes:
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -215,26 +216,35 @@ def discover_dataset():
     return str(found)
 
 
-def verify_model_objective(device, data_root):
-    """Construct model and objective, verify shapes and device placement."""
+import math
+
+def compute_total_optimizer_steps(cfg, dataset_size):
+    """Compute total optimizer steps from config and dataset size."""
+    batch_size = int(cfg["train"]["batch_size"])
+    grad_accum = int(cfg["train"].get("grad_accum", 1))
+    epochs = int(cfg["train"]["epochs"])
+
+    micro_batches_per_epoch = dataset_size // batch_size
+    if micro_batches_per_epoch < 1:
+        raise ValueError("Dataset is smaller than one training batch")
+
+    optimizer_steps_per_epoch = math.ceil(
+        micro_batches_per_epoch / grad_accum
+    )
+
+    return optimizer_steps_per_epoch * epochs
+
+
+def verify_model_objective(device, data_root, full_cfg):
+    """Construct model and objective using real config, verify shapes and device placement."""
     log_step("Model + Objective Construction")
 
-    cfg = {
-        "model": {"hidden": 384, "num_heads": 6, "geo_depth": 6, "predictor_depth": 8,
-                  "goal_tokens": 16, "num_predictor_heads": 6,
-                  "ema_momentum_start": 0.996, "ema_momentum_end": 0.999},
-        "weights": {
-            "spectrum": str(Path(data_root) / "weights" / "spec_encoder.pth"),
-            "metadit": str(Path(data_root) / "weights" / "metadit-small.bin"),
-        },
-    }
-
     model = build_model(
-        cfg["model"],
-        cfg["weights"]["spectrum"],
+        full_cfg["model"],
+        full_cfg["weights"]["spectrum"],
         device=device,
         init_from_metadit=True,
-        metadit_weights=cfg["weights"]["metadit"],
+        metadit_weights=full_cfg["weights"]["metadit"],
     )
     log_info("Model built successfully")
 
@@ -245,8 +255,8 @@ def verify_model_objective(device, data_root):
     log_info(f"Model device: {model_device}")
 
     objective = build_objective(
-        "jepa_vicreg", {},
-        projector_input_dim=cfg["model"]["hidden"],
+        "jepa_vicreg", full_cfg.get("objective_params", {}).get("jepa_vicreg", {}),
+        projector_input_dim=full_cfg["model"]["hidden"],
     ).to(device)
     log_info("Objective built successfully")
 
@@ -271,16 +281,27 @@ def verify_model_objective(device, data_root):
     if missing:
         raise PreflightError(f"Model output missing keys: {missing}")
 
+    # Full model output shape verification (Bug #26)
+    expected_shapes = {
+        "z_hat": (B, 256, 384),
+        "z_x": (B, 256, 384),
+        "z_y_raw": (B, 256, 384),
+        "z_y_normalized": (B, 256, 384),
+        "mask": (B, 256),
+        "c_physics": (B, 384),
+        "a_goal": (B, 16, 384),
+    }
+    for key, expected in expected_shapes.items():
+        if tuple(out[key].shape) != expected:
+            raise PreflightError(
+                f"{key}: got {tuple(out[key].shape)}, expected {expected}"
+            )
+
     log_info(f"z_hat: {tuple(out['z_hat'].shape)} (expected [B, 256, 384])")
     log_info(f"z_y_raw: {tuple(out['z_y_raw'].shape)} (expected [B, 256, 384])")
     log_info(f"mask: {tuple(out['mask'].shape)} (expected [B, 256], bool)")
     log_info(f"c_physics: {tuple(out['c_physics'].shape)} (expected [B, 384])")
     log_info(f"a_goal: {tuple(out['a_goal'].shape)} (expected [B, 16, 384])")
-
-    if out["z_hat"].shape != (B, 256, 384):
-        raise PreflightError(f"z_hat shape mismatch: {out['z_hat'].shape}")
-    if out["z_y_raw"].shape != (B, 256, 384):
-        raise PreflightError(f"z_y_raw shape mismatch: {out['z_y_raw'].shape}")
 
     # Test objective forward
     res = objective(model, G, S, M)
@@ -291,7 +312,30 @@ def verify_model_objective(device, data_root):
     log_info(f"Loss components: {list(res['components'].keys())}")
 
     log_pass("Model + Objective verified")
-    return model, objective, masker, cfg
+    return model, objective, masker, full_cfg
+
+
+def run_real_dataset_sample(model, objective, masker, device, data_root, full_cfg):
+    """Run one real MetaDiT dataset sample through the pipeline (Bug #25)."""
+    log_step("Real Dataset Sample Verification")
+
+    train_path = Path(data_root) / "split_data" / "train_set.mat"
+    real_ds = MetaDiTDataset(str(train_path), max_samples=1, seed=0)
+    G_real, S_real = real_ds[0]
+
+    G_real = G_real.unsqueeze(0).to(device)
+    S_real = S_real.unsqueeze(0).to(device)
+    M_real = masker.sample(G_real, 0.5).to(device)
+
+    model.eval()
+    objective.eval()
+    real_res = objective(model, G_real, S_real, M_real)
+
+    if not torch.isfinite(real_res["total_loss"]):
+        raise PreflightError("Real-data preflight loss is non-finite")
+
+    log_info(f"Real data loss: {real_res['total_loss'].item():.6f}")
+    log_pass("Real dataset sample verified")
 
 
 def run_tiny_training(model, objective, masker, device):
@@ -576,6 +620,11 @@ def main():
     parser.add_argument("--data-root", default=None, help="Override dataset root")
     args = parser.parse_args()
 
+    # Load the REAL config at startup (Bug #5)
+    import yaml
+    with open(args.config, "r", encoding="utf-8") as f:
+        full_cfg = yaml.safe_load(f)
+
     print("="*60)
     print("MILESTONE B PREFLIGHT CHECK")
     print("="*60)
@@ -590,8 +639,32 @@ def main():
         # 3. Dataset
         data_root = args.data_root or discover_dataset()
 
-        # 4. Model + Objective
-        model, objective, masker, cfg = verify_model_objective(device, data_root)
+        # 4. Model + Objective (using REAL config)
+        model, objective, masker, cfg = verify_model_objective(device, data_root, full_cfg)
+
+        # Load real dataset to compute total steps (Bug #6)
+        train_path = Path(data_root) / "split_data" / "train_set.mat"
+        train_ds = MetaDiTDataset(str(train_path), max_samples=full_cfg["data"].get("max_train_samples", 0), seed=full_cfg["train"]["seed"])
+        total_steps = compute_total_optimizer_steps(full_cfg, len(train_ds))
+
+        # Print training setup info (Bug #6)
+        log_step("Training Setup Verification")
+        batch_size = full_cfg["train"]["batch_size"]
+        grad_accum = full_cfg["train"].get("grad_accum", 1)
+        epochs = full_cfg["train"]["epochs"]
+        micro_batches_per_epoch = len(train_ds) // batch_size
+        optimizer_steps_per_epoch = math.ceil(micro_batches_per_epoch / full_cfg["train"].get("grad_accum", 1))
+        log_info(f"Training samples: {len(train_ds)}")
+        log_info(f"Batch size: {batch_size}")
+        log_info(f"Grad accum: {grad_accum}")
+        log_info(f"Micro-batches/epoch: {micro_batches_per_epoch}")
+        log_info(f"Optimizer steps/epoch: {optimizer_steps_per_epoch}")
+        log_info(f"Epochs: {epochs}")
+        log_info(f"TOTAL optimizer steps: {total_steps}")
+        log_info(f"val_every_steps: {full_cfg['train'].get('val_every_steps', 0)}")
+
+        # 4. Model + Objective (using REAL config)
+        model, objective, masker, cfg = verify_model_objective(device, data_root, full_cfg)
 
         # 5. Tiny training
         optimizer, scheduler = run_tiny_training(model, objective, masker, device)
@@ -605,11 +678,10 @@ def main():
         # 8. Checkpoint + Resume
         run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device, cfg)
 
-        # 9. Config validation
+        # 9. Config validation with REAL total_steps (Bug #5, #6)
         log_step("Config Validation")
-        total_steps = 2
         try:
-            validate_config(cfg, total_steps)
+            validate_config(full_cfg, total_steps)
             log_pass("Config validation passed")
         except ValueError as e:
             raise PreflightError(f"Config validation failed: {e}")
@@ -623,6 +695,15 @@ def main():
         print(f"Dataset: {data_root}")
         print(f"Health: {health['status']}")
         return 0
+
+    except PreflightError as e:
+        print(f"\n[PREFLIGHT FAILED] {e}")
+        traceback.print_exc()
+        return 1
+    except Exception as e:
+        print(f"\n[PREFLIGHT ERROR] Unexpected error: {e}")
+        traceback.print_exc()
+        return 1
 
     except PreflightError as e:
         print(f"\n[PREFLIGHT FAILED] {e}")

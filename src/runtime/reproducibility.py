@@ -69,12 +69,22 @@ def fork_rng(seed: int | None = None, devices=None):
 
     Args:
         seed: If provided, manual_seed(seed) is called inside the fork.
-        devices: CUDA devices to fork (default: all visible).
+        devices: CUDA devices to fork (default: current device only).
 
     Returns:
         Context manager that restores RNG state on exit.
     """
-    return torch.random.fork_rng(devices=devices, enabled=True)
+    if devices is None:
+        devices = (
+            [torch.cuda.current_device()]
+            if torch.cuda.is_available()
+            else []
+        )
+
+    return torch.random.fork_rng(
+        devices=devices,
+        enabled=True,
+    )
 
 
 def deterministic_reference_build(build_fn, seed: int = 2026):

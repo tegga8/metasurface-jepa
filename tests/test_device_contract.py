@@ -26,12 +26,25 @@ def test_resolve_device_cpu():
 
 
 def test_resolve_device_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
     dev = resolve_device("cuda")
     assert dev.type == "cuda"
-    # Should resolve to current CUDA device
+    assert dev.index == torch.cuda.current_device()
+
+
+def test_resolve_device_cuda_is_concrete():
+    """Test that 'cuda' resolves to a concrete cuda:N device (Bug #1 fix)."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    d = resolve_device("cuda")
+    assert d == torch.device(f"cuda:{torch.cuda.current_device()}")
+    assert d.index is not None
 
 
 def test_resolve_device_explicit_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
     dev = resolve_device("cuda:0")
     assert dev.type == "cuda"
     assert dev.index == 0
@@ -48,6 +61,8 @@ def test_assert_module_device_ok():
 
 
 def test_assert_module_device_fail():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
     m = nn.Linear(4, 4).to("cpu")
     with pytest.raises(RuntimeError, match="test_module parameter"):
         assert_module_device(m, "cuda", "test_module")
@@ -59,6 +74,8 @@ def test_assert_tensor_device_ok():
 
 
 def test_assert_tensor_device_fail():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
     t = torch.randn(2, 3, device="cpu")
     with pytest.raises(RuntimeError, match="test_tensor is on cpu, expected cuda"):
         assert_tensor_device(t, "cuda", "test_tensor")

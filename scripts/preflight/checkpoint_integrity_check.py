@@ -72,6 +72,11 @@ def main():
     parser.add_argument("--config", default="configs/milestone_b.yaml", help="Config file path")
     parser.add_argument("--data-root", default=None, help="Dataset root override")
     parser.add_argument("--device", default="auto", help="Device (auto, cpu, cuda, cuda:N)")
+    parser.add_argument(
+        "--allow-commit-mismatch",
+        action="store_true",
+        help="Allow checkpoint git commit mismatch (for forensic inspection only)"
+    )
     args = parser.parse_args()
 
     ckpt_path = Path(args.checkpoint)
@@ -115,7 +120,7 @@ def main():
         print(f"  Device: {dev.get('device_type', 'unknown')} {dev.get('device_index', '')}")
         log_pass("Provenance recorded")
 
-        # 4. Check git commit match
+        # 4. Check git commit match (hard failure per Bug #13)
         log_step("Git Commit Check")
         try:
             import subprocess
@@ -124,12 +129,19 @@ def main():
             ).strip()
             saved_commit = obj.get('git_commit', '')
             if saved_commit and saved_commit != current_commit:
-                print(f"  [WARN] Checkpoint commit ({saved_commit[:8]}) != current commit ({current_commit[:8]})")
-                print("  Continuing but this may cause issues if architecture changed.")
+                if args.allow_commit_mismatch:
+                    print(f"  [WARN] Checkpoint commit ({saved_commit[:8]}) != current commit ({current_commit[:8]})")
+                    print("  Continuing with --allow-commit-mismatch (forensic inspection only).")
+                else:
+                    raise IntegrityError(
+                        f"Checkpoint git commit {saved_commit} does not match "
+                        f"current repository commit {current_commit}. "
+                        "Use --allow-commit-mismatch only for deliberate forensic inspection."
+                    )
             else:
                 log_pass(f"Git commit matches: {current_commit[:8]}")
         except Exception as e:
-            print(f"  [WARN] Could not verify git commit: {e}")
+            raise IntegrityError(f"Could not verify git commit: {e}")
 
         # 5. Reconstruct model/objective from config
         log_step("Model + Objective Reconstruction")
@@ -198,23 +210,33 @@ def main():
         restore_ema_state(model, loaded.get("ema_state"))
         log_pass("Checkpoint loaded into model/objective/optimizer/scheduler/EMA")
 
-        # 7. Verify model state restored
+        # 7. Verify model state restored (exact tensor comparison per Bug #14)
         log_step("Model State Verification")
-        # We can't easily verify without original, but we can check it's not randomly initialized
-        # by checking a few params are not at init distribution (rough check)
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                if torch.allclose(param, torch.zeros_like(param), atol=1e-6):
-                    raise IntegrityError(f"Model param {name} appears zero-initialized (not restored)")
-        log_pass("Model parameters appear restored (not zero-initialized)")
+        saved_model_state = obj["model"]
+        for name, saved_tensor in saved_model_state.items():
+            if name not in model.state_dict():
+                raise IntegrityError(f"Checkpoint model key {name!r} missing after reconstruction")
+            loaded_tensor = model.state_dict()[name]
+            if not torch.equal(
+                loaded_tensor.detach().cpu(),
+                saved_tensor.detach().cpu(),
+            ):
+                raise IntegrityError(f"Model tensor mismatch after checkpoint load: {name}")
+        log_pass("Model tensors exactly match checkpoint")
 
         # 8. Verify objective state restored
         log_step("Objective State Verification")
-        for name, param in objective.named_parameters():
-            if param.requires_grad:
-                if torch.allclose(param, torch.zeros_like(param), atol=1e-6):
-                    raise IntegrityError(f"Objective param {name} appears zero-initialized")
-        log_pass("Objective parameters appear restored")
+        saved_obj_state = obj["objective_state"]
+        for name, saved_tensor in saved_obj_state.items():
+            if name not in objective.state_dict():
+                raise IntegrityError(f"Checkpoint objective key {name!r} missing after reconstruction")
+            loaded_tensor = objective.state_dict()[name]
+            if not torch.equal(
+                loaded_tensor.detach().cpu(),
+                saved_tensor.detach().cpu(),
+            ):
+                raise IntegrityError(f"Objective tensor mismatch after checkpoint load: {name}")
+        log_pass("Objective tensors exactly match checkpoint")
 
         # 9. Verify optimizer ownership metadata
         log_step("Optimizer Ownership Metadata")

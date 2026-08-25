@@ -50,6 +50,7 @@ REQUIRED_CHECKPOINT_KEYS = (
     "step",
     "epoch",
     "micro_step",
+    "batch_index",
     "is_epoch_end",
     "cfg",
     "best_prediction",
@@ -558,14 +559,14 @@ def _check_optimizer_ownership(optimizer, saved_shapes):
 
 
 def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_step,
-                    epoch=0, micro_step=0, is_epoch_end=False, metrics=None, health=None,
+                    epoch=0, micro_step=0, batch_index=0, is_epoch_end=False, metrics=None, health=None,
                     ema_state=None, best_prediction=None, best_healthy_prediction=None,
                     masker_rng_state=None, device=None, artifact_type="full", extra=None):
     """Save a resumable checkpoint (§30). Mandatory metadata: objective_name,
     objective_state, optimizer state + param-shape ownership fingerprint,
     scheduler state, EMA momentum counters, RNG state, masker RNG state,
     git commit, env versions, device info, cfg, step, epoch, micro_step,
-    is_epoch_end, best_prediction, best_healthy_prediction, artifact_type.
+    batch_index, is_epoch_end, best_prediction, best_healthy_prediction, artifact_type.
 
     Writes atomically: writes to a temporary file then renames.
     """
@@ -592,6 +593,7 @@ def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_st
         "step": global_step,
         "epoch": epoch,
         "micro_step": micro_step,
+        "batch_index": batch_index,
         "is_epoch_end": is_epoch_end,
         "cfg": cfg,
         "best_prediction": best_prediction,
@@ -624,10 +626,11 @@ def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_st
 
 
 def load_checkpoint(path, model, objective, optimizer, scheduler, device,
-                    strict_objective=True, strict_optimizer=True):
+                    strict_objective=True, strict_optimizer=True, masker=None):
     """Load a checkpoint saved by save_checkpoint. Fails loudly (§30) if the
     objective name does not match (strict) or the optimizer's parameter list has
-    diverged from what the checkpoint was saved with. Validates schema."""
+    diverged from what the checkpoint was saved with. Validates schema.
+    Also restores masker RNG state if masker is provided."""
     obj = torch.load(path, map_location="cpu", weights_only=False)
     _validate_checkpoint_schema(obj, path)
 
@@ -654,6 +657,13 @@ def load_checkpoint(path, model, objective, optimizer, scheduler, device,
     if scheduler is not None and obj.get("scheduler_state") is not None:
         scheduler.load_state_dict(obj["scheduler_state"])
     restore_rng_state(obj.get("rng_state", {}))
+    
+    # Restore masker RNG state internally (Bug #9)
+    if masker is not None:
+        masker_state = obj.get("masker_rng_state")
+        if masker_state is not None:
+            masker.set_rng_state(masker_state)
+    
     return obj
 
 

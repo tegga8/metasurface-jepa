@@ -62,8 +62,26 @@ def _checksum(*modules):
     return total
 
 
+def build_random_calibration_encoder(hidden, heads, depth, seed, device):
+    """Build a random-init geometry encoder without mutating global RNG state."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        return GeometryEncoder(
+            hidden=hidden, num_heads=heads, depth=depth,
+        ).to(device)
+
+
 def collect_embeddings(enc, geoms, device):
     """Token embeddings (N, T, D) over a FIXED geometry list, in order."""
+    expected_device = torch.device(device)
+    try:
+        actual_device = next(enc.parameters()).device
+    except StopIteration:
+        actual_device = expected_device
+    if actual_device != expected_device:
+        raise RuntimeError(
+            f"Encoder is on {actual_device}, but calibration requested {expected_device}"
+        )
     was_training = getattr(enc, "training", False)
     if hasattr(enc, "eval"):
         enc.eval()
@@ -143,13 +161,16 @@ def main():
     hidden = ck_cfg["model"].get("hidden", 384)
     heads = ck_cfg["model"].get("num_heads", 6)
     depth = ck_cfg["model"].get("geo_depth", 6)
-    released = GeometryEncoder(hidden=hidden, num_heads=heads, depth=depth)
+    released = GeometryEncoder(
+        hidden=hidden, num_heads=heads, depth=depth,
+    ).to(device)
     released.init_from_metadit(torch.load(metadit_path, map_location="cpu"),
                                blocks_to_take=depth)
     X_released = collect_embeddings(released, geoms, device)
 
-    torch.manual_seed(args.probe_seed)
-    random_enc = GeometryEncoder(hidden=hidden, num_heads=heads, depth=depth)
+    random_enc = build_random_calibration_encoder(
+        hidden, heads, depth, args.probe_seed, device,
+    )
     X_random = collect_embeddings(random_enc, geoms, device)
 
     # ---- stats + grouped views ----

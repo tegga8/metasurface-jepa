@@ -212,6 +212,24 @@ def test_vicreg_gradient_attribution_grad_norms_finite():
             assert np.isfinite(norm), f"{comp}/{gname} grad norm is not finite: {norm}"
 
 
+def test_calibration_does_not_change_global_torch_rng():
+    """The calibration's random encoder construction must not mutate the global
+    torch RNG state — build_random_calibration_encoder uses fork_rng internally."""
+    from scripts.diagnostics.representation_calibration import (
+        build_random_calibration_encoder,
+    )
+    torch.manual_seed(1234)
+    state_before = torch.get_rng_state().clone()
+
+    build_random_calibration_encoder(
+        hidden=64, heads=4, depth=1, seed=0, device=torch.device("cpu"),
+    )
+
+    state_after = torch.get_rng_state()
+    assert torch.equal(state_before, state_after), (
+        "global torch RNG state changed by random encoder construction")
+
+
 if __name__ == "__main__":
     test_grouped_view_is_pure_view()
     test_identical_subset_same_ng()
@@ -220,4 +238,5 @@ if __name__ == "__main__":
     test_geometry_linear_probes_finite_and_deterministic()
     test_vicreg_gradient_attribution_ema_no_grads()
     test_vicreg_gradient_attribution_grad_norms_finite()
+    test_calibration_does_not_change_global_torch_rng()
     print("PASS: all B9 representation calibration tests")

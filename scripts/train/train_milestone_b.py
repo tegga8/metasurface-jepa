@@ -395,7 +395,7 @@ def main():
         # RNG. Isolate it: the global stream must be affected only by explicit
         # consumers, or a resumed run (new iterator after restore) drifts one
         # draw ahead of an uninterrupted run and exact state equality breaks.
-        with torch.random.fork_rng():
+        with torch.random.fork_rng(devices=[]):
             epoch_iterator = iter(loader)
         for bi, (G, S) in enumerate(epoch_iterator):
             # Skip batches until we reach the resume batch_index (for mid-epoch resume)

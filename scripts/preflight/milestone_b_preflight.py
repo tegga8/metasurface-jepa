@@ -497,7 +497,7 @@ def run_validation(model, objective, masker, device, data_root):
     return metrics, health, gap_metrics
 
 
-def run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device, cfg):
+def run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device, cfg, total_steps):
     """Save and reload a temporary full checkpoint, then resume one step."""
     log_step("Checkpoint Save / Load / Resume")
 
@@ -545,15 +545,22 @@ def run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device
             init_from_metadit=True,
             metadit_weights=cfg["weights"]["metadit"],
         )
+        objective_name2 = cfg.get("objective", "jepa_vicreg")
         objective2 = build_objective(
-            "jepa_vicreg", {},
+            objective_name2,
+            (cfg.get("objective_params", {}) or {}).get(objective_name2, {}),
             projector_input_dim=cfg["model"]["hidden"],
         ).to(device)
         trainable2 = [p for p in model2.parameters() if p.requires_grad] + \
                      [p for p in objective2.parameters() if p.requires_grad]
         optimizer2 = torch.optim.AdamW(trainable2, lr=1e-3, weight_decay=1e-4)
-        scheduler2 = build_scheduler(optimizer2, 1e-3, 0, 2)
-        model2.ema.set_total_steps(2)
+        scheduler2 = build_scheduler(
+            optimizer2,
+            float(cfg["train"]["lr"]),
+            int(cfg["train"]["warmup_steps"]),
+            total_steps,
+        )
+        model2.ema.set_total_steps(total_steps)
 
         masker2 = BlockMasker(placement="random", grid=16, min_side=3, k_range=(1, 4), seed=12345)
 
@@ -735,7 +742,7 @@ def main():
         physics_metrics = run_physics_controls(model, masker, device)
 
         # 8. Checkpoint + Resume
-        run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device, cfg)
+        run_checkpoint_resume(model, objective, optimizer, scheduler, masker, device, cfg, total_steps)
 
         # 9. Config validation with REAL total_steps (Bug #5, #6)
         log_step("Config Validation")

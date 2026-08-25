@@ -82,12 +82,15 @@ Do not change these without re-running the full preflight suite. The preflight s
    !nvidia-smi
    ```
 7. Run the milestone's training script (resume if a checkpoint already exists from a prior
-   session):
-   ```python
-   !python scripts/train/train_milestone_b.py \
-       --config configs/milestone_b.yaml \
-       --resume /kaggle/working/checkpoints/milestone_b/latest.pt   # omit if starting fresh
-   ```
+   session — inspect `checkpoints/milestone_b/` and choose the exact objective/experiment
+   artifact):
+    ```python
+    !python scripts/train/train_milestone_b.py \
+        --config configs/milestone_b.yaml \
+        --resume /kaggle/working/checkpoints/milestone_b/minimal_jepa_vicreg_latest.pt
+    ```
+    For a fresh run, omit `--resume`. The training script produces filenames like
+    `<experiment>_<objective>_latest.pt` (e.g. `minimal_jepa_vicreg_latest.pt`).
 8. Checkpoint into `/kaggle/working/checkpoints/...` throughout the run (the training script
    handles this per its `--resume`-compatible checkpointing, per `AGENTS.md`'s "Training scripts
    must be resumable" requirement).
@@ -151,12 +154,15 @@ version).
    ```python
    !nvidia-smi
    ```
-7. Run the milestone's training script, same as Kaggle:
-   ```python
-   !python scripts/train/train_milestone_b.py \
-       --config configs/milestone_b.yaml \
-       --resume checkpoints/milestone_b/latest.pt   # omit if starting fresh
-   ```
+7. Run the milestone's training script, same as Kaggle (inspect `checkpoints/milestone_b/`
+   and choose the exact objective/experiment artifact):
+    ```python
+    !python scripts/train/train_milestone_b.py \
+        --config configs/milestone_b.yaml \
+        --resume checkpoints/milestone_b/minimal_jepa_vicreg_latest.pt
+    ```
+    For a fresh run, omit `--resume`. The training script produces filenames like
+    `<experiment>_<objective>_latest.pt` (e.g. `minimal_jepa_vicreg_latest.pt`).
    Because `checkpoints/` is symlinked to Drive, checkpoints survive disconnects automatically —
    no separate save step needed, but do periodically confirm files are actually landing on Drive
    (Colab disconnects can occasionally drop the last few seconds of I/O).

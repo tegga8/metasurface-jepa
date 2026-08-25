@@ -109,6 +109,16 @@ def test_production_script_uses_deterministic_sampler_no_shuffle():
         "DataLoader must be constructed with shuffle=False when using a sampler"
 
 
+def test_production_script_fork_rng_excludes_cuda():
+    """fork_rng(devices=[]) for iterator creation — only CPU RNG isolation is
+    needed; forking every visible CUDA device triggers a warning."""
+    path = os.path.join(REPO_ROOT, "scripts", "train", "train_milestone_b.py")
+    with open(path, "r") as f:
+        src = f.read()
+    assert "torch.random.fork_rng(devices=[])" in src, \
+        "production driver must use fork_rng(devices=[]) for iterator creation"
+
+
 def test_process_level_permutation_stability():
     """Two independent OS processes produce byte-identical permutations for the
     same (seed, epoch) — the actual property cloud resume depends on."""
@@ -143,6 +153,7 @@ if __name__ == "__main__":
     test_skip_k_equivalent_to_fresh_construction()
     test_sampler_is_a_pure_function_of_seed_and_epoch()
     test_production_script_uses_deterministic_sampler_no_shuffle()
+    test_production_script_fork_rng_excludes_cuda()
     test_process_level_permutation_stability()
     test_sampler_module_has_no_global_seeding()
     print("PASS: all A5 epoch-sampler resume tests")

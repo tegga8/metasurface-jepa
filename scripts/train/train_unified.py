@@ -91,27 +91,39 @@ def _ensure_spectrum_weights(path, device, allow_dummy=False):
 # synthetic data (local smoke test, Phase 3 MD §8 — no large Kaggle run)
 # ---------------------------------------------------------------------------
 
-def synthetic_batch(b, device):
+def synthetic_batch(b, device, seed=None, generator=None):
     """Generate a synthetic batch of factorized geometry + spectrum.
+
+    Fix 6: seeding is REPRODUCIBLE — either an explicit seed or a caller-
+    supplied torch.Generator. No wall-clock-derived seeding: two calls with
+    the same seed produce identical scalars/spectrum.
 
     Returns:
         occupancy: [B, 1, 64, 64] binary float
         scalars:   [B, 3] (l_lattice, h_atom, r_atom)
         spectrum:  [B, 2, 301]
     """
-    torch.manual_seed(int(time.time() * 1000) % 2**31)
-    occ = (torch.rand(b, 1, 64, 64) > 0.5).float().to(device)
+    if generator is None:
+        generator = torch.Generator()
+        generator.manual_seed(seed if seed is not None else 0)
+    occ = (torch.rand(b, 1, 64, 64, generator=generator) > 0.5).float().to(device)
     occ[:, :, :32, :32] = 1.0  # ensure some occupied region
-    scalars = (torch.rand(b, 3) * 10 + 1).to(device)  # [1, 11]
-    spectrum = torch.randn(b, 2, 301).to(device)
+    scalars = (torch.rand(b, 3, generator=generator) * 10 + 1).to(device)  # [1, 11]
+    spectrum = torch.randn(b, 2, 301, generator=generator).to(device)
     return occ, scalars, spectrum
 
 
-def make_synthetic_dataset(n, device):
-    """Pre-generate n batches for reproducibility in smoke tests."""
+def make_synthetic_dataset(n, device, seed=0):
+    """Pre-generate n batches for reproducibility in smoke tests.
+
+    Fix 6: each batch is derived from the SAME seed via an advancing
+    generator, so a smoke run with a fixed seed is fully reproducible.
+    """
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     batches = []
     for _ in range(n):
-        batches.append(synthetic_batch(2, device))
+        batches.append(synthetic_batch(2, device, generator=generator))
     return batches
 
 
@@ -145,16 +157,44 @@ def sample_mask_ratio(cfg, rng):
     return rs[idx]
 
 
-def sample_scalar_known(B, cfg, rng, device=None):
+def _build_scalar_masker_bank(cfg, seed=0):
+    """Build one persistent ScalarMasker per configured curriculum regime.
+
+    Fix 3: scalar masking must use PERSISTENT RNG state that evolves across
+    batches (a fresh seed=0 ScalarMasker per call would replay the same
+    "mixed" pattern every batch). One masker per regime, all created once at
+    training start.
+    """
+    from data.scalar_mask import ScalarMasker
+    regime_to_masker = {
+        "all_known": "all_known",
+        "all_unknown": "all_unknown",
+        "mixed": "independent",
+    }
+    bank = {}
+    for regime in cfg["curriculum"]["scalar_regimes"]:
+        if regime not in regime_to_masker:
+            raise ValueError(
+                f"unknown scalar regime {regime!r}; expected one of "
+                f"{list(regime_to_masker)}")
+        bank[regime] = ScalarMasker(
+            regime=regime_to_masker[regime],
+            p_independent=0.5, seed=seed)
+    return bank
+
+
+def sample_scalar_known(B, cfg, rng, device=None, masker_bank=None):
     """Sample scalar known/unknown flags via the CANONICAL ScalarMasker.
 
-    Cleanup item 1: the trainer delegates flag construction to
-    src/data/scalar_mask.py::ScalarMasker (the single canonical scalar-masking
-    implementation) instead of maintaining a duplicate sampler. The curriculum
-    regime is sampled from config (all_known / all_unknown / mixed), and
-    "mixed" maps to ScalarMasker's "independent" regime (each scalar known
-    with p=0.5 — the same per-scalar Bernoulli semantics the old sampler
-    used).
+    Fix 3: masker_bank is the PERSISTENT per-regime ScalarMasker set created
+    once at training start (RNG state evolves across batches and is
+    checkpointed). If None (isolated test calls), a fresh bank is created —
+    tests that need reproducible cross-batch progression must pass a bank.
+
+    The curriculum regime is sampled from config (all_known / all_unknown /
+    mixed), and "mixed" maps to ScalarMasker's "independent" regime (each
+    scalar known with p=0.5 — the same per-scalar Bernoulli semantics the old
+    sampler used).
 
     ScalarMasker constructs flags on the scalar_values device (CPU generator,
     then .to(device)), so CUDA batches stay device-correct by construction.
@@ -163,31 +203,34 @@ def sample_scalar_known(B, cfg, rng, device=None):
         scalar_known: (B, 3) bool on `device`
         regime: str (curriculum regime name for logging)
     """
-    from data.scalar_mask import ScalarMasker
     regimes = cfg["curriculum"]["scalar_regimes"]
     probs = cfg["curriculum"]["scalar_regime_probs"]
     p = torch.tensor(probs)
     idx = torch.multinomial(p, 1, generator=rng).item()
     regime = regimes[idx]
 
-    # Map curriculum regime → canonical ScalarMasker regime.
-    regime_to_masker = {
-        "all_known": "all_known",
-        "all_unknown": "all_unknown",
-        "mixed": "independent",
-    }
-    if regime not in regime_to_masker:
-        raise ValueError(
-            f"unknown scalar regime {regime!r}; expected one of "
-            f"{list(regime_to_masker)}")
-    masker = ScalarMasker(
-        regime=regime_to_masker[regime],
-        p_independent=0.5, seed=0)
+    if masker_bank is None:
+        masker_bank = _build_scalar_masker_bank(cfg, seed=0)
+    masker = masker_bank[regime]
     # ScalarMasker.sample returns (masked_values, known_flags) on the device
     # of scalar_values; we only need the flags here.
     sv_dummy = torch.zeros(B, 3, device=device)
     _, known = masker.sample(sv_dummy)
     return known, regime
+
+
+def collect_scalar_masker_bank_state(masker_bank):
+    """Collect per-regime ScalarMasker RNG states for checkpointing (Fix 3)."""
+    return {regime: m.get_rng_state() for regime, m in masker_bank.items()}
+
+
+def restore_scalar_masker_bank_state(masker_bank, state):
+    """Restore per-regime ScalarMasker RNG states from a checkpoint (Fix 3)."""
+    if not state:
+        return
+    for regime, m in masker_bank.items():
+        if regime in state:
+            m.set_rng_state(state[regime])
 
 
 class RegimeLogger:
@@ -267,7 +310,8 @@ def build_scheduler(optimizer, base_lr, warmup_steps, total_steps):
 # ---------------------------------------------------------------------------
 
 def training_step(model, objective, occ, sv, spec, cfg, device, step,
-                  masker, rng, regime_logger, surrogate=None):
+                  masker, rng, regime_logger, surrogate=None,
+                  scalar_masker_bank=None):
     """One forward + loss + backward step.
 
     Args:
@@ -275,6 +319,7 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
         sv:  [B, 3] true scalar values
         spec: [B, 2, 301] spectrum
         surrogate: optional frozen surrogate for half_sensitivity mask placement.
+        scalar_masker_bank: persistent per-regime ScalarMasker set (Fix 3).
 
     Returns:
         result dict from objective, mask, scalar_known
@@ -284,15 +329,29 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     # Fix 2 (spec §4): every tensor handed to the model must be on the model
     # device. Sample scalar known flags on the device, and move the block mask
     # to the device (masker.sample returns CPU tensors by construction).
-    sk, regime = sample_scalar_known(B, cfg, rng, device=device)
+    sk, regime = sample_scalar_known(
+        B, cfg, rng, device=device, masker_bank=scalar_masker_bank)
 
     # Sample occupancy mask ratio from curriculum
     ratio = sample_mask_ratio(cfg, rng)
 
-    # Generate block mask (BlockMasker works with 1-channel input —
-    # it only reads spatial dimensions; half_sensitivity placement uses
-    # the frozen surrogate for sensitivity maps, architecture_v5.md §2)
-    M = masker.sample(occ, ratio, surrogate).to(device)
+    # Generate block mask. For half_sensitivity placement, the frozen
+    # surrogate's sensitivity map needs the COMPLETE [B,3,64,64] MetaDiT
+    # broadcast geometry — assemble it from the TRUE training sample
+    # (true occupancy + true l/h/r). The mask is used ONLY to decide which
+    # occupancy tokens are hidden; the unified model still receives the
+    # factorized occupancy [B,1,64,64], scalar values + known flags, spectrum
+    # (Fix 2: never reintroduce the 3-channel tensor as the internal
+    # representation, never use model predictions to determine their own mask).
+    if getattr(masker, "placement", "random") == "half_sensitivity":
+        from data.factorize import assemble_metadit_geometry
+        assert surrogate is not None, (
+            "half_sensitivity masking requires the frozen surrogate")
+        geo_true = assemble_metadit_geometry(
+            occ, sv[:, 0], sv[:, 1], sv[:, 2])
+        M = masker.sample(geo_true, ratio, surrogate).to(device)
+    else:
+        M = masker.sample(occ, ratio, surrogate).to(device)
 
     # Forward + loss
     # Phase 4 MD §3.5.1: goal dropout — replace A_goal with null token ~10%
@@ -472,13 +531,20 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"[phase4] Loaded frozen surrogate for half_sensitivity "
                   f"masking from {surrogate_path}")
 
+    # --- scalar masker bank (Fix 3) ---
+    # One persistent ScalarMasker per curriculum regime, created ONCE here so
+    # RNG state evolves across batches and can be checkpointed/restored.
+    scalar_masker_bank = _build_scalar_masker_bank(
+        cfg, seed=cfg["train"].get("seed", 42))
+
     # --- data ---
     # use_synthetic is bound from use_synthetic_smoke above (never an implicit
     # fallback from a missing path — that now raises in real mode).
     train_cfg = cfg["train"]
     if use_synthetic:
         n_train = max(train_cfg.get("batch_size", 2) * 4, 8)
-        train_data = make_synthetic_dataset(n_train, device)
+        train_data = make_synthetic_dataset(
+            n_train, device, seed=cfg["train"].get("seed", 42))
     else:
         ds = MetaDiTDataset(
             train_split,
@@ -495,7 +561,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     val_batches = []
     if use_synthetic:
         val_batches = make_synthetic_dataset(
-            cfg["train"].get("val_batches", 1), device)
+            cfg["train"].get("val_batches", 1), device,
+            seed=cfg["train"].get("seed", 42) + 1000)
     else:
         vds = MetaDiTDataset(
             val_split,
@@ -517,6 +584,11 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             resume_path, model, objective, optimizer, scheduler, device,
             strict_objective=True, strict_optimizer=True, masker=masker)
         start_step = ckpt.get("step", 0)
+        # Fix 3: restore the persistent scalar-masker RNG state so resumed
+        # training continues the same scalar-masking sequence (not restarting
+        # from seed).
+        restore_scalar_masker_bank_state(
+            scalar_masker_bank, ckpt.get("scalar_masker_rng_state", {}))
         print(f"Resumed at step {start_step}")
 
     # --- no-train smoke ---
@@ -533,7 +605,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             spec = S.to(device)
         result, M, sk = training_step(
             model, objective, occ, sv, spec, cfg, device, 0, masker, rng,
-            regime_logger, surrogate=surrogate)
+            regime_logger, surrogate=surrogate,
+            scalar_masker_bank=scalar_masker_bank)
         loss = result["total_loss"]
         loss.backward()
         _assert_no_ema_gradients(model, 0)
@@ -599,7 +672,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
             result, M, sk = training_step(
                 model, objective, occ, sv, spec, cfg, device, step,
-                masker, rng, regime_logger, surrogate=surrogate)
+                masker, rng, regime_logger, surrogate=surrogate,
+                scalar_masker_bank=scalar_masker_bank)
             loss = result["total_loss"]
             (loss / grad_accum).backward()
             micro_losses.append(float(loss.detach()))
@@ -643,6 +717,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 is_epoch_end=False, metrics={"L_total": last_loss},
                 health={}, ema_state=ema_state,
                 masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
+                extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
+                    scalar_masker_bank)},
                 device=device, artifact_type="latest")
             print(f"  [ckpt] saved to {ckpt_path}")
 
@@ -654,7 +730,11 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         ckpt_path, model, objective, optimizer, scheduler, cfg,
         global_step=total_steps - 1, epoch=0, micro_step=0, batch_index=0,
         is_epoch_end=True, metrics={"L_total": last_loss if last_loss else 0.0},
-        health={}, ema_state=ema_state, device=device, artifact_type="final")
+        health={}, ema_state=ema_state,
+        masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
+        extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
+            scalar_masker_bank)},
+        device=device, artifact_type="final")
 
     report = {
         "final_step": total_steps - 1,
@@ -743,8 +823,12 @@ def preflight(cfg, device=None):
 
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=42)
-    M = masker.sample(occ, ratio=0.5)
+    # Fix 1: the mask must be on the ACTIVE device (masker.sample returns a
+    # CPU tensor; the model forward requires M.device == occ.device).
+    M = masker.sample(occ, ratio=0.5, surrogate=surrogate).to(device)
+    assert M.device == occ.device, "preflight: mask must be on the model device"
     sk = torch.zeros(b, 3, dtype=torch.bool, device=device)  # all unknown (hard stratum)
+    assert sk.device == occ.device, "preflight: scalar_known must be on the model device"
 
     result = objective(model, occ, sv, sk, S, M, goal_mode="real")
     loss = result["total_loss"]
@@ -775,38 +859,78 @@ def preflight(cfg, device=None):
             f"preflight: assembled geometry violates broadcast invariants: "
             f"{invariant_violations}")
 
-    # Cleanup item 7: known-scalar precedence — the assembled geometry must
-    # use scalar_values where known and scalar_pred where unknown. Run a
-    # second decode with deliberately-wrong predictions and verify the known
-    # positions still carry the TRUE values. Hard assembly (binary occupancy)
-    # so the channel values are exactly the scalar values, not scaled by soft
-    # occupancy.
+    # Cleanup item 7 / Fix 5: scalar precedence — the assembled geometry must
+    # use scalar_values where known and the PREDICTION where unknown. Both
+    # cases use the SAME deliberately-wrong prediction (999.0) so the test is
+    # CAUSAL: it does not depend on whether an untrained model happens to
+    # predict a value close to ground truth. All three scalars are verified:
+    #   l — via channel 2 (spatially dense, l/3 everywhere);
+    #   h — via channel 1 (h on occupied pixels);
+    #   r — via channel 0 (r/5 on occupied pixels).
+    # Occupied pixels are located from the HARD binary occupancy support, not
+    # assumed to be at [0,0]. Hard assembly (binary occupancy) so channel
+    # values are exactly the scalar values.
     with torch.no_grad():
         wrong_pred = torch.full_like(out["scalar_pred"], 999.0)
-        # sk is all-unknown in the main path; build an all-known path to
-        # verify known precedence.
+
+        # Locate an occupied pixel per sample from the true occupancy.
+        occ_pixels = occ[:, 0] > 0.5  # (B, 64, 64)
+        occ_idx = occ_pixels.nonzero()
+        assert occ_idx.shape[0] >= b, (
+            "preflight: each sample needs at least one occupied pixel for "
+            "h/r precedence verification")
+
+        # KNOWN case: all scalars known → assembly must use scalar_values.
         sk_known = torch.ones(b, 3, dtype=torch.bool, device=device)
         geom_known, _ = model.decode_geometry(
             out["z_hat"], wrong_pred, occ_input=occ, mask=M,
             scalar_known=sk_known, scalar_values=sv, hard_forward=True)
-        l_true = sv[:, 0] / 3.0
+        # l via channel 2 (dense).
         l_used = geom_known[:, 2, 0, 0]
-        if not torch.allclose(l_used, l_true, atol=1e-5):
+        if not torch.allclose(l_used, sv[:, 0] / 3.0, atol=1e-5):
             raise RuntimeError(
-                "preflight: known-scalar precedence violated — assembly did "
-                "not use scalar_values for known scalars")
-        # Unknown precedence: all-unknown path must use scalar_pred, not sv.
+                "preflight: known-scalar precedence violated for l — assembly "
+                "did not use scalar_values for known scalars")
+        # h via channel 1 on an occupied pixel of each sample.
+        for i in range(b):
+            px = occ_idx[occ_idx[:, 0] == i][0]
+            h_used = geom_known[i, 1, px[1], px[2]].item()
+            if abs(h_used - sv[i, 1].item()) > 1e-5:
+                raise RuntimeError(
+                    f"preflight: known-scalar precedence violated for h "
+                    f"(sample {i}: got {h_used}, expected {sv[i,1].item()})")
+            r_used = geom_known[i, 0, px[1], px[2]].item()
+            if abs(r_used - sv[i, 2].item() / 5.0) > 1e-5:
+                raise RuntimeError(
+                    f"preflight: known-scalar precedence violated for r "
+                    f"(sample {i}: got {r_used}, expected {sv[i,2].item()/5.0})")
+
+        # UNKNOWN case: all scalars unknown → assembly must use wrong_pred
+        # (999.0), NOT scalar_values.
         sk_unknown = torch.zeros(b, 3, dtype=torch.bool, device=device)
         geom_unknown, _ = model.decode_geometry(
-            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+            out["z_hat"], wrong_pred, occ_input=occ, mask=M,
             scalar_known=sk_unknown, scalar_values=sv, hard_forward=True)
-        # With hard occupancy the channel-2 value is l_pred/3 everywhere
-        # (l comes from scalar_pred when unknown). Verify it is NOT sv's l.
+        # l via channel 2 (dense): must be 999/3, not sv/3.
         l_pred_used = geom_unknown[:, 2, 0, 0] * 3.0
-        if torch.allclose(l_pred_used, sv[:, 0], atol=1e-5):
+        if not torch.allclose(l_pred_used, torch.full_like(l_pred_used, 999.0),
+                              atol=1e-3):
             raise RuntimeError(
-                "preflight: unknown-scalar precedence violated — assembly "
-                "appears to use scalar_values for unknown scalars")
+                "preflight: unknown-scalar precedence violated for l — "
+                "assembly did not use scalar_pred for unknown scalars")
+        # h/r via occupied pixels: must be 999 (h) / 999/5 (r), not sv.
+        for i in range(b):
+            px = occ_idx[occ_idx[:, 0] == i][0]
+            h_used = geom_unknown[i, 1, px[1], px[2]].item()
+            if abs(h_used - 999.0) > 1e-3:
+                raise RuntimeError(
+                    f"preflight: unknown-scalar precedence violated for h "
+                    f"(sample {i}: got {h_used}, expected 999.0)")
+            r_used = geom_unknown[i, 0, px[1], px[2]].item()
+            if abs(r_used - 999.0 / 5.0) > 1e-3:
+                raise RuntimeError(
+                    f"preflight: unknown-scalar precedence violated for r "
+                    f"(sample {i}: got {r_used}, expected 999.0/5)")
 
     checks = {
         "occupancy_shape": list(occ.shape),

@@ -584,6 +584,63 @@ def test_physics_loss_from_out_propagates_hard_forward():
         "hard_forward must change the assembled geometry in the forward path")
 
 
+def test_scenario_evaluator_uses_binary_deployed_occupancy():
+    """Fix 4 (scientific deployment): the scenario evaluator must send the
+    HARD-thresholded binary occupancy to the surrogate for spectrum metrics —
+    not the soft sigmoid. Construct a case where soft occupancy differs from
+    its thresholded form (non-binary masked region) and verify the evaluator's
+    geometry passed to the surrogate is binary (occupied channel takes <= 2
+    distinct values on occupancy support)."""
+    from scripts.eval.eval_scenarios import evaluate_scenario
+
+    class _FakeSurrogate(nn.Module):
+        """Records the geometry it receives; returns a trivial spectrum."""
+        def __init__(self):
+            super().__init__()
+            self.seen_geometry = None
+
+        def forward(self, geometry):
+            self.seen_geometry = geometry.detach().clone()
+            class R:
+                pass
+            r = R()
+            g = geometry.mean(dim=(2, 3))
+            spec = torch.stack([g[:, 0], g[:, 1]], dim=-1)
+            r.prediction = spec.unsqueeze(-1).expand(-1, -1, 301)
+            return r
+
+    model = _build_model()
+    surrogate = _FakeSurrogate()
+
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]])
+    spec = torch.randn(2, 2, 301)
+    sk = torch.zeros(2, 3, dtype=torch.bool)  # all unknown → predicted path
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=42)
+    M = masker.sample(occ, ratio=0.5)  # partial mask → non-binary masked region
+
+    result = evaluate_scenario(
+        model, surrogate, occ, sv, spec, M, sk, "cpu", "B")
+    assert "spectrum_error" in result
+
+    # The surrogate must have received BINARY occupancy: on occupancy support,
+    # channel 1 (h * occ) takes a single value (h), so the set of nonzero
+    # values has size 1 (or 2 allowing tiny float noise) — never the
+    # continuous range a soft sigmoid would produce.
+    seen = surrogate.seen_geometry
+    assert seen is not None, "evaluator must pass geometry through the surrogate"
+    for b in range(2):
+        ch1 = seen[b, 1]
+        nz = ch1[ch1 > 0]
+        assert nz.numel() > 0, "expected occupied pixels in the deployed geometry"
+        n_unique = nz.unique().numel()
+        assert n_unique <= 2, (
+            f"deployed occupancy must be binary; channel 1 has {n_unique} "
+            f"distinct occupied values (soft sigmoid leaked into the "
+            f"scientific spectrum path)")
+
+
 # --------------------------------------------------------------------------
 # Scenario evaluators
 # --------------------------------------------------------------------------

@@ -89,6 +89,5 @@ train:
   seed: 42
   val_batches: 1
   device: cpu
-  max_steps: 3
   # Phase 4 MD §3.5.1: classifier-free goal guidance
   guidance_dropout: 0.1   # probability of null-goal replacement during training

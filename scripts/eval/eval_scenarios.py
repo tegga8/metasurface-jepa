@@ -124,15 +124,23 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
         model(occupancy, scalar_values, scalar_known, spectrum, mask, ...)
     Fix 14: scalar MAE reported separately for known (0 by construction) and
     unknown positions; occupancy metrics split by masked/visible region.
+    Fix 4 (scientific deployment): the SPECTRUM metric measures the geometry
+    that would actually be deployed — occupancy logits hard-thresholded to
+    binary via hard_forward=True, then MetaDiT assembly → surrogate. The soft
+    sigmoid occupancy is used ONLY for the occupancy IoU/F1 diagnostic (it
+    measures the model's raw occupancy quality), never for the scientific
+    spectrum error.
     """
     model.eval()
     surrogate.eval()
 
     out = model(occ, sv, scalar_known, spec, mask, goal_mode="real")
+    # Deployed (binary) geometry for the scientific spectrum metric.
     geometry, soft_occ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
         occ_input=occ, mask=mask, use_ste=False,
-        scalar_known=scalar_known, scalar_values=sv)
+        scalar_known=scalar_known, scalar_values=sv,
+        hard_forward=True)
     spectrum_pred = surrogate(geometry).prediction
 
     spec_err = _spectrum_error(spectrum_pred, spec)
@@ -183,9 +191,11 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
             spec_eval = spec
 
         out = model(occ, sv, scalar_known, spec_eval, mask, goal_mode=mode)
+        # Fix 4 (scientific deployment): binary deployed occupancy for the
+        # spectrum comparison (same hard_forward rule as evaluate_scenario).
         geometry, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
-            scalar_known=scalar_known, scalar_values=sv)
+            scalar_known=scalar_known, scalar_values=sv, hard_forward=True)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
 
@@ -230,9 +240,12 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
         ("shuffled", derange_batch_tensor(sv, seed=0)),
     ]:
         out = model(occ, sv_cond, scalar_known, spec, mask, goal_mode="real")
+        # Fix 4 (scientific deployment): binary deployed occupancy for the
+        # spectrum comparison.
         geometry, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
-            scalar_known=scalar_known, scalar_values=sv)  # true values preserved
+            scalar_known=scalar_known, scalar_values=sv,  # true values preserved
+            hard_forward=True)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
 
@@ -268,10 +281,12 @@ def diversity_check(model, surrogate, occ, sv, spec, mask, scalar_known,
         z_hat = out["z_hat"]
         if perturbation_scale > 0:
             z_hat = z_hat + torch.randn_like(z_hat) * perturbation_scale
+        # Fix 4 (scientific deployment): binary deployed occupancy for the
+        # generated geometry (same hard_forward rule as evaluate_scenario).
         geometry, _ = model.decode_geometry(
             out["z_hat"] if perturbation_scale == 0 else z_hat,
             out["scalar_pred"], occ_input=occ, mask=mask,
-            scalar_known=scalar_known, scalar_values=sv)
+            scalar_known=scalar_known, scalar_values=sv, hard_forward=True)
         generations.append(geometry)
 
     spectra = []

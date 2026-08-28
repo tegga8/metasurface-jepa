@@ -34,11 +34,145 @@ def test_real_mode_missing_data_raises():
         train(cfg, no_train=True, device="cpu", use_synthetic_smoke=False)
 
 
+def test_scalar_masker_rng_evolves_across_batches():
+    """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
+    drawn from the SAME persistent bank must differ (RNG evolves), and the
+    RNG state save → generate / restore → generate must be reproducible."""
+    from train_unified import (
+        _build_scalar_masker_bank, collect_scalar_masker_bank_state,
+        restore_scalar_masker_bank_state, sample_scalar_known,
+    )
+    cfg = _load_cfg()
+    cfg["curriculum"]["scalar_regimes"] = ["mixed"]
+    cfg["curriculum"]["scalar_regime_probs"] = [1.0]
+
+    # Persistent bank: RNG evolves across batches.
+    bank = _build_scalar_masker_bank(cfg, seed=7)
+    rng = torch.Generator().manual_seed(0)
+    sk1, _ = sample_scalar_known(8, cfg, rng, device="cpu", masker_bank=bank)
+    rng = torch.Generator().manual_seed(0)
+    sk2, _ = sample_scalar_known(8, cfg, rng, device="cpu", masker_bank=bank)
+    # Different masks: the sampler was NOT recreated with the same seed each
+    # call (identical masks would indicate the RNG state was reset).
+    assert not torch.equal(sk1, sk2), (
+        "mixed scalar masks must differ across batches (RNG must evolve)")
+
+    # Checkpoint/restore: save state, generate, restore, generate → identical.
+    state = collect_scalar_masker_bank_state(bank)
+    rng_a = torch.Generator().manual_seed(1)
+    sk_a1, _ = sample_scalar_known(8, cfg, rng_a, device="cpu", masker_bank=bank)
+    restore_scalar_masker_bank_state(bank, state)
+    rng_b = torch.Generator().manual_seed(1)
+    sk_b1, _ = sample_scalar_known(8, cfg, rng_b, device="cpu", masker_bank=bank)
+    assert torch.equal(sk_a1, sk_b1), (
+        "restoring scalar-masker RNG state must reproduce the next mask")
+
+    # Preserved semantics: all_known / all_unknown unaffected by persistence.
+    cfg2 = _load_cfg()
+    cfg2["curriculum"]["scalar_regimes"] = ["all_known"]
+    cfg2["curriculum"]["scalar_regime_probs"] = [1.0]
+    bank2 = _build_scalar_masker_bank(cfg2, seed=0)
+    rng2 = torch.Generator().manual_seed(0)
+    sk_k, _ = sample_scalar_known(4, cfg2, rng2, device="cpu", masker_bank=bank2)
+    assert sk_k.all()
+    cfg2["curriculum"]["scalar_regimes"] = ["all_unknown"]
+    bank3 = _build_scalar_masker_bank(cfg2, seed=0)
+    rng3 = torch.Generator().manual_seed(0)
+    sk_u, _ = sample_scalar_known(4, cfg2, rng3, device="cpu", masker_bank=bank3)
+    assert not sk_u.any()
+
+
+def test_half_sensitivity_mask_uses_surrogate_geometry():
+    """Fix 2: half_sensitivity masking must receive the COMPLETE [B,3,64,64]
+    MetaDiT broadcast geometry (assembled from the TRUE sample), while the
+    unified model keeps receiving factorized occupancy [B,1,64,64]."""
+    from train_unified import training_step
+    from losses.unified_losses import UnifiedJEPALoss
+    from assembly import build_unified_model
+    from data.mask import BlockMasker
+    from runtime.reproducibility import set_seed
+
+    surrogate_path = os.path.join(
+        REPO_ROOT, "data/metadit/weights/surrogate_model.bin")
+    if not os.path.exists(surrogate_path):
+        pytest.skip("surrogate weights not available")
+    from physics.physics_loop import load_surrogate
+
+    import tempfile
+    tmpdir = tempfile.mkdtemp()
+    cfg = _load_cfg()
+    cfg["weights"]["spectrum"] = os.path.join(tmpdir, "dummy_spec.pth")
+    cfg["data"]["use_synthetic"] = True
+    cfg["curriculum"]["train_mask_ratios"] = [0.5]
+    cfg["curriculum"]["train_mask_ratio_probs"] = [1.0]
+    cfg["curriculum"]["scalar_regimes"] = ["all_known"]
+    cfg["curriculum"]["scalar_regime_probs"] = [1.0]
+    cfg["curriculum"]["mask_placement"] = "half_sensitivity"
+    cfg["train"]["guidance_dropout"] = 0.0
+    cfg["loss"]["lambda_phys"] = 0.0
+
+    set_seed(cfg["train"]["seed"])
+    device = "cpu"
+    from train_unified import _ensure_spectrum_weights, make_synthetic_dataset
+    spec_weights = _ensure_spectrum_weights(
+        cfg["weights"]["spectrum"], device, allow_dummy=True)
+    model = build_unified_model(cfg, spec_weights, device=device)
+    objective = UnifiedJEPALoss(
+        hidden=cfg["hidden"],
+        lambda_inv=cfg["loss"]["lambda_inv"],
+        lambda_var=cfg["loss"]["lambda_var"],
+        lambda_cov=cfg["loss"]["lambda_cov"],
+        lambda_scalar=cfg["loss"]["lambda_scalar"],
+        lambda_phys=0.0,
+        gamma=cfg["loss"]["gamma"], eps=cfg["loss"]["eps"],
+    ).to(device)
+    surrogate = load_surrogate(surrogate_path, device=device)
+    masker = BlockMasker(
+        placement="half_sensitivity", grid=16, min_side=3, k_range=(1, 4),
+        seed=cfg["train"].get("seed", 42))
+    rng = torch.Generator().manual_seed(cfg["train"].get("seed", 42))
+
+    train_data = make_synthetic_dataset(
+        max(cfg["train"].get("batch_size", 2) * 4, 8), device,
+        seed=cfg["train"].get("seed", 42))
+    occ, sv, spec = train_data[0]
+    assert occ.shape == (2, 1, 64, 64), "unified occupancy stays factorized"
+
+    class _Logger:
+        def record(self, ratio, regime):
+            pass
+    result, M, sk = training_step(
+        model, objective, occ, sv, spec, cfg, device, 0, masker, rng,
+        _Logger(), surrogate=surrogate)
+    assert M.shape == (2, 16, 16), "mask must be [B,16,16]"
+    assert torch.isfinite(result["total_loss"]), "forward must be finite"
+
+
+def test_synthetic_batch_reproducible():
+    """Fix 6: synthetic batch seeding must be reproducible (same seed →
+    identical scalars + spectrum), not wall-clock-derived."""
+    from train_unified import synthetic_batch, make_synthetic_dataset
+    b1 = synthetic_batch(2, "cpu", seed=42)
+    b2 = synthetic_batch(2, "cpu", seed=42)
+    assert torch.equal(b1[1], b2[1]), "scalars must be identical for same seed"
+    assert torch.equal(b1[2], b2[2]), "spectrum must be identical for same seed"
+
+    # Different seeds → different data.
+    b3 = synthetic_batch(2, "cpu", seed=43)
+    assert not torch.equal(b1[1], b3[1]), "different seeds must differ"
+
+    # make_synthetic_dataset is reproducible.
+    d1 = make_synthetic_dataset(4, "cpu", seed=1)
+    d2 = make_synthetic_dataset(4, "cpu", seed=1)
+    for (a1, a2, a3), (c1, c2, c3) in zip(d1, d2):
+        assert torch.equal(a2, c2) and torch.equal(a3, c3)
+
+
 def test_trainer_uses_canonical_scalar_masker():
     """Cleanup item 1: the trainer's scalar-known sampling must delegate to
     the canonical ScalarMasker (src/data/scalar_mask.py), not a duplicate
     inline sampler. Verify output shape, dtype, device, and semantics."""
-    from train_unified import sample_scalar_known
+    from train_unified import sample_scalar_known, _build_scalar_masker_bank
     from data.scalar_mask import ScalarMasker
     cfg = _load_cfg()
 
@@ -63,12 +197,13 @@ def test_trainer_uses_canonical_scalar_masker():
             assert sk_big.any() and not sk_big.all()
 
     # The canonical implementation is ScalarMasker — verify the delegation is
-    # structural (the function source references it), so a future duplicate
-    # sampler cannot silently reappear.
+    # structural (the bank-builder imports it), so a future duplicate sampler
+    # cannot silently reappear.
     import inspect
-    src = inspect.getsource(sample_scalar_known)
+    src = inspect.getsource(_build_scalar_masker_bank)
     assert "from data.scalar_mask import ScalarMasker" in src, (
-        "trainer scalar-known sampling must import the canonical ScalarMasker")
+        "trainer scalar masking must construct the canonical ScalarMasker "
+        "via _build_scalar_masker_bank")
 
 
 def test_train_mask_ratios_exclude_zero():

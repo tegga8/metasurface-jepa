@@ -563,9 +563,18 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
     # --- optimizer + scheduler ---
     trainable = [p for p in model.parameters() if p.requires_grad]
+    # Objective optimizer group must contain ONLY trainable objective params.
+    # UnifiedJEPALoss registers the frozen MetaDiT surrogate as self.surrogate;
+    # its params have requires_grad=False and must NOT enter the optimizer
+    # (otherwise Phase-C optimizer ownership differs from Phase-B and resume
+    # fingerprints mismatch). Filtering by requires_grad keeps the group to the
+    # objective projector (9 params) in both phases.
+    objective_trainable = [
+        p for p in objective.parameters() if p.requires_grad
+    ]
     optimizer = torch.optim.AdamW(
         [{"params": trainable, "lr": cfg["train"]["lr"]},
-         {"params": objective.parameters(), "lr": cfg["train"]["lr"]}],
+         {"params": objective_trainable, "lr": cfg["train"]["lr"]}],
         weight_decay=cfg["train"].get("wd", 1e-4),
     )
     scheduler = build_scheduler(

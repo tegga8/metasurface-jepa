@@ -5,6 +5,8 @@ Verifies:
 - Real mode with missing released spectrum weights → RuntimeError.
 - Smoke mode (explicit flag) allows synthetic data + dummy spectrum weights.
 - Preflight requires real data + released weights.
+- Frozen surrogate must NOT enter the optimizer (Phase-B/Phase-C fingerprint
+  identity).
 """
 
 import os
@@ -601,6 +603,126 @@ def test_resume_step_is_next_unrun_step():
             p = os.path.join(REPO_ROOT, "checkpoints", "unified", f)
             if os.path.exists(p):
                 os.remove(p)
+
+
+def test_frozen_surrogate_not_in_optimizer():
+    """Fix (frozen surrogate in optimizer): the objective optimizer group must
+    contain ONLY trainable objective parameters. An objective with a frozen
+    surrogate attached must produce an optimizer whose fingerprint is
+    IDENTICAL to the no-surrogate (Phase-B) case — this is the root cause of
+    the Phase-B → Phase-C resume fingerprint mismatch.
+
+    Invariants:
+    1. No surrogate parameters in the optimizer.
+    2. Optimizer fingerprint identical with and without frozen surrogate.
+    3. Surrogate still receives no parameter gradients.
+    4. Geometry input still receives a physics gradient (differentiable path)."""
+    import torch.nn as nn
+    from losses.unified_losses import UnifiedJEPALoss
+    from train.engine import _optimizer_param_shapes
+
+    class _FakeSurrogate(nn.Module):
+        """Accepts [B,3,64,64] geometry, returns a spectrum-like prediction
+        [B,2,301] (enough for the physics-loss path to compute error)."""
+        def __init__(self, seed=0):
+            super().__init__()
+            torch.manual_seed(seed)
+            self.net = nn.Sequential(nn.Linear(3, 8), nn.Linear(8, 2))
+
+        def forward(self, x):
+            # x: [B,3,64,64] → spatial mean [B,3] → net → [B,2] → broadcast
+            # to a [B,2,301] spectrum-like prediction.
+            b = x.shape[0]
+            h = self.net(x.mean(dim=(2, 3)))
+            class R:
+                pass
+            r = R()
+            r.prediction = h.unsqueeze(-1).expand(b, 2, 301)
+            return r
+
+    def _objective(surrogate=None):
+        return UnifiedJEPALoss(hidden=192, lambda_phys=0.0,
+                               surrogate=surrogate)
+
+    def _make_optimizer(obj, lr=3e-4, wd=1e-4):
+        return torch.optim.AdamW(
+            [{"params": [p for p in obj.parameters() if p.requires_grad],
+              "lr": lr}],
+            weight_decay=wd,
+        )
+
+    # Phase B: no surrogate.
+    obj_b = _objective(surrogate=None)
+    opt_b = _make_optimizer(obj_b)
+    fp_b = _optimizer_param_shapes(opt_b)
+
+    # Phase C: frozen surrogate attached.
+    surr = _FakeSurrogate(seed=1)
+    for p in surr.parameters():
+        p.requires_grad_(False)
+    obj_c = _objective(surrogate=surr)
+    opt_c = _make_optimizer(obj_c)
+    fp_c = _optimizer_param_shapes(opt_c)
+
+    # 1. No surrogate params in the optimizer (any group).
+    opt_param_ids = {id(p) for g in opt_c.param_groups for p in g["params"]}
+    surr_param_ids = {id(p) for p in surr.parameters()}
+    assert not (opt_param_ids & surr_param_ids), (
+        "frozen surrogate parameters must NOT be in the optimizer")
+
+    # 2. Phase-B and Phase-C fingerprints identical.
+    assert fp_b == fp_c, (
+        f"optimizer fingerprints must match with/without frozen surrogate: "
+        f"{fp_b} vs {fp_c}")
+
+    # Objective trainable group = projector parameters only.
+    proj_param_ids = {id(p) for p in obj_c.projector.parameters()}
+    obj_group_ids = {id(p) for g in opt_c.param_groups for p in g["params"]}
+    assert obj_group_ids == proj_param_ids, (
+        "objective optimizer group must be exactly the projector parameters")
+
+    # 3. Surrogate still receives no parameter gradients.
+    assert all(p.requires_grad is False for p in surr.parameters()), (
+        "surrogate parameters must remain requires_grad=False")
+
+    # 4. Geometry input still receives a physics gradient through the
+    # differentiable surrogate (no no_grad around the forward).
+    from physics.physics_loop import physics_loss_from_out
+
+    x = torch.randn(2, 3, 64, 64, requires_grad=True)
+    out = {"z_hat": torch.randn(2, 256, 192),
+           "scalar_pred": torch.randn(2, 3)}
+    surrogate = _FakeSurrogate(seed=2)
+    for p in surrogate.parameters():
+        p.requires_grad_(False)
+
+    class _ModelStub(nn.Module):
+        """decode_geometry stub: return x-shaped geometry from z_hat/scalars,
+        ignoring occupancy retention (the physics path's gradient flows into
+        the geometry input regardless)."""
+        def __init__(self):
+            super().__init__()
+            self.geo = x
+
+        def decode_geometry(self, z_hat, scalar_pred, occ_input=None,
+                            mask=None, use_ste=False, scalar_known=None,
+                            scalar_values=None, hard_forward=False):
+            return self.geo, self.geo
+
+    occ = torch.rand(2, 1, 64, 64)
+    sv = torch.rand(2, 3)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    spec = torch.randn(2, 2, 301)
+    M = torch.ones(2, 16, 16)
+    model_stub = _ModelStub()
+    L_phys, _, _ = physics_loss_from_out(
+        model_stub, out, surrogate, occ, sv, sk, spec, M,
+        loss_type="smooth_l1", use_ste=False, normalize=False)
+    assert L_phys.requires_grad, "physics loss must be differentiable"
+    L_phys.backward()
+    assert x.grad is not None and x.grad.abs().sum() > 0, (
+        "geometry input must receive a physics gradient (surrogate forward "
+        "must not be no_grad)")
 
 
 if __name__ == "__main__":

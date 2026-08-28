@@ -295,6 +295,51 @@ def test_occupancy_decoder_spatial_order_preserved():
     # positional reconstruction is not expected after convs, but the reshape
     # order is the row-major convention (no permutation).
     assert torch.isfinite(out).all()
+
+
+def test_occupancy_decoder_effective_scalars_known_vs_predicted():
+    """Decoder FiLM must receive the EFFECTIVE scalars: known scalars use the
+    exact supplied value, unknown scalars use the prediction (Item 1.7).
+
+    With un-zeroed FiLM heads, the same z decoded with effective scalars from
+    a known scalar (true value) must differ from decoding with the prediction —
+    proving known values flow into decoder conditioning, not scalar_pred."""
+    from decoders.occupancy_decoder import OccupancyDecoder
+    torch.manual_seed(0)
+    dec = OccupancyDecoder(hidden=192)
+    torch.manual_seed(123)
+    with torch.no_grad():
+        for block in (dec.block1, dec.block2):
+            block.film.weight.normal_(0.0, 0.5)
+            block.film.bias.normal_(0.0, 0.5)
+
+    z = torch.randn(1, 256, 192)
+    scalar_pred = torch.tensor([[99.0, 99.0, 99.0]])   # deliberately wrong
+    scalar_values = torch.tensor([[3.0, 1.0, 9.0]])    # known ground truth
+    scalar_known = torch.ones(1, 3, dtype=torch.bool)  # all known
+
+    # Effective scalars per architecture_v5.md §4.1.
+    effective = torch.where(scalar_known, scalar_values, scalar_pred)
+    with torch.no_grad():
+        out_known = dec(z, effective)
+        out_pred = dec(z, scalar_pred)
+
+    # Known values must flow into the decoder (different from the prediction).
+    assert not torch.allclose(out_known, out_pred, atol=1e-6), (
+        "decoder FiLM must receive effective (known) scalars, not scalar_pred")
+
+    # Unknown scalar → prediction flows in.
+    sk_mixed = torch.zeros(1, 3, dtype=torch.bool)
+    sk_mixed[:, 0] = True  # l known, h/r unknown
+    effective_mixed = torch.where(sk_mixed, scalar_values, scalar_pred)
+    with torch.no_grad():
+        out_mixed = dec(z, effective_mixed)
+    # The mixed case must match neither all-known nor all-predicted exactly.
+    assert not torch.allclose(out_mixed, out_known, atol=1e-6)
+    assert not torch.allclose(out_mixed, out_pred, atol=1e-6)
+
+
+def test_decode_geometry_substitutes_known_scalars():
     """Regression: decode_geometry must substitute true values for known
     scalars at assembly (the scalar analog of visible-occupancy retention).
 

@@ -366,30 +366,87 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
 
 
 def validate(model, objective, val_batches, cfg, device):
-    """Run validation on a list of pre-built (occ, sv, spec) batches."""
+    """Run validation on a list of pre-built (occ, sv, spec) batches.
+
+    Unified model signature: model(occupancy, scalar_values, scalar_known,
+    spectrum, mask). Reports BOTH raw-latent and projected-latent diagnostics
+    on the exact masked-token population used by the training objective, so
+    a raw-vs-projected discrepancy (projector/statistics problem) can be
+    distinguished from a genuine representation failure.
+
+    Field-name convention (item 7):
+      - raw_*      : computed on z_hat / z_y_raw (encoder output space)
+      - proj_*     : computed on p_hat / p_y (objective projector space,
+                     the space in which L_inv/L_var/L_cov are trained)
+      - L_*        : the training objective's loss components
+      - L_total    : the FULL training objective (all weighted terms) — NOT a
+                     reconstruction/physics metric; do not read it as one.
+    """
     model.eval()
     objective.eval()
     val_mask_ratio = cfg["curriculum"].get("val_mask_ratio", 0.5)
     val_masker = BlockMasker(
         placement="random", grid=16, min_side=3, k_range=(1, 4),
         seed=12345)
-    metrics = {"cos_err": [], "scalar_err": [], "L_total": []}
+    metrics = {
+        "raw_mse": [], "raw_cos_err": [], "raw_z_hat_norm": [],
+        "raw_z_y_norm": [],
+        "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
+        "proj_p_y_norm": [],
+        "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
+        "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
+        "scalar_err": [],
+    }
     try:
         with torch.no_grad():
             for occ, sv, spec in val_batches:
                 B = occ.shape[0]
                 sk = torch.ones(B, 3, dtype=torch.bool, device=device)  # all known for val
-                M = val_masker.sample(occ, val_mask_ratio).to(device)  # fixed val mask
+                # Validation masks are deterministic (fixed seed) and
+                # explicitly transferred to the model device.
+                M = val_masker.sample(occ, val_mask_ratio).to(device)
+                assert M.device == occ.device, (
+                    "validation mask must be on the model device")
                 result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
-                m = result["components"]["L_total"]
-                metrics["L_total"].append(float(m))
-                # cos error between prediction and target
-                cos_err = (1 - torch.nn.functional.cosine_similarity(
-                    result["out"]["z_hat"].flatten(0, 1),
-                    result["out"]["z_y_raw"].flatten(0, 1),
-                    dim=-1).clamp(min=0)).mean()
-                metrics["cos_err"].append(float(cos_err))
-                se = (result["out"]["scalar_pred"] - sv).abs().mean()
+                out = result["out"]
+                mask_bool = out["mask"]
+                z_hat, z_y = out["z_hat"], out["z_y_raw"]
+
+                # --- RAW latent space diagnostics (masked tokens only) ---
+                z_hat_m = z_hat[mask_bool]
+                z_y_m = z_y[mask_bool]
+                raw_mse = torch.nn.functional.mse_loss(z_hat_m, z_y_m)
+                raw_cos = (1 - torch.nn.functional.cosine_similarity(
+                    z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()
+                metrics["raw_mse"].append(float(raw_mse))
+                metrics["raw_cos_err"].append(float(raw_cos))
+                metrics["raw_z_hat_norm"].append(
+                    float(z_hat_m.norm(dim=-1).mean()))
+                metrics["raw_z_y_norm"].append(
+                    float(z_y_m.norm(dim=-1).mean()))
+
+                # --- PROJECTED latent space diagnostics (same tokens) ---
+                # p_hat/p_y are exactly the tensors L_inv uses.
+                p_hat_full = result["projector_outputs"]["p_hat"]
+                p_y_full = result["projector_outputs"]["p_y"]
+                p_hat_m = p_hat_full[mask_bool]
+                p_y_m = p_y_full[mask_bool]
+                proj_mse = torch.nn.functional.mse_loss(p_hat_m, p_y_m)
+                proj_cos = (1 - torch.nn.functional.cosine_similarity(
+                    p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()
+                metrics["proj_mse"].append(float(proj_mse))
+                metrics["proj_cos_err"].append(float(proj_cos))
+                metrics["proj_p_hat_norm"].append(
+                    float(p_hat_m.norm(dim=-1).mean()))
+                metrics["proj_p_y_norm"].append(
+                    float(p_y_m.norm(dim=-1).mean()))
+
+                # --- Loss components (composition is explicit) ---
+                c = result["components"]
+                for k in ("L_total", "L_inv", "L_var", "L_cov", "L_scalar",
+                          "L_phys", "L_phys_weighted"):
+                    metrics[k].append(float(c[k]))
+                se = (out["scalar_pred"] - sv).abs().mean()
                 metrics["scalar_err"].append(float(se))
     finally:
         model.train()
@@ -698,10 +755,16 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
         if step % log_every == 0:
             c = result["components"]
+            # L_phys is the RAW physics term; L_phys_weighted is
+            # lambda_phys * L_phys — the actual contribution to the objective
+            # (item 10: report both, never describe Phase C by the raw value
+            # alone).
             print(f"step {step:5d}  loss={last_loss:.4f}  "
                   f"L_inv={c['L_inv']:.4f} L_var={c['L_var']:.4f} "
                   f"L_cov={c['L_cov']:.4f} L_scalar={c['L_scalar']:.4f} "
-                  f"L_phys={c['L_phys']:.4f} lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"L_phys={c['L_phys']:.4f} "
+                  f"L_phys_w={c['L_phys_weighted']:.4f} "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         if step % val_every == 0 and step > 0:
             val_metrics = validate(model, objective, val_batches, cfg, device)

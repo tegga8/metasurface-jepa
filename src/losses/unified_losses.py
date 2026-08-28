@@ -211,6 +211,7 @@ class UnifiedJEPALoss(nn.Module):
             "L_inv_weighted": float(L_inv_w.detach()),
             "L_var_weighted": float(L_var_w.detach()),
             "L_cov_weighted": float(L_cov_w.detach()),
+            "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_total": float(total.detach()),
         }
         return {

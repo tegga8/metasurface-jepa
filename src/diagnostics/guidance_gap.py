@@ -80,7 +80,9 @@ def guidance_gap_sweep(model, occ, sv, spec, masker, ratios, device="cpu"):
     sk = torch.ones(occ.shape[0], 3, dtype=torch.bool, device=device)
     results = {}
     for ratio in ratios:
-        M = masker.sample(occ, ratio)
+        # Fix (CUDA mask bug): masker.sample returns CPU tensors — move to
+        # the active device before the model forward.
+        M = masker.sample(occ, ratio).to(device)
         gap_info = compute_guidance_gap(model, occ, sv, sk, spec, M, device)
         results[ratio] = gap_info["normalized_guidance_gap"]
     return results

@@ -412,7 +412,10 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
 
     # Scenario A: pure inverse design (full mask + all scalars unknown)
     sk_a = torch.zeros(b, 3, dtype=torch.bool, device=device)
-    M_a = masker.sample(occ, ratio=1.0)
+    # Fix (CUDA mask bug): masker.sample returns CPU tensors — move to the
+    # active device before any model forward.
+    M_a = masker.sample(occ, ratio=1.0).to(device)
+    assert M_a.device == occ.device, "scenario A mask must be on the model device"
     results["scenario_A_pure_inverse"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
     results["scenario_A_rns"] = real_null_shuffled(
@@ -425,7 +428,8 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     # representative partial-known semantics: every row has exactly one known
     # scalar, alternating which one.
     sk_b = _scenario_b_known_flags(b, device)
-    M_b = masker.sample(occ, ratio=0.5)
+    M_b = masker.sample(occ, ratio=0.5).to(device)
+    assert M_b.device == occ.device, "scenario B mask must be on the model device"
     results["scenario_B_partial"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
     results["scenario_B_rns"] = real_null_shuffled(
@@ -433,7 +437,8 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
 
     # Scenario C: retrofit (25% mask + all scalars known)
     sk_c = torch.ones(b, 3, dtype=torch.bool, device=device)
-    M_c = masker.sample(occ, ratio=0.25)
+    M_c = masker.sample(occ, ratio=0.25).to(device)
+    assert M_c.device == occ.device, "scenario C mask must be on the model device"
     results["scenario_C_retrofit"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
     results["scenario_C_rns"] = real_null_shuffled(

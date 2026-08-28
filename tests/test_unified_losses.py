@@ -296,6 +296,21 @@ def test_full_mask_batch():
     assert M.min().item() == 0.0
 
 
+def test_zero_mask_batch_all_visible():
+    """mask_ratio=0.0 must produce all-ones mask (every position visible).
+
+    Regression (Fix 13): the nominal 0% mask regime previously still produced
+    at least one block (min_side=3), so "0% mask" was not actually zero masking.
+    """
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=42)
+    M = masker.sample(occ, ratio=0.0)
+    assert M.shape == (2, 16, 16)
+    assert (M == 1.0).all(), "ratio=0.0 must leave every position visible"
+    assert M.dtype == torch.float32
+
+
 # --------------------------------------------------------------------------
 # Resume equivalence
 # --------------------------------------------------------------------------

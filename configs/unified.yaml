@@ -56,15 +56,15 @@ staging:
 
 weights:
   spectrum: data/metadit/weights/spec_encoder.pth
-  metadit: data/metadit/dit.pt
+  metadit: data/metadit/weights/metadit-small.bin
   surrogate: data/metadit/weights/surrogate_model.bin  # released forward EM surrogate (frozen, §1.6)
 
 data:
-  train_split: data/metadit/train
-  val_split: data/metadit/val
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
   max_train_samples: 0
   num_workers: 0
-  use_synthetic: false   # set true for local smoke test without real data
+  use_synthetic: false   # set true only via explicit --use-synthetic-smoke CLI flag
 
 train:
   batch_size: 2

@@ -51,24 +51,40 @@ from runtime.device import resolve_device
 from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
 
 
-def _ensure_spectrum_weights(path, device):
-    """Create a dummy spectrum encoder checkpoint if the real one is absent.
+def _ensure_spectrum_weights(path, device, allow_dummy=False):
+    """Resolve the released spectrum encoder checkpoint.
 
-    For local smoke testing only — the real checkpoint is staged on cloud GPU
-    per CLOUD_TRAINING.md. The dummy uses the released VanillaSpectrumEncoder's
-    own random init (frozen in practice during training).
+    Args:
+        path:        configured spectrum encoder checkpoint path.
+        allow_dummy: if True (explicit smoke mode), create a random-init
+                     VanillaSpectrumEncoder checkpoint when the released one
+                     is absent. Must NEVER be an implicit fallback for real
+                     training.
+
+    Returns:
+        resolved path.
+
+    Raises:
+        RuntimeError: in real mode when the released checkpoint is missing.
     """
     if os.path.exists(path):
         return path
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        from model.spec_encoder import VanillaSpectrumEncoder
-    except ImportError:
-        return path  # let build_unified_model fail with a clear error
-    enc = VanillaSpectrumEncoder()
-    torch.save(enc.state_dict(), path)
-    print(f"[smoke] Created dummy spectrum encoder checkpoint at {path}")
-    return path
+    if allow_dummy:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            from model.spec_encoder import VanillaSpectrumEncoder
+        except ImportError:
+            raise RuntimeError(
+                f"spectrum checkpoint {path} missing and VanillaSpectrumEncoder "
+                "unavailable — cannot create smoke dummy") from None
+        enc = VanillaSpectrumEncoder()
+        torch.save(enc.state_dict(), path)
+        print(f"[smoke] Created dummy spectrum encoder checkpoint at {path}")
+        return path
+    raise RuntimeError(
+        f"released spectrum encoder checkpoint not found at {path}. "
+        "Real training requires the released weights; pass --use-synthetic-smoke "
+        "only for controlled local smoke tests.")
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +120,21 @@ def make_synthetic_dataset(n, device):
 # ---------------------------------------------------------------------------
 
 def sample_mask_ratio(cfg, rng):
-    """Sample an occupancy mask ratio from the curriculum distribution."""
+    """Sample an occupancy mask ratio from the curriculum distribution.
+
+    The 0.0 ratio (no masking) is excluded from TRAINING sampling: with zero
+    masked tokens the masked-token VICReg/JEPA objective is undefined (N>=2
+    required for variance/covariance). 0.0 remains a valid evaluation stratum
+    (easy regime)."""
     ratios = cfg["curriculum"]["mask_ratios"]
     probs = cfg["curriculum"]["mask_ratio_probs"]
-    p = torch.tensor(probs)
+    # Exclude ratio 0.0 from training: no masked tokens → undefined objective.
+    pairs = [(r, p) for r, p in zip(ratios, probs) if r > 0.0]
+    rs, ps = zip(*pairs) if pairs else ([1.0], [1.0])
+    p = torch.tensor(ps, dtype=torch.float32)
+    p = p / p.sum()
     idx = torch.multinomial(p, 1, generator=rng).item()
-    return ratios[idx]
+    return rs[idx]
 
 
 def sample_scalar_known(B, cfg, rng):
@@ -298,17 +323,51 @@ def validate(model, objective, val_batches, cfg, device):
 # main training loop
 # ---------------------------------------------------------------------------
 
-def train(cfg, resume_path=None, no_train=False, device=None):
-    """Main entry point. Returns a summary dict."""
+def train(cfg, resume_path=None, no_train=False, device=None,
+          use_synthetic_smoke=False):
+    """Main entry point. Returns a summary dict.
+
+    Args:
+        use_synthetic_smoke: explicit smoke mode — synthetic data and dummy
+            spectrum weights allowed. Real mode (default) requires the real
+            dataset and released weights and fails loudly if they are missing.
+    """
     from train.engine import collect_ema_state
 
     set_seed(cfg["train"].get("seed", 42))
     device = device or resolve_device(cfg["train"].get("device", "cpu"))
     total_steps = cfg["train"].get("total_steps", 1500)
 
-    # --- model ---
+    # --- data mode banner (Fix 16) ---
+    def _resolved(path):
+        return os.path.join(REPO_ROOT, path) if not os.path.isabs(path) else path
+
+    train_split = _resolved(cfg["data"]["train_split"])
+    val_split = _resolved(cfg["data"]["val_split"])
+    spec_path = _resolved(cfg["weights"]["spectrum"])
+    surr_path = _resolved(cfg["weights"]["surrogate"])
+    mode = "SMOKE (synthetic)" if use_synthetic_smoke else "REAL"
+    print(f"DATA MODE: {mode}")
+    print(f"TRAIN SPLIT: {train_split}")
+    print(f"VAL SPLIT: {val_split}")
+    print(f"SPECTRUM ENCODER: {spec_path}")
+    print(f"SURROGATE: {surr_path}")
+    print(f"ARCHITECTURE ID: unified_occ_param_spectrum_jepa_v1")
+
+    # --- strict real-data requirement (Fix 5) ---
+    if not use_synthetic_smoke:
+        missing = [p for p in (train_split, val_split) if not os.path.exists(p)]
+        if missing:
+            raise RuntimeError(
+                f"real dataset split(s) missing: {missing}. Refusing to "
+                "silently fall back to synthetic data in real training mode. "
+                "Pass --use-synthetic-smoke for an explicit local smoke run.")
+    # Synthetic data requires the explicit smoke flag (never an implicit fallback).
+    use_synthetic = use_synthetic_smoke
+
+    # --- model (Fix 6: released spectrum weights required in real mode) ---
     spec_weights = _ensure_spectrum_weights(
-        cfg["weights"]["spectrum"], device)
+        spec_path, device, allow_dummy=use_synthetic_smoke)
     model = build_unified_model(cfg, spec_weights, device=device)
     cfg.setdefault("_architecture_id", model.architecture_id)
 
@@ -367,14 +426,15 @@ def train(cfg, resume_path=None, no_train=False, device=None):
                   f"masking from {surrogate_path}")
 
     # --- data ---
-    use_synthetic = cfg.get("data", {}).get("use_synthetic", False)
+    # use_synthetic is bound from use_synthetic_smoke above (never an implicit
+    # fallback from a missing path — that now raises in real mode).
     train_cfg = cfg["train"]
-    if use_synthetic or not os.path.exists(cfg["data"].get("train_split", "")):
+    if use_synthetic:
         n_train = max(train_cfg.get("batch_size", 2) * 4, 8)
         train_data = make_synthetic_dataset(n_train, device)
     else:
         ds = MetaDiTDataset(
-            cfg["data"]["train_split"],
+            train_split,
             max_samples=cfg["data"].get("max_train_samples", 0),
             seed=cfg["train"].get("seed", 42),
         )
@@ -383,13 +443,12 @@ def train(cfg, resume_path=None, no_train=False, device=None):
                             collate_fn=collate_batch)
 
     val_batches = []
-    if cfg.get("data", {}).get("use_synthetic", True) or \
-       not os.path.exists(cfg["data"].get("val_split", "")):
+    if use_synthetic:
         val_batches = make_synthetic_dataset(
             cfg["train"].get("val_batches", 1), device)
     else:
         vds = MetaDiTDataset(
-            cfg["data"]["val_split"],
+            val_split,
             max_samples=cfg["train"].get("val_batches", 1) * train_cfg["batch_size"],
             seed=cfg["train"].get("seed", 42) + 1000,
         )
@@ -415,7 +474,7 @@ def train(cfg, resume_path=None, no_train=False, device=None):
         model.train()
         rng = torch.Generator().manual_seed(cfg["train"].get("seed", 42))
         regime_logger = RegimeLogger(cfg)
-        if use_synthetic or not isinstance(train_data, DataLoader):
+        if use_synthetic:
             occ, sv, spec = train_data[0]
         else:
             G, S = next(iter(loader))
@@ -573,6 +632,131 @@ def evaluate_forward(model, occ, sv, spec, mask, cfg, device):
 
 
 # ---------------------------------------------------------------------------
+# real-data preflight (Fix 17)
+# ---------------------------------------------------------------------------
+
+def preflight(cfg, device=None):
+    """End-to-end real-data preflight: one real sample through the full path.
+
+    real sample → factorize_geometry → mask → scalar masking → unified forward
+    → occupancy decode → known-scalar substitution → assemble_metadit_geometry
+    → frozen surrogate → finite physics loss → backward.
+
+    Verifies shapes, finiteness, and gradient ownership. Must pass before the
+    first real training run.
+    """
+    device = device or resolve_device(cfg["train"].get("device", "cpu"))
+    set_seed(cfg["train"].get("seed", 42))
+
+    train_split = os.path.join(REPO_ROOT, cfg["data"]["train_split"])
+    if not os.path.exists(train_split):
+        raise RuntimeError(f"preflight requires the real training split: {train_split}")
+
+    spec_weights = _ensure_spectrum_weights(
+        os.path.join(REPO_ROOT, cfg["weights"]["spectrum"]), device,
+        allow_dummy=False)
+    model = build_unified_model(cfg, spec_weights, device=device)
+    model.train()
+
+    surrogate_path = os.path.join(REPO_ROOT, cfg["weights"]["surrogate"])
+    if not os.path.exists(surrogate_path):
+        raise RuntimeError(f"preflight requires the released surrogate: {surrogate_path}")
+    surrogate = load_surrogate(surrogate_path, device=device)
+
+    # Preflight objective: physics loss FORCED ON (lambda_phys > 0) so the
+    # surrogate gradient path is actually exercised — the config default is
+    # lambda_phys=0 (stage B), which would leave the physics path untested.
+    objective = UnifiedJEPALoss(
+        hidden=cfg["hidden"],
+        lambda_inv=cfg.get("loss", {}).get("lambda_inv", 25.0),
+        lambda_var=cfg.get("loss", {}).get("lambda_var", 25.0),
+        lambda_cov=cfg.get("loss", {}).get("lambda_cov", 1.0),
+        lambda_scalar=cfg.get("loss", {}).get("lambda_scalar", 1.0),
+        lambda_phys=max(cfg.get("loss", {}).get("lambda_phys", 0.0), 1.0),
+        surrogate=surrogate,
+        physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
+    ).to(device)
+
+    # One real batch.
+    ds = MetaDiTDataset(train_split, max_samples=2, seed=0)
+    G, S = collate_batch([ds[0], ds[1]])
+    occ, sv = factorize_geometry(G)
+    occ, sv = occ.to(device), sv.to(device)
+    S = S.to(device)
+    b = occ.shape[0]
+
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=42)
+    M = masker.sample(occ, ratio=0.5)
+    sk = torch.zeros(b, 3, dtype=torch.bool, device=device)  # all unknown (hard stratum)
+
+    result = objective(model, occ, sv, sk, S, M, goal_mode="real")
+    loss = result["total_loss"]
+    if not torch.isfinite(loss):
+        raise RuntimeError(f"preflight: non-finite total loss {loss.item()}")
+    loss.backward()
+
+    out = result["out"]
+    geometry, _ = model.decode_geometry(
+        out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+        scalar_known=sk, scalar_values=sv)
+    spec_pred = surrogate(geometry).prediction
+
+    checks = {
+        "occupancy_shape": list(occ.shape),
+        "z_x_shape": list(out["z_x"].shape),
+        "z_hat_shape": list(out["z_hat"].shape),
+        "scalar_pred_shape": list(out["scalar_pred"].shape),
+        "assembled_geometry_shape": list(geometry.shape),
+        "surrogate_prediction_shape": list(spec_pred.shape),
+        "loss_finite": bool(torch.isfinite(loss)),
+        "geometry_finite": bool(torch.isfinite(geometry).all()),
+        "spec_pred_finite": bool(torch.isfinite(spec_pred).all()),
+    }
+
+    # Gradient ownership.
+    student_grads = sum(
+        1 for p in model.parameters()
+        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
+    decoder_grads = sum(
+        1 for p in model.geometry_decoder.parameters()
+        if p.grad is not None and p.grad.abs().sum() > 0)
+    predictor_grads = sum(
+        1 for p in model.predictor.parameters()
+        if p.grad is not None and p.grad.abs().sum() > 0)
+    surrogate_grads = sum(
+        1 for p in surrogate.parameters() if p.grad is not None)
+    ema_grads = sum(
+        1 for p in model.ema.parameters() if p.grad is not None)
+    scalar_ema_grads = sum(
+        1 for p in model.scalar_mlp_ema.parameters() if p.grad is not None)
+    released = getattr(model.spectrum_path, "released", None)
+    released_grads = sum(
+        1 for p in released.parameters() if p.grad is not None) if released else 0
+
+    ownership = {
+        "student_params_with_grad": student_grads,
+        "decoder_params_with_grad": decoder_grads,
+        "predictor_params_with_grad": predictor_grads,
+        "surrogate_params_with_grad": surrogate_grads,
+        "ema_params_with_grad": ema_grads,
+        "scalar_mlp_ema_params_with_grad": scalar_ema_grads,
+        "released_params_with_grad": released_grads,
+    }
+
+    if student_grads == 0:
+        raise RuntimeError("preflight: no student parameters received gradients")
+    if decoder_grads == 0 or predictor_grads == 0:
+        raise RuntimeError("preflight: decoder/predictor received no gradients")
+    if surrogate_grads != 0 or ema_grads != 0 or scalar_ema_grads != 0 or released_grads != 0:
+        raise RuntimeError(
+            f"preflight: frozen params received gradients: {ownership}")
+
+    return {"checks": checks, "gradient_ownership": ownership,
+            "loss": float(loss.detach())}
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -587,6 +771,14 @@ def main():
                         help="Forward-only smoke test (Phase 3 MD §5 stage A)")
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g. 'cpu' or 'cuda')")
+    parser.add_argument("--use-synthetic-smoke", action="store_true",
+                        help="EXPLICIT smoke mode: synthetic data + dummy "
+                             "spectrum weights allowed. Never used for real "
+                             "training; normal invocation requires the real "
+                             "dataset and released weights.")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Run the real-data end-to-end preflight (Fix 17) "
+                             "and exit.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -594,8 +786,13 @@ def main():
 
     device = args.device or cfg["train"].get("device", "cpu")
 
+    if args.preflight:
+        result = preflight(cfg, device=device)
+        print(json.dumps(result, indent=2))
+        return
+
     report = train(cfg, resume_path=args.resume, no_train=args.no_train,
-                   device=device)
+                   device=device, use_synthetic_smoke=args.use_synthetic_smoke)
     print(json.dumps(report, indent=2))
 
 

@@ -43,6 +43,9 @@ def _window_scores(sens, h, w):
 def random_masks(rng, batch_size, ratio, grid=DEFAULT_GRID, min_side=DEFAULT_MIN_SIDE,
                  k_range=DEFAULT_K_RANGE):
     """Random-placement block masks. Returns M (B, grid, grid), 1 = visible."""
+    if ratio <= 0.0:
+        # 0% mask: every position visible (1 = visible, 0 = masked).
+        return torch.ones(batch_size, grid, grid, dtype=torch.float32)
     if ratio >= 0.999:
         return torch.zeros(batch_size, grid, grid, dtype=torch.float32)
     k = int(torch.randint(k_range[0], k_range[1] + 1, (), generator=rng).item())
@@ -69,6 +72,8 @@ def sensitivity_masks(rng, geometry, ratio, surrogate, grid=DEFAULT_GRID,
     pixel is an unbiased estimate of the per-pixel squared Jacobian norm
     (Hutchinson-style). Aggregated per 4x4-pixel block (i.e. per 16x16 token).
     """
+    if ratio <= 0.0:
+        return torch.ones(geometry.shape[0], grid, grid, dtype=torch.float32)
     if ratio >= 0.999:
         return torch.zeros(geometry.shape[0], grid, grid, dtype=torch.float32)
     k = int(torch.randint(k_range[0], k_range[1] + 1, (), generator=rng).item())

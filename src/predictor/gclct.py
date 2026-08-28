@@ -100,20 +100,29 @@ class GCLCTBlock(nn.Module):
 
 
 class GCLCT(nn.Module):
-    def __init__(self, depth=8, hidden=384, num_heads=6):
+    def __init__(self, depth=8, hidden=384, num_heads=6, c_physics_dim=None):
         super().__init__()
         self.depth = depth
         self.hidden = hidden
+        c_physics_dim = c_physics_dim if c_physics_dim is not None else hidden
+        self.c_physics_dim = c_physics_dim
+        if c_physics_dim != hidden:
+            self.c_phys_proj = nn.Linear(c_physics_dim, hidden)
+        else:
+            self.c_phys_proj = nn.Identity()
         self.blocks = nn.ModuleList([GCLCTBlock(hidden, num_heads) for _ in range(depth)])
         self.final_norm = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
         self.head = nn.Linear(hidden, hidden, bias=True)
 
     def forward(self, queries, kv, c_physics, need_weights=False):
-        """queries: (B, 256, 384); kv: (B, 256+16, 384); c_physics: (B, 384).
+        """queries: (B, T_q, hidden); kv: (B, T_kv, hidden);
+        c_physics: (B, c_physics_dim) — projected to hidden via c_phys_proj
+        when c_physics_dim != hidden (architecture_v5.md §3.5).
 
-        Returns z_hat (B, 256, 384) and per-block cross-attention weights (list of
-        (B, H, 256, 272) tensors) when need_weights=True.
+        Returns z_hat (B, T_q, hidden) and per-block cross-attention weights (list of
+        (B, H, T_q, T_kv) tensors) when need_weights=True.
         """
+        c_physics = self.c_phys_proj(c_physics)
         x = queries
         weights = []
         for block in self.blocks:

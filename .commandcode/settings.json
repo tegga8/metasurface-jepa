@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(python -c \" import os, glob for d in ['src', 'tests', 'configs', 'scripts']: print(f'=== {d} ===') for f in sorted(glob.glob(f'{d}/**/*.py', recursive=True)): print(f) for f in sorted(glob.glob(f'{d}/*.yaml', recursive=True)): print(f) \")",
+      "Shell(which python python3 2>/dev/null; python --version 2>&1; python3 --version 2>&1; pip --version 2>&1)",
+      "powershell",
+      "Shell(python -c \"import sys; sys.path.insert(0, 'src'); from data.factorize import factorize_geometry, assemble_geometry; from data.scalar_mask import ScalarMasker; from encoders.occupancy_encoder import OccupancyEncoder; from encoders.scalar_encoder import ScalarEncoder; from fusion.fusion_encoder import FusionEncoder; print('All imports OK')\" 2>&1)",
+      "Shell(python -m pytest tests/test_unified_data_contract.py -v --timeout=60 2>&1)",
+      "Shell(python -m pytest tests/test_unified_data_contract.py -v 2>&1)",
+      "Shell(python -m pytest tests/ -q 2>&1)",
+      "Shell(python -m pytest tests/ -q -x --tb=short 2>&1; echo \"EXIT: $?\")"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

@@ -34,5 +34,8 @@ class EMAEncoder(nn.Module):
         for p_t, p_s in zip(self.target.parameters(), student.parameters()):
             p_t.lerp_(p_s, 1.0 - m)
 
-    def forward(self, G):
-        return self.target(G)
+    def forward(self, x, **kwargs):
+        """Transparent wrapper: passes through to the (EMA) target encoder with
+        any keyword arguments (e.g. film_params for the occupancy encoder,
+        or scalar_mlp input for the scalar encoder)."""
+        return self.target(x, **kwargs)

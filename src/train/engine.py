@@ -521,7 +521,9 @@ def collect_ema_state(model):
     must be carried explicitly in the checkpoint for exact resume (§30). The EMA
     TARGET ENCODER WEIGHTS are equally required: the JEPA loss predicts the
     target encoder's output, so a resume that rebuilds them from fresh init
-    silently trains against wrong targets. Stored CPU-cloned for portability."""
+    silently trains against wrong targets. Stored CPU-cloned for portability.
+
+    Also collects scalar_mlp_ema if the model exposes one (unified JEPA path)."""
     ema = model.ema
     state = {"momentum_start": ema.momentum_start,
              "momentum_end": ema.momentum_end,
@@ -530,6 +532,20 @@ def collect_ema_state(model):
     if target is not None:
         state["target"] = {k: v.detach().cpu().clone()
                            for k, v in target.state_dict().items()}
+    scalar_ema = getattr(model, "scalar_mlp_ema", None)
+    if scalar_ema is not None:
+        scalar_state = {
+            "momentum_start": scalar_ema.momentum_start,
+            "momentum_end": scalar_ema.momentum_end,
+            "total_steps": scalar_ema.total_steps,
+        }
+        scalar_target = getattr(scalar_ema, "target", None)
+        if scalar_target is not None:
+            scalar_state["target"] = {
+                k: v.detach().cpu().clone()
+                for k, v in scalar_target.state_dict().items()
+            }
+        state["scalar_mlp_ema"] = scalar_state
     return state
 
 
@@ -556,6 +572,23 @@ def restore_ema_state(model, ema_state):
                   "uninterrupted run.")
         else:
             target.load_state_dict(saved_target)
+    # Restore scalar_mlp_ema if the model exposes one (unified JEPA path).
+    scalar_ema_state = ema_state.get("scalar_mlp_ema")
+    if scalar_ema_state is not None:
+        scalar_ema = getattr(model, "scalar_mlp_ema", None)
+        if scalar_ema is not None:
+            scalar_ema.momentum_start = float(scalar_ema_state["momentum_start"])
+            scalar_ema.momentum_end = float(scalar_ema_state["momentum_end"])
+            if "total_steps" in scalar_ema_state:
+                scalar_ema.set_total_steps(scalar_ema_state["total_steps"])
+            scalar_target = getattr(scalar_ema, "target", None)
+            if scalar_target is not None:
+                saved_scalar = scalar_ema_state.get("target")
+                if saved_scalar is None:
+                    print("[checkpoint] WARNING: scalar_mlp_ema has no 'target' "
+                          "weights — left at current init.")
+                else:
+                    scalar_target.load_state_dict(saved_scalar)
 
 
 def _optimizer_param_shapes(optimizer):

@@ -1,0 +1,86 @@
+# Unified JEPA model + training — architecture_v5.md §3-§5, unified_jepa/Phase 3
+# Phase 4 MD: guidance + physics loop integration
+# architecture_id: unified_occ_param_spectrum_jepa_v1
+
+# Scalar convention (Phase 1 MD §3: store the verified convention in config/
+# checkpoint metadata — do not re-derive or normalize scalars twice).
+scalar_convention:
+  parameter_order: ["l_lattice", "h_atom", "r_atom"]
+  parameter_index_in_dataset: [0, 1, 2]
+  broadcast_channel:
+    l_lattice: {channel: 2, divisor: 3.0, dense: true}
+    h_atom: {channel: 1, divisor: 1.0, dense: false}
+    r_atom: {channel: 0, divisor: 5.0, dense: false}
+  factorized_scalar_representation: raw physical values (not rescaled)
+
+variant: unified
+hidden: 192
+num_heads: 6
+geo_depth: 6
+predictor_depth: 8
+goal_tokens: 16
+num_predictor_heads: 6
+scalar_hidden: 128
+n_film_blocks: 6
+spec_dim: 256
+ema_momentum_start: 0.996
+ema_momentum_end: 0.999
+
+# Loss weights per Phase 3 MD §3 (Phase 4 MD §4 extends with L_S/L_A)
+loss:
+  lambda_inv: 25.0      # JEPA invariance (MSE on masked tokens)
+  lambda_var: 25.0      # VICReg variance penalty
+  lambda_cov: 1.0       # VICReg covariance penalty
+  lambda_scalar: 1.0    # scalar L1 on unknown positions
+  lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
+  gamma: 1.0            # VICReg variance hinge threshold
+  eps: 1.0e-4           # VICReg numerical epsilon
+
+# Mask curriculum (Phase 3 MD §4)
+curriculum:
+  mask_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
+  mask_ratio_probs: [0.2, 0.2, 0.3, 0.2, 0.1]
+  mask_placement: random      # "random" or "half_sensitivity" (architecture_v5.md §2)
+  scalar_regimes: ["all_known", "all_unknown", "mixed"]
+  scalar_regime_probs: [0.34, 0.33, 0.33]
+  # Phase 3 MD §4: easy (low mask + known scalars), hard (full mask + all unknown)
+  easy_mask_ratio: 0.0
+  hard_mask_ratio: 1.0
+
+# Physics loss staging (Phase 3 MD §5, extended Phase 4 MD §4.1)
+staging:
+  phase: B             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
+  lambda_phys_ramp_steps: 0  # Phase 4+ : ramp from 0 over these steps
+  physics_use_ste: true      # Phase 4 MD §3: STE documented choice (surrogate ReLU6
+                             # zero-Jacobian on soft fields, verified by soft_hard_occupancy_test)
+
+weights:
+  spectrum: data/metadit/weights/spec_encoder.pth
+  metadit: data/metadit/dit.pt
+  surrogate: data/metadit/weights/surrogate_model.bin  # released forward EM surrogate (frozen, §1.6)
+
+data:
+  train_split: data/metadit/train
+  val_split: data/metadit/val
+  max_train_samples: 0
+  num_workers: 0
+  use_synthetic: false   # set true for local smoke test without real data
+
+train:
+  batch_size: 2
+  grad_accum: 1
+  epochs: 1
+  lr: 3.0e-4
+  wd: 1.0e-4
+  warmup_steps: 100
+  total_steps: 1500
+  val_every_steps: 50
+  log_every_steps: 10
+  ckpt_every_steps: 100
+  clip_grad_norm: 1.0
+  seed: 42
+  val_batches: 1
+  device: cpu
+  max_steps: 3
+  # Phase 4 MD §3.5.1: classifier-free goal guidance
+  guidance_dropout: 0.1   # probability of null-goal replacement during training

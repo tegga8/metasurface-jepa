@@ -105,7 +105,7 @@ def test_goal_dropout_rate_approximately_correct():
 
 
 def test_cfg_forward_shapes():
-    """cfg_forward returns guided z_hat with correct shape."""
+    """cfg_forward returns guided z_hat + guided scalar with correct shapes."""
     from predictor.guidance import cfg_forward
     model = _build_model()
     occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
@@ -116,16 +116,19 @@ def test_cfg_forward_shapes():
     M = torch.ones(2, 16, 16)
     M[:, :8, :8] = 0  # mask out some
 
-    z_guided, info = cfg_forward(model, occ, sv, sk, spec, M, w=1.0)
+    z_guided, scalar_guided, info = cfg_forward(
+        model, occ, sv, sk, spec, M, w=1.0)
     assert z_guided.shape == (2, 256, 192), f"Expected (2,256,192), got {z_guided.shape}"
+    assert scalar_guided.shape == (2, 3), f"Expected (2,3), got {scalar_guided.shape}"
     assert "guidance_gap" in info
     assert "normalized_guidance_gap" in info
+    assert "q_real" in info and "q_null" in info
     assert info["guidance_gap"] > 0  # real ≠ null at init
 
 
 @torch.no_grad()
 def test_cfg_forward_w0_equals_null():
-    """w=0 → guided == null prediction."""
+    """w=0 → guided == null prediction (both branches)."""
     from predictor.guidance import cfg_forward
     model = _build_model()
     occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
@@ -135,13 +138,18 @@ def test_cfg_forward_w0_equals_null():
     M = torch.ones(2, 16, 16)
     M[:, :8, :8] = 0
 
-    z_guided, info = cfg_forward(model, occ, sv, sk, spec, M, w=0.0)
+    z_guided, scalar_guided, info = cfg_forward(
+        model, occ, sv, sk, spec, M, w=0.0)
     assert torch.allclose(z_guided, info["z_hat_null"], atol=1e-5)
+    # Scalar branch: w=0 → null scalar summary → scalar_pred from q_null.
+    q_null_decoded = model.scalar_decoder(info["q_null"])
+    assert torch.allclose(scalar_guided, q_null_decoded, atol=1e-5), (
+        "w=0 scalar branch must equal the null-branch scalar decode")
 
 
 @torch.no_grad()
 def test_cfg_forward_w1_equals_real():
-    """w=1 → guided == real prediction."""
+    """w=1 → guided == real prediction (both branches)."""
     from predictor.guidance import cfg_forward
     model = _build_model()
     occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
@@ -151,8 +159,12 @@ def test_cfg_forward_w1_equals_real():
     M = torch.ones(2, 16, 16)
     M[:, :8, :8] = 0
 
-    z_guided, info = cfg_forward(model, occ, sv, sk, spec, M, w=1.0)
+    z_guided, scalar_guided, info = cfg_forward(
+        model, occ, sv, sk, spec, M, w=1.0)
     assert torch.allclose(z_guided, info["z_hat_real"], atol=1e-5)
+    q_real_decoded = model.scalar_decoder(info["q_real"])
+    assert torch.allclose(scalar_guided, q_real_decoded, atol=1e-5), (
+        "w=1 scalar branch must equal the real-branch scalar decode")
 
 
 if __name__ == "__main__":

@@ -149,6 +149,38 @@ def test_loss_backward_student_grads_exist():
         assert p.grad is None, f"released has grad: {name}"
 
 
+def test_projector_trained_from_both_branches_ema_frozen():
+    """Fix 12: projector gradient ownership is explicit — the objective-owned
+    projector is trained from BOTH branches (p_hat and p_y), while the EMA
+    target encoder itself receives no gradient (stop-grad at the EMA boundary,
+    architecture_v5.md §3.6)."""
+    model = _build_model()
+    model.train()
+    objective = UnifiedJEPALoss(hidden=192)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=13)
+    sk = torch.tensor([[True, False, True], [False, True, False]])
+    result = objective(model, occ, sv, sk, spec, M)
+    loss = result["total_loss"]
+    loss.backward()
+
+    # Projector receives gradients (both branches flow into it).
+    for name, p in objective.projector.named_parameters():
+        assert p.grad is not None and p.grad.abs().sum() > 0, (
+            f"projector.{name} must receive gradient from the objective")
+
+    # The target-side projector input (p_y) is derived from z_y_raw, which is
+    # detached at the EMA boundary — so the EMA encoder must have NO gradient
+    # even though the projector itself is trained from both branches.
+    for name, p in model.ema.named_parameters():
+        assert p.grad is None, f"occupancy EMA received gradient: {name}"
+    for name, p in model.scalar_mlp_ema.named_parameters():
+        assert p.grad is None, f"scalar_mlp_ema received gradient: {name}"
+
+    # Explicit: projector params are NOT frozen (requires_grad True).
+    assert any(p.requires_grad for p in objective.projector.parameters())
+
+
 def test_loss_backward_zero_grads_on_ema_only():
     """Verify the objective's on_optimizer_step updates EMA targets."""
     model = _build_model()

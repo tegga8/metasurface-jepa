@@ -51,36 +51,37 @@ def load_surrogate(path, device="cpu"):
     return m
 
 
-def physics_loss(model, surrogate, occ, sv, sk, spec, mask,
-                 goal_mode="real", loss_type="smooth_l1",
-                 use_ste=False, normalize=True):
-    """Compute physics response loss through the frozen surrogate.
+def physics_loss_from_out(model, out, surrogate, occ, sv, sk, spec, mask,
+                          loss_type="smooth_l1", use_ste=False,
+                          normalize=True, hard_forward=False):
+    """Authoritative physics computation from an ALREADY-COMPUTED model output
+    (Fix 11: one student forward → one physics decode → one surrogate forward).
 
     Path (Phase 4 MD §4):
-        z_hat → decode_geometry → assembled geometry → surrogate → spectrum
-        → dS/dG → ... → student encoder
+        out["z_hat"] → decode_geometry → assembled geometry → surrogate →
+        spectrum → dS/dG → ... → student encoder
 
     Args:
-        model:      UnifiedJEPA instance.
+        model:      UnifiedJEPA instance (for decode_geometry).
+        out:        model output dict (must contain z_hat and scalar_pred).
         surrogate:  Frozen ConvSurrogate.
         occ:        [B,1,64,64] input occupancy.
         sv:         [B,3] true scalar values.
         sk:         [B,3] bool known flags.
         spec:       [B,2,301] target spectrum.
         mask:       [B,16,16] 1=visible, 0=masked.
-        goal_mode:  spectrum goal mode for the surrogate.
         loss_type:  "smooth_l1" or "l1" or "mse".
         use_ste:    If True, use hard occupancy for surrogate input but soft
-                   gradient path (straight-through estimator).
+                   gradient path (straight-through estimator). Training only.
         normalize:  If True, normalize loss by per-sample spectrum std.
+        hard_forward: If True, threshold occupancy to binary regardless of
+                   training mode (soft-vs-hard diagnostic).
 
     Returns:
         L_phys:  scalar tensor (differentiable w.r.t. model params).
         spectrum_pred: [B, 2, 301].
         geometry:  [B, 3, 64, 64].
     """
-    out = model(occ, sv, sk, spec, mask, goal_mode=goal_mode)
-
     # Decode: z_hat (predicted latents) + scalar_pred → geometry.
     # Known scalars (sk) are substituted with their true values (sv) at
     # assembly — the scalar analog of visible-occupancy retention.
@@ -118,6 +119,44 @@ def physics_loss(model, surrogate, occ, sv, sk, spec, mask,
 
     L_phys = L_phys.mean()
     return L_phys, spectrum_pred, geometry
+
+
+def physics_loss(model, surrogate, occ, sv, sk, spec, mask,
+                 goal_mode="real", loss_type="smooth_l1",
+                 use_ste=False, normalize=True, hard_forward=False):
+    """Standalone physics loss (runs the model forward once, then delegates to
+    physics_loss_from_out — the single authoritative computation).
+
+    Path (Phase 4 MD §4):
+        model → z_hat/scalar_pred → decode_geometry → assembled geometry →
+        surrogate → spectrum → dS/dG → ... → student encoder
+
+    Args:
+        model:      UnifiedJEPA instance.
+        surrogate:  Frozen ConvSurrogate.
+        occ:        [B,1,64,64] input occupancy.
+        sv:         [B,3] true scalar values.
+        sk:         [B,3] bool known flags.
+        spec:       [B,2,301] target spectrum.
+        mask:       [B,16,16] 1=visible, 0=masked.
+        goal_mode:  spectrum goal mode for the surrogate.
+        loss_type:  "smooth_l1" or "l1" or "mse".
+        use_ste:    If True, use hard occupancy for surrogate input but soft
+                   gradient path (straight-through estimator).
+        normalize:  If True, normalize loss by per-sample spectrum std.
+        hard_forward: If True, threshold occupancy to binary regardless of
+                   training mode (soft-vs-hard diagnostic).
+
+    Returns:
+        L_phys:  scalar tensor (differentiable w.r.t. model params).
+        spectrum_pred: [B, 2, 301].
+        geometry:  [B, 3, 64, 64].
+    """
+    out = model(occ, sv, sk, spec, mask, goal_mode=goal_mode)
+    return physics_loss_from_out(
+        model, out, surrogate, occ, sv, sk, spec, mask,
+        loss_type=loss_type, use_ste=use_ste, normalize=normalize,
+        hard_forward=hard_forward)
 
 
 def surrogate_gradient_test(model, surrogate, occ, sv, spec, mask, device="cpu"):

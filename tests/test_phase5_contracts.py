@@ -448,21 +448,108 @@ def test_spectrum_dependence_easy_regime():
 
 @pytest.mark.skipif(not _HAS_SURROGATE,
                     reason="Surrogate weights not available")
-def test_scalar_dependence_hard_regime():
-    """In hard regime, correct scalars should outperform shuffled."""
+def test_scalar_dependence_known_regime():
+    """Scalar dependence must be evaluated with a NON-EMPTY known-scalar
+    subset (Fix 9): the all-unknown regime zeroes all scalar inputs, making
+    real-vs-shuffled identical inputs that cannot prove scalar usage."""
     from physics.physics_loop import load_surrogate
     from scripts.eval.eval_scenarios import scalar_dependence
     model = _build_model()
     surrogate = load_surrogate(_SURROGATE_PATH, device="cpu")
 
     occ, sv, spec, M = _batch(seed=12)
-    sk = torch.zeros(2, 3, dtype=torch.bool)  # all unknown
+    sk = torch.zeros(2, 3, dtype=torch.bool)  # start all-unknown
+    sk[:, 0] = True  # exactly one known scalar (Fix 9 valid stratum)
 
     result = scalar_dependence(
         model, surrogate, occ, sv, spec, M, "cpu", sk)
     assert "real" in result
     assert "shuffled" in result
     assert isinstance(result["gate"], bool)
+
+
+# --------------------------------------------------------------------------
+# Fix 8 — canonical derangement for shuffled controls
+# --------------------------------------------------------------------------
+
+def test_make_shuffled_spectrum_is_derangement():
+    """The scientific evaluator must use a derangement (no sample keeps its
+    own spectrum), not a potentially self-matching roll."""
+    from runtime.physics_controls import make_shuffled_spectrum
+    S = torch.randn(8, 2, 301)
+    S_shuf = make_shuffled_spectrum(S, seed=0)
+    for i in range(8):
+        assert not torch.equal(S_shuf[i], S[i]), (
+            "shuffled spectrum must be a derangement (sample i must not "
+            "receive its own spectrum)")
+
+
+def test_shuffled_control_requires_batch_two():
+    """With batch size 1 there is no valid shuffled control; the evaluator
+    must mark it infeasible rather than claim a comparison."""
+    from scripts.eval.eval_scenarios import real_null_shuffled
+    from assembly import UnifiedJEPA
+    import torch.nn as nn
+    from physics.physics_loop import load_surrogate
+
+    if not _HAS_SURROGATE:
+        import pytest as _pytest
+        _pytest.skip("surrogate weights not available")
+
+    class _Stub(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(nn.Linear(2, 64), nn.GELU(), nn.Linear(64, 256))
+        def forward(self, S):
+            return self.net(S.transpose(1, 2))
+
+    torch.manual_seed(0)
+    model = UnifiedJEPA(hidden=192, num_heads=6, geo_depth=2,
+                        predictor_depth=4, goal_tokens=16,
+                        num_predictor_heads=6, scalar_hidden=128,
+                        n_film_blocks=2, spec_dim=256)
+    stub = _Stub()
+    for p in stub.parameters():
+        p.requires_grad_(False)
+    stub.eval()
+    model.spectrum_path.released = stub
+    model.eval()
+    surrogate = load_surrogate(_SURROGATE_PATH, device="cpu")
+
+    occ = (torch.rand(1, 1, 64, 64) > 0.5).float()
+    sv = torch.tensor([[2.5, 0.8, 4.0]])
+    spec = torch.randn(1, 2, 301)
+    sk = torch.ones(1, 3, dtype=torch.bool)
+    M = torch.ones(1, 16, 16)
+
+    result = real_null_shuffled(model, surrogate, occ, sv, spec, M, "cpu", sk)
+    assert result.get("shuffled") is None
+    assert "shuffled_infeasible" in result["gap"]
+
+
+# --------------------------------------------------------------------------
+# Fix 14 — masked-region metrics catch completion errors
+# --------------------------------------------------------------------------
+
+def test_masked_region_metric_catches_error():
+    """Visible occupancy exactly correct + masked occupancy deliberately wrong:
+    the masked-region metric must catch the error while the visible-region
+    metric stays perfect."""
+    from scripts.eval.eval_scenarios import _occupancy_metrics
+    occ = torch.zeros(1, 1, 64, 64)
+    occ[:, :, :32, :32] = 1.0  # top half occupied
+    pred = occ.clone()
+    # Masked region = bottom-right quadrant; set it all occupied (wrong).
+    pred[:, :, 32:, 32:] = 1.0
+    M = torch.ones(1, 16, 16)
+    M[:, 8:, 8:] = 0.0  # bottom-right quadrant masked
+    metrics = _occupancy_metrics(pred, occ, mask=M)
+    assert "masked_region" in metrics
+    assert "visible_region" in metrics
+    # Visible region is exactly correct.
+    assert metrics["visible_region"]["iou"] == 1.0
+    # Masked region must catch the deliberately-wrong occupancy.
+    assert metrics["masked_region"]["iou"] < 1.0
 
 
 if __name__ == "__main__":

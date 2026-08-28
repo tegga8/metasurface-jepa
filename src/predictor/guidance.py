@@ -53,11 +53,16 @@ def goal_dropout(goal_mode, p, rng=None):
 
 @torch.no_grad()
 def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
-    """Run classifier-free guidance inference.
+    """Run classifier-free guidance inference (Fix 10: covers BOTH outputs).
 
-    Performs two forward passes (real goal and null goal) and combines
-    the predicted z_hat via cfg_combine. Uses with_target=False for speed
-    (no EMA target needed at inference).
+    Performs two forward passes (real goal and null goal) and combines the
+    predicted occupancy latent AND the scalar-summary prediction via CFG:
+
+        z_guided = z_null + w(z_real - z_null)
+        q_guided = q_null + w(q_real - q_null)
+        scalar_guided = ScalarDecoder(q_guided)
+
+    Uses with_target=False for speed (no EMA target needed at inference).
 
     Args:
         model:     UnifiedJEPA instance (in eval mode).
@@ -70,8 +75,10 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
         device:    target device.
 
     Returns:
-        z_hat_guided: (B, 256, hidden) guided prediction.
-        info: dict with raw z_hat_real, z_hat_null, and guidance gap scalar.
+        z_hat_guided:   (B, 256, hidden) guided occupancy latent.
+        scalar_guided:  (B, 3) guided scalar prediction (from q_guided).
+        info: dict with raw z_hat_real/null, q_real/null, scalar_pred, and
+              guidance gap scalars.
     """
     model.eval()
 
@@ -79,14 +86,18 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
     out_real = model(occ, sv, sk, spec, mask,
                      goal_mode="real", with_target=False)
     z_real = out_real["z_hat"]
+    q_real = out_real["scalar_summary_pred"]
 
     # Null-goal forward
     out_null = model(occ, sv, sk, spec, mask,
                      goal_mode="null", with_target=False)
     z_null = out_null["z_hat"]
+    q_null = out_null["scalar_summary_pred"]
 
-    # Combine
+    # Combine both branches.
     z_guided = cfg_combine(z_real, z_null, w)
+    q_guided = cfg_combine(q_real, q_null, w)
+    scalar_guided = model.scalar_decoder(q_guided)
 
     # Guidance gap: ||z_real - z_null|| / sigma(z_real)
     diff = (z_real - z_null)
@@ -94,10 +105,19 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
     std_real = z_real.std().item()
     norm_gap = gap / max(std_real, 1e-6)
 
+    # Scalar-branch gap.
+    q_diff = (q_real - q_null).abs().mean().item()
+    q_std = q_real.std().item()
+
     info = {
         "z_hat_real": z_real,
         "z_hat_null": z_null,
+        "q_real": q_real,
+        "q_null": q_null,
+        "scalar_pred": scalar_guided,
         "guidance_gap": gap,
         "normalized_guidance_gap": norm_gap,
+        "scalar_guidance_gap": q_diff,
+        "normalized_scalar_guidance_gap": q_diff / max(q_std, 1e-6),
     }
-    return z_guided, info
+    return z_guided, scalar_guided, info

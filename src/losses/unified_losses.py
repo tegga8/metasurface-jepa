@@ -110,6 +110,16 @@ class UnifiedJEPALoss(nn.Module):
     the canonical VICReg topology (Bardes et al. 2021) adapted to token-level
     masked geometry.
 
+    Projector gradient ownership (Fix 12, explicitly documented): the
+    objective-owned projector is trained from BOTH branches — p_hat =
+    projector(z_hat) and p_y = projector(z_y) both flow gradients into the
+    projector. This matches the Milestone-B VICRegObjective and canonical
+    VICReg: the gradient stops at the EMA target encoder because z_y_raw is
+    already detached (stop-grad at the EMA boundary, architecture_v5.md §3.6);
+    the projector itself is a shared learnable head. The target branch is NOT
+    wrapped in torch.no_grad() because that would freeze the projector's
+    target-side updates, diverging from the tested Milestone-B behavior.
+
     on_optimizer_step updates BOTH EMA targets (occupancy + scalar_mlp)
     per Phase 2 §6.
     """
@@ -173,14 +183,15 @@ class UnifiedJEPALoss(nn.Module):
             out["scalar_pred"], scalar_values, scalar_known)
 
         # Physics loss: decode geometry → surrogate → spectrum error (Phase 4 MD §4).
-        # Delegates to physics_loop.physics_loss (single authoritative implementation —
-        # Phase 4 MD §4 path: z_hat → decode_geometry → assembled geometry →
-        # surrogate → spectrum → dS/dG → student encoder).
+        # Reuses the ALREADY-COMPUTED out (z_hat/scalar_pred) via
+        # physics_loop.physics_loss_from_out — exactly one student forward per
+        # step, one physics decode, one surrogate forward (Fix 11). Delegates
+        # to the single authoritative physics implementation.
         if self.lambda_phys > 0 and self.surrogate is not None and model.training:
-            from physics.physics_loop import physics_loss
-            L_phys, _, _ = physics_loss(
-                model, self.surrogate, occupancy, scalar_values, scalar_known,
-                spectrum, mask, goal_mode=goal_mode, loss_type="smooth_l1",
+            from physics.physics_loop import physics_loss_from_out
+            L_phys, _, _ = physics_loss_from_out(
+                model, out, self.surrogate, occupancy, scalar_values,
+                scalar_known, spectrum, mask, loss_type="smooth_l1",
                 use_ste=self.physics_use_ste, normalize=True)
         else:
             L_phys = self.physics_loss(

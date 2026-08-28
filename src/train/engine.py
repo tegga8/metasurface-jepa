@@ -698,7 +698,32 @@ def load_checkpoint(path, model, objective, optimizer, scheduler, device,
     from assembly import load_into_model
     load_into_model(model, obj["model"], device)
     if "objective_state" in obj:
-        objective.load_state_dict(obj["objective_state"])
+        # The unified objective (UnifiedJEPALoss) registers the externally
+        # loaded frozen MetaDiT surrogate as a submodule, so its state dict
+        # contains "surrogate.*" keys. Phase-B checkpoints predate that
+        # submodule and have no such keys; the surrogate is ALWAYS loaded
+        # authoritatively from data/metadit/weights/surrogate_model.bin by the
+        # trainer, never from a checkpoint. Ignore "surrogate.*" keys on BOTH
+        # sides — the checkpoint's (whether absent or stale) and the live
+        # objective's (so strict loading does not demand them) — and load
+        # every other objective key strictly, so an unrelated missing key
+        # still fails loudly. The surrogate module itself is left completely
+        # untouched (frozen weights, differentiable input path intact).
+        objective_state = {
+            k: v for k, v in obj["objective_state"].items()
+            if not k.startswith("surrogate.")
+        }
+        # Load strictly against the filtered expectation by temporarily
+        # removing the surrogate submodule, then re-attaching the original.
+        # strict=True still raises on any missing non-surrogate objective key.
+        surr = getattr(objective, "surrogate", None)
+        if surr is not None:
+            objective.surrogate = None
+        try:
+            objective.load_state_dict(objective_state, strict=True)
+        finally:
+            if surr is not None:
+                objective.surrogate = surr
     elif any(p.requires_grad for p in objective.parameters()):
         raise RuntimeError(
             f"checkpoint {path} is missing objective_state for "

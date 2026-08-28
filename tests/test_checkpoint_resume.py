@@ -227,6 +227,118 @@ def test_model_only_best_checkpoint_loadable(tmp_path):
         assert torch.equal(m2.state_dict()[k], sd[k]), f"{k} not restored"
 
 
+def test_load_checkpoint_ignores_surrogate_keys(tmp_path):
+    """Phase-B → Phase-C resume: the unified objective registers the frozen
+    MetaDiT surrogate as a submodule, so its state dict has `surrogate.*`
+    keys that Phase-B checkpoints do not contain (and must never load, since
+    the surrogate is authoritative from data/metadit/weights/). load_checkpoint
+    must ignore `surrogate.*` from the checkpoint while loading everything
+    else strictly.
+
+    Cases:
+    1. checkpoint WITHOUT surrogate.* loads into an objective that HAS a
+       surrogate → success, surrogate untouched.
+    2. checkpoint WITH fake/different surrogate.* values does NOT overwrite
+       the loaded surrogate.
+    3. an unrelated missing objective key still raises."""
+    from losses.unified_losses import UnifiedJEPALoss
+
+    class _FakeSurrogate(nn.Module):
+        def __init__(self, seed=0):
+            super().__init__()
+            torch.manual_seed(seed)
+            self.net = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))
+
+        def forward(self, x):
+            return self.net(x)
+
+    def _make(seed=0, surrogate=None):
+        torch.manual_seed(seed)
+        m = _SmallModel()
+        obj = UnifiedJEPALoss(hidden=192, surrogate=surrogate)
+        params = [p for p in list(m.parameters()) + list(obj.parameters())
+                  if p.requires_grad]
+        opt = torch.optim.AdamW(params, lr=1e-3)
+        sched = torch.optim.lr_scheduler.LambdaLR(
+            opt, lr_lambda=lambda s: 0.5 ** (s // 10))
+        return m, obj, opt, sched
+
+    def _mutate_params(module):
+        with torch.no_grad():
+            for p in module.parameters():
+                p.add_(torch.randn_like(p) * 0.1)
+
+    # --- Case 1: Phase-B checkpoint (no surrogate.*) -> Phase-C objective
+    # (surrogate attached) must load, keeping the loaded surrogate intact.
+    m1, obj1, opt1, sched1 = _make(seed=0, surrogate=None)
+    # Pre-mutate the objective so restore is observable.
+    _mutate_params(obj1)
+    ckpt_no_surrogate = str(tmp_path / "phase_b.pt")
+    save_checkpoint(ckpt_no_surrogate, m1, obj1, opt1, sched1, {},
+                    global_step=10, epoch=0, micro_step=0, is_epoch_end=False,
+                    ema_state=collect_ema_state(m1),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None, device="cpu", artifact_type="latest")
+    expected_proj = {k: v.clone() for k, v in obj1.state_dict().items()
+                     if not k.startswith("surrogate.")}
+
+    surr = _FakeSurrogate(seed=1)
+    surr.eval()
+    for p in surr.parameters():
+        p.requires_grad_(False)
+    m2, obj2, opt2, sched2 = _make(seed=2, surrogate=surr)
+    _mutate_params(obj2)                       # mutates projector AND surrogate
+    surr_after_mutate = {k: v.clone() for k, v in surr.state_dict().items()}
+    load_checkpoint(ckpt_no_surrogate, m2, obj2, opt2, sched2, "cpu")
+    for k, v in expected_proj.items():
+        assert torch.equal(obj2.state_dict()[k], v), (
+            f"objective key {k} not restored from checkpoint")
+    for k, v in surr_after_mutate.items():
+        assert torch.equal(surr.state_dict()[k], v), (
+            f"surrogate key {k} must remain authoritative (not overwritten)")
+
+    # --- Case 2: checkpoint WITH fake surrogate.* values must NOT overwrite
+    # the loaded surrogate.
+    m3, obj3, opt3, sched3 = _make(seed=3, surrogate=None)
+    _mutate_params(obj3)
+    ckpt_with_surrogate = str(tmp_path / "phase_c_stale.pt")
+    save_checkpoint(ckpt_with_surrogate, m3, obj3, opt3, sched3, {},
+                    global_step=11, epoch=0, micro_step=0, is_epoch_end=False,
+                    ema_state=collect_ema_state(m3),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None, device="cpu", artifact_type="latest")
+    # Rewrite the saved objective_state with fake surrogate.* values.
+    raw = torch.load(ckpt_with_surrogate, map_location="cpu", weights_only=False)
+    fake_surr = _FakeSurrogate(seed=99)
+    for k, v in fake_surr.state_dict().items():
+        raw["objective_state"][f"surrogate.{k}"] = v
+    torch.save(raw, ckpt_with_surrogate)
+
+    surr2 = _FakeSurrogate(seed=5)
+    surr2.eval()
+    for p in surr2.parameters():
+        p.requires_grad_(False)
+    surr2_before = {k: v.clone() for k, v in surr2.state_dict().items()}
+    m4, obj4, opt4, sched4 = _make(seed=6, surrogate=surr2)
+    load_checkpoint(ckpt_with_surrogate, m4, obj4, opt4, sched4, "cpu")
+    for k, v in surr2_before.items():
+        assert torch.equal(surr2.state_dict()[k], v), (
+            f"stale surrogate key {k} from checkpoint must be ignored")
+
+    # --- Case 3: an unrelated missing objective key still raises.
+    m5, obj5, opt5, sched5 = _make(seed=7, surrogate=None)
+    raw2 = torch.load(ckpt_no_surrogate, map_location="cpu", weights_only=False)
+    # Drop a NON-surrogate objective key (projector weight) -> strict load
+    # must fail loudly.
+    proj_keys = [k for k in raw2["objective_state"] if k.startswith("projector.")]
+    assert proj_keys, "expected projector.* keys in objective_state"
+    del raw2["objective_state"][proj_keys[0]]
+    torch.save(raw2, str(tmp_path / "missing_proj.pt"))
+    with pytest.raises(RuntimeError, match="projector"):
+        load_checkpoint(str(tmp_path / "missing_proj.pt"),
+                        m5, obj5, opt5, sched5, "cpu")
+
+
 if __name__ == "__main__":
     import pathlib
     import tempfile

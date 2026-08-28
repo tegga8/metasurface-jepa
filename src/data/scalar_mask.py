@@ -60,11 +60,15 @@ class ScalarMasker:
         elif self.regime == "all_unknown":
             known = torch.zeros(b, 3, dtype=torch.bool, device=scalar_values.device)
         elif self.regime == "independent":
-            known = torch.rand(b, 3, generator=self.rng,
-                               device=scalar_values.device) < self.p_independent
+            # Sample on CPU with the CPU generator, then move to the input's
+            # device. self.rng is a CPU torch.Generator; passing it alongside
+            # device="cuda" would raise a device-mismatch RuntimeError (the
+            # same failure pattern previously fixed in the sanity-eval script).
+            known = (torch.rand(b, 3, generator=self.rng) < self.p_independent).to(
+                scalar_values.device)
         elif self.regime == "correlated":
-            all_known = torch.rand(b, generator=self.rng,
-                                   device=scalar_values.device) < self.p_correlated
+            all_known = (torch.rand(b, generator=self.rng) < self.p_correlated).to(
+                scalar_values.device)
             known = all_known.unsqueeze(1).expand(b, 3)
         else:
             raise ValueError(f"unknown regime: {self.regime}")

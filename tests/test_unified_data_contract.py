@@ -409,6 +409,52 @@ def test_scalar_mlp_ema_params_frozen():
         assert not p.requires_grad, "EMA parameters must be frozen"
 
 
+# ---------------------------------------------------------------------------
+# Regression: ScalarMasker device handling (Fix 1)
+# ---------------------------------------------------------------------------
+#
+# NOTE ON COVERAGE: these tests exercise the CPU sampling path unconditionally,
+# but the actual CUDA-device-mismatch failure only reproduces on a real CUDA
+# tensor, so the `if torch.cuda.is_available()` branch is skipped on CPU-only
+# CI machines. That is expected and matches how this bug class (a CPU
+# torch.Generator passed alongside device="cuda" in torch.rand) slipped through
+# before — see the historical fix in scripts/eval/eval_vicreg_sanity.py. The
+# tests exist so a CUDA run (local or Kaggle) is covered immediately and so the
+# fix has a permanent regression guard once CUDA CI is available.
+
+def test_scalar_masker_independent_regime_no_device_mismatch():
+    """Regression: ScalarMasker.sample() must not require the RNG generator's
+    device to match the input tensor's device. See eval_vicreg_sanity.py's
+    historical fix for the same failure pattern."""
+    masker = ScalarMasker(regime="independent", p_independent=0.5, seed=0)
+    scalar_values = torch.randn(8, 3)
+    masked, known = masker.sample(scalar_values)  # CPU path must work
+    assert masked.device == scalar_values.device
+    assert known.device == scalar_values.device
+
+    if torch.cuda.is_available():
+        scalar_values_cuda = scalar_values.cuda()
+        masked, known = masker.sample(scalar_values_cuda)  # must not raise
+        assert masked.device == scalar_values_cuda.device
+        assert known.device == scalar_values_cuda.device
+
+
+def test_scalar_masker_correlated_regime_no_device_mismatch():
+    """Regression: correlated (the constructor default) must likewise not require
+    generator/input device match."""
+    masker = ScalarMasker(regime="correlated", p_correlated=0.5, seed=0)
+    scalar_values = torch.randn(8, 3)
+    masked, known = masker.sample(scalar_values)  # CPU path must work
+    assert masked.device == scalar_values.device
+    assert known.device == scalar_values.device
+
+    if torch.cuda.is_available():
+        scalar_values_cuda = scalar_values.cuda()
+        masked, known = masker.sample(scalar_values_cuda)  # must not raise
+        assert masked.device == scalar_values_cuda.device
+        assert known.device == scalar_values_cuda.device
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

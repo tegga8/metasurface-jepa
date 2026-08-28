@@ -239,6 +239,19 @@ def test_projector_collapse_detected_and_recovered():
     exact zero: at exactly-zero output the centered values are all zero and the
     variance penalty gradient degenerates to zero by construction, while any
     real (near-)collapse has nonzero centered values and a nonzero gradient.
+
+    PORTABILITY FIX (spec §10): the original initialization was EXACTLY
+    rank-1 — every output row was the identical base vector scaled by 1e-2.
+    Under that exact symmetry every row receives the identical gradient, the
+    rank-1 manifold is invariant under the dynamics, and the recovery lands on
+    a degenerate fixed point whose value is backend-dependent (ratio ~0.578 on
+    one CPU backend, ~0.685 on another — same seed, same v_before). The fix
+    breaks the artificial exact symmetry deliberately with a tiny,
+    seed-controlled per-row perturbation while preserving the near-collapse
+    condition: collapse detection is unchanged (rank still ~1/8, variance
+    still ~1.0), but the variance+covariance objective can now genuinely
+    escape the rank-1 manifold, so recovery is complete (ratio -> ~0) and
+    backend-robust.
     """
     torch.manual_seed(6)
     from losses.objective_modules import VICRegProjector
@@ -253,8 +266,13 @@ def test_projector_collapse_detected_and_recovered():
         # to 1e-2): output is NEAR-collapsed (rank 1 in D=8 dims, tiny but
         # nonzero variance) — the physically relevant collapse, not the
         # exact-zero point where the variance gradient degenerates.
+        # Plus a tiny deterministic per-row perturbation (1e-6) that breaks
+        # the artificial exact row symmetry WITHOUT measurably weakening the
+        # collapse (rank stays ~1/8, variance stays ~1.0).
+        base = torch.randn(1, 16)
+        row_noise = torch.randn(D, 16)  # deterministic under manual_seed(6)
         proj.net[-1].weight.copy_(
-            torch.randn(1, 16).repeat(D, 1) * 1e-2)
+            base.repeat(D, 1) * 1e-2 + 1e-6 * row_noise)
     p_collapsed = proj(z)
     proj_rank_collapsed = eff_ranks(p_collapsed)["eff_rank_frac"]
     assert proj_rank_collapsed < 0.2, (

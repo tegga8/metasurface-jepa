@@ -1,10 +1,16 @@
 # Unified Occupancy–Parameter–Spectrum JEPA
 ## Architecture & Implementation Plan (v5)
 
-Status: design document, not yet implemented. Grounded against the actual repository
-(`tegga8/metasurface-jepa`) as of this writing and against the MetaDiT paper/dataset
-convention. No code changes are made by this document; it is the reference an
-implementation pass should follow.
+Status: **implemented reference architecture.** The unified occupancy–parameter–
+spectrum JEPA described here is implemented in the repository (`tegga8/metasurface-jepa`);
+see `src/assembly.py`, `src/encoders/`, `src/predictor/`, `src/decoders/`, and
+`scripts/train/train_unified.py` for the live implementation. Where this document and
+the repository disagree, the repository is the source of truth for interfaces, but
+this document remains the architectural authority for intent and design rationale.
+
+The sequencing discussion in the sections below is **historical design rationale**
+recorded at planning time, not a statement of current implementation status — the
+implementation is present and testable now.
 
 **v3 changes:** incorporated a red-team pass that found one internal contradiction
 (scalar EMA vs. scalar loss), five concrete robustness fixes, and a sequencing

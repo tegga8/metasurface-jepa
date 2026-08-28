@@ -516,9 +516,99 @@ def test_soft_hard_occupancy_test_retains_visible_pixels_identically():
     )
 
 
+def test_physics_loss_from_out_propagates_hard_forward():
+    """Fix 4 (spec §6): physics_loss_from_out(..., hard_forward=True) must
+    actually reach decode_geometry and make the assembled occupancy BINARY in
+    the forward path — not merely be present in the signature.
+
+    With hard_forward=True the decoded occupancy used for geometry assembly
+    must be 0/1 valued (thresholded), while hard_forward=False keeps it soft
+    (sigmoid, non-binary) on the masked region. The masked region must be
+    non-empty for the two to differ.
+    """
+    from physics.physics_loop import physics_loss_from_out
+
+    class _FakeSurrogate(nn.Module):
+        """Minimal differentiable surrogate: maps 3-channel geometry spatial
+        means into a [B, 2, 301] spectrum (no external weights needed)."""
+        def forward(self, geometry):
+            class R:
+                pass
+            r = R()
+            g = geometry.mean(dim=(2, 3))            # [B, 3]
+            spec = torch.stack([g[:, 0], g[:, 1]], dim=-1)  # [B, 2]
+            r.prediction = spec.unsqueeze(-1).expand(-1, -1, 301)  # [B, 2, 301]
+            return r
+
+    model = _build_model()
+    surrogate = _FakeSurrogate()
+
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]])
+    spec = torch.randn(2, 2, 301)
+    sk = torch.zeros(2, 3, dtype=torch.bool)  # all unknown → predicted path
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=42)
+    M = masker.sample(occ, ratio=0.5)  # partial mask → non-empty masked region
+
+    out = model(occ, sv, sk, spec, M, goal_mode="real")
+
+    # Soft branch: hard_forward=False → soft occupancy retained on masked area.
+    L_soft, _, geom_soft = physics_loss_from_out(
+        model, out, surrogate, occ, sv, sk, spec, M,
+        hard_forward=False, use_ste=False)
+    # Hard branch: hard_forward=True → binary occupancy.
+    L_hard, _, geom_hard = physics_loss_from_out(
+        model, out, surrogate, occ, sv, sk, spec, M,
+        hard_forward=True, use_ste=False)
+
+    occ_channel = geom_hard[:, 1]  # h_atom * occupancy — 0 on empty pixels
+    occ_bin = (occ_channel > 0).float()
+    # Hard branch occupancy (masked region) is binary: every occupied pixel
+    # has the SAME value (h * 1), so channel 1 takes only 2 distinct values.
+    n_unique = occ_channel[occ_channel > 0].unique().numel()
+    assert n_unique <= 2, (
+        "hard_forward must threshold occupancy to binary (channel 1 takes "
+        f"values {occ_channel[occ_channel > 0].unique().tolist()})")
+
+    # Soft branch occupancy is non-binary somewhere in the masked region
+    # (sigmoid outputs are continuous).
+    occ_soft_ch = geom_soft[:, 1]
+    soft_vals = occ_soft_ch[occ_soft_ch > 0]
+    assert soft_vals.numel() > 0
+    assert not torch.allclose(soft_vals, torch.ones_like(soft_vals), atol=1e-4), (
+        "soft branch must keep continuous (non-binary) occupancy")
+
+    # The two branches genuinely differ at the surrogate input.
+    assert not torch.allclose(geom_soft, geom_hard, atol=1e-5), (
+        "hard_forward must change the assembled geometry in the forward path")
+
+
 # --------------------------------------------------------------------------
 # Scenario evaluators
 # --------------------------------------------------------------------------
+
+def test_scenario_b_known_flags_batch_size_safe():
+    """Fix 5 (spec §7): Scenario-B scalar-known flags must be constructible
+    for ARBITRARY batch size — the old fixed 2-row tensor sliced [:b] was only
+    safe for b <= 2. Verify B=2, 4, 5 produce [B,3] bool with deterministic
+    alternating known-scalar semantics."""
+    from scripts.eval.eval_scenarios import _scenario_b_known_flags
+
+    for b in (2, 4, 5):
+        sk = _scenario_b_known_flags(b, "cpu")
+        assert sk.shape == (b, 3), f"B={b}: expected shape [{b},3], got {sk.shape}"
+        assert sk.dtype == torch.bool, f"B={b}: expected bool dtype"
+        # Each row has exactly one known scalar, alternating l-known / h-known.
+        for i in range(b):
+            assert sk[i].sum().item() == 1, (
+                f"B={b} row {i}: expected exactly one known scalar, got {sk[i]}")
+            assert sk[i][i % 2].item() is True, (
+                f"B={b} row {i}: expected scalar {i % 2} known")
+        # Deterministic: same construction twice gives identical flags.
+        sk2 = _scenario_b_known_flags(b, "cpu")
+        assert torch.equal(sk, sk2), "flags must be deterministic"
+
 
 def test_scenario_inputs_shape():
     """ScenarioInputs must produce correct mask shapes."""

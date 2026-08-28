@@ -137,11 +137,14 @@ def sample_mask_ratio(cfg, rng):
     return rs[idx]
 
 
-def sample_scalar_known(B, cfg, rng):
+def sample_scalar_known(B, cfg, rng, device=None):
     """Sample scalar known/unknown flags per the curriculum regime.
 
+    Fix 2 (spec §4): flags are constructed ON the model device so a CUDA
+    training step can never hand a CPU known-flags tensor to the model.
+
     Returns:
-        scalar_known: (B, 3) bool
+        scalar_known: (B, 3) bool on `device`
         regime: str
     """
     regimes = cfg["curriculum"]["scalar_regimes"]
@@ -151,11 +154,14 @@ def sample_scalar_known(B, cfg, rng):
     regime = regimes[idx]
 
     if regime == "all_known":
-        return torch.ones(B, 3, dtype=torch.bool), regime
+        return torch.ones(B, 3, dtype=torch.bool, device=device), regime
     elif regime == "all_unknown":
-        return torch.zeros(B, 3, dtype=torch.bool), regime
+        return torch.zeros(B, 3, dtype=torch.bool, device=device), regime
     else:  # "mixed"
-        return torch.rand(B, 3, generator=rng) > 0.5, regime
+        # Sample on CPU with the CPU generator, then move to device (the
+        # device-aware pattern from ScalarMasker: a CPU torch.Generator
+        # cannot be passed alongside device="cuda").
+        return (torch.rand(B, 3, generator=rng) > 0.5).to(device), regime
 
 
 class RegimeLogger:
@@ -247,8 +253,10 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     """
     B = occ.shape[0]
 
-    # Sample scalar known/unknown regime
-    sk, regime = sample_scalar_known(B, cfg, rng)
+    # Fix 2 (spec §4): every tensor handed to the model must be on the model
+    # device. Sample scalar known flags on the device, and move the block mask
+    # to the device (masker.sample returns CPU tensors by construction).
+    sk, regime = sample_scalar_known(B, cfg, rng, device=device)
 
     # Sample occupancy mask ratio from curriculum
     ratio = sample_mask_ratio(cfg, rng)
@@ -256,7 +264,7 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     # Generate block mask (BlockMasker works with 1-channel input —
     # it only reads spatial dimensions; half_sensitivity placement uses
     # the frozen surrogate for sensitivity maps, architecture_v5.md §2)
-    M = masker.sample(occ, ratio, surrogate)
+    M = masker.sample(occ, ratio, surrogate).to(device)
 
     # Forward + loss
     # Phase 4 MD §3.5.1: goal dropout — replace A_goal with null token ~10%
@@ -284,7 +292,7 @@ def validate(model, objective, val_batches, cfg, device):
             for occ, sv, spec in val_batches:
                 B = occ.shape[0]
                 sk = torch.ones(B, 3, dtype=torch.bool, device=device)  # all known for val
-                M = val_masker.sample(occ, val_mask_ratio)  # fixed val mask
+                M = val_masker.sample(occ, val_mask_ratio).to(device)  # fixed val mask
                 result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
                 m = result["components"]["L_total"]
                 metrics["L_total"].append(float(m))
@@ -308,7 +316,7 @@ def validate(model, objective, val_batches, cfg, device):
         occ_v, sv_v, spec_v = val_batches[0]
         B = occ_v.shape[0]
         sk_v = torch.ones(B, 3, dtype=torch.bool, device=device)
-        M = val_masker.sample(occ_v, val_mask_ratio)
+        M = val_masker.sample(occ_v, val_mask_ratio).to(device)
         gap_info = compute_guidance_gap(
             model, occ_v, sv_v, sk_v, spec_v, M, device=device)
         out["guidance_gap"] = gap_info["guidance_gap"]
@@ -378,13 +386,24 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     ramp_steps = cfg.get("staging", {}).get("lambda_phys_ramp_steps", 0)
     surrogate = None
     if lambda_phys > 0:
-        surrogate_path = cfg.get("weights", {}).get("surrogate")
+        # Fix 3 (spec §5): a real-mode run that requests physics loss but
+        # cannot load the surrogate must FAIL LOUDLY, never silently continue
+        # with a zero placeholder physics term. Smoke mode keeps its explicit
+        # permissive contract (documented in the --use-synthetic-smoke CLI).
+        surrogate_path = _resolved(cfg.get("weights", {}).get("surrogate", ""))
         if surrogate_path and os.path.exists(surrogate_path):
             surrogate = load_surrogate(surrogate_path, device=device)
             print(f"[phase4] Loaded frozen surrogate from {surrogate_path}")
-        elif surrogate_path:
-            print(f"[phase4] WARNING: surrogate not found at {surrogate_path}, "
-                  f"physics loss will be inactive")
+        elif not use_synthetic_smoke:
+            raise RuntimeError(
+                f"lambda_phys={lambda_phys} > 0 but surrogate checkpoint "
+                f"missing at {surrogate_path!r}. Refusing to run a physics "
+                "training step with a silent zero physics placeholder in real "
+                "mode. Supply the surrogate weights, or set lambda_phys=0, or "
+                "pass --use-synthetic-smoke for an explicit local smoke run.")
+        else:
+            print(f"[phase4] SMOKE: surrogate not found at {surrogate_path}, "
+                  f"physics loss inactive (explicit smoke mode only)")
     objective = UnifiedJEPALoss(
         hidden=cfg["hidden"],
         lambda_inv=loss_cfg.get("lambda_inv", 25.0),
@@ -441,6 +460,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         loader = DataLoader(ds, batch_size=train_cfg["batch_size"],
                             shuffle=True, num_workers=0,
                             collate_fn=collate_batch)
+        # train_data is the loader in real mode so the training loop's
+        # isinstance(train_data, DataLoader) dispatch works uniformly.
+        train_data = loader
 
     val_batches = []
     if use_synthetic:
@@ -518,6 +540,12 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         if ramp_steps > 0:
             ramp_frac = min(1.0, (step + 1) / ramp_steps)
             objective.lambda_phys = lambda_phys * ramp_frac
+
+        # Explicitly reset gradients at the START of each optimizer step
+        # (Fix 1, spec §3): gradients must accumulate only across the
+        # grad_accum microbatches of THIS optimizer step, never leak from the
+        # previous step. Not inside the microbatch loop; not left implicit.
+        optimizer.zero_grad(set_to_none=True)
 
         micro_losses = []
         for _ in range(grad_accum):

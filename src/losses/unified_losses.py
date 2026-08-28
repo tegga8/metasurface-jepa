@@ -150,7 +150,10 @@ class UnifiedJEPALoss(nn.Module):
         # that check on a surrogate that accepts soft input.
         self.physics_use_ste = physics_use_ste
 
-        self.occupancy_loss = OccupancyTokenLoss(hidden=hidden, use_proj=False)
+        # Fix 6 (spec §8): self.occupancy_loss removed — it was constructed
+        # but never called; forward() computes the projected JEPA/VICReg
+        # terms inline via the shared objective-owned projector. Keeping an
+        # unused module here would be dead, misleading code.
         self.scalar_loss = ScalarPredictionLoss(loss_type=scalar_loss_type)
         self.physics_loss = PhysicsSpectrumLoss()
 

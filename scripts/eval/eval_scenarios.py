@@ -55,6 +55,27 @@ def _make_synthetic_batch(b, device):
     return occ, sv, spec
 
 
+def _scenario_b_known_flags(b, device):
+    """Scenario-B scalar-known flags for ARBITRARY batch size (Fix 5, spec §7).
+
+    Deterministic alternating rows, each with exactly one known scalar:
+        row 0: [True,  False, False]
+        row 1: [False, True,  False]
+        row 2: [True,  False, False]
+        row 3: [False, True,  False]
+        ...
+
+    This preserves the intended representative partial-known semantics (the
+    l- and h-known variants alternate) while remaining valid for any b >= 1.
+    """
+    rows = []
+    for i in range(b):
+        row = [False, False, False]
+        row[i % 2] = True  # alternate l-known / h-known
+        rows.append(row)
+    return torch.tensor(rows, dtype=torch.bool, device=device)
+
+
 def _occupancy_metrics(pred_occ, true_occ, mask=None):
     """IoU/F1 for binary occupancy; when mask provided, computes masked-region
     (completion) and visible-region metrics separately (Fix 14)."""
@@ -361,9 +382,12 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
         model, surrogate, occ, sv, spec, M_a, device, sk_a)
 
     # Scenario B: partial-parameter (50% mask + some scalars known)
-    sk_b = torch.tensor([[True, False, False],
-                         [False, True, False]], dtype=torch.bool,
-                        device=device)[:b]
+    # Fix 5 (spec §7): construct the known-flags pattern programmatically for
+    # ARBITRARY batch size (the old fixed 2-row tensor sliced [:b] was only
+    # safe for b <= 2). Deterministic alternating rows preserve the intended
+    # representative partial-known semantics: every row has exactly one known
+    # scalar, alternating which one.
+    sk_b = _scenario_b_known_flags(b, device)
     M_b = masker.sample(occ, ratio=0.5)
     results["scenario_B_partial"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")

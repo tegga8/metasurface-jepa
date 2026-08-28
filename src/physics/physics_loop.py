@@ -85,10 +85,13 @@ def physics_loss_from_out(model, out, surrogate, occ, sv, sk, spec, mask,
     # Decode: z_hat (predicted latents) + scalar_pred → geometry.
     # Known scalars (sk) are substituted with their true values (sv) at
     # assembly — the scalar analog of visible-occupancy retention.
+    # Fix 4 (spec §6): hard_forward must actually reach decode_geometry —
+    # the argument is behavior-affecting, not just present in the signature.
     geometry, soft_occ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
         occ_input=occ, mask=mask, use_ste=use_ste,
-        scalar_known=sk, scalar_values=sv)
+        scalar_known=sk, scalar_values=sv,
+        hard_forward=hard_forward)
 
     # Forward through frozen surrogate — autograd MUST flow (Phase 4 MD §4)
     result = surrogate(geometry)

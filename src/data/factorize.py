@@ -50,6 +50,19 @@ def factorize_geometry(geometry):
     r_scaled = geometry[:, 0].amax(dim=(1, 2))  # (B,) = r_atom/5
     r = r_scaled * 5.0  # (B,)
 
+    # Occupancy recovery ((ch0 != 0) | (ch1 != 0)) and scalar recovery via amax
+    # both rely on h_atom and r_atom being strictly positive: if either were
+    # exactly zero for a sample, an occupied pixel on that channel would be
+    # indistinguishable from an unoccupied one and occupancy recovery would
+    # silently misclassify pixels for that sample. Physically these are positive
+    # dimensions, so this is an asserted invariant rather than a silent one.
+    assert (h > 0).all() and (r > 0).all(), (
+        "factorize_geometry assumes h_atom and r_atom are strictly positive "
+        "(occupancy recovery relies on nonzero channel values on occupied "
+        "pixels) — got a sample with a zero or negative scalar; occupancy "
+        "recovery would be unreliable for this sample."
+    )
+
     scalars = torch.stack([l, h, r], dim=-1)  # (B, 3)
     return occ, scalars
 

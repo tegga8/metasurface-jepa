@@ -111,6 +111,13 @@ def test_assemble_factorize_roundtrip_real_data():
     assert torch.allclose(G_re, batch, atol=1e-5), (
         "round-trip must reproduce real dataset geometry within float tolerance"
     )
+    # Direct check of the positivity invariant that factorize_geometry now
+    # asserts internally: h_atom and r_atom are strictly positive on the real
+    # split (occupancy recovery relies on nonzero channel values on occupied
+    # pixels). Asserted explicitly here rather than inferred from round-trip
+    # success.
+    assert (scalars[:, 1] > 0).all(), "h_atom must be strictly positive on real data"
+    assert (scalars[:, 2] > 0).all(), "r_atom must be strictly positive on real data"
 
 
 def test_assemble_broadcast_invariants():

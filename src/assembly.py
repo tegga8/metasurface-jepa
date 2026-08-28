@@ -34,7 +34,7 @@ from encoders.occupancy_encoder import OccupancyEncoder
 from encoders.scalar_encoder import ScalarEncoder
 from fusion.fusion_encoder import FusionEncoder
 from decoders.scalar_decoder import ScalarDecoder
-from decoders.geometry_decoder import GeometryDecoder
+from decoders.occupancy_decoder import OccupancyDecoder
 from data.factorize import assemble_metadit_geometry
 from encoders.spectrum_encoder import ReleasedSpectrumEncoder, SpectrumPath
 from encoders.target_encoder import EMAEncoder
@@ -394,10 +394,12 @@ class UnifiedJEPA(nn.Module):
         # Scalar decode heads
         self.scalar_decoder = ScalarDecoder(hidden=hidden)
 
-        # Geometry decoder: latent → occupancy logits + geometry (Phase 4 MD §3)
-        self.geometry_decoder = GeometryDecoder(
-            hidden_dim=hidden, base_dim=hidden // 2,
-            num_channels=3, occupancy_head=True,
+        # Occupancy decoder: latent → occupancy logits only, FiLM-conditioned
+        # by effective (l,h,r) at every layer (architecture_v5.md §4.1).
+        # No 3-channel geometry head: the broadcast tensor is assembled once,
+        # at the physics-surrogate boundary.
+        self.geometry_decoder = OccupancyDecoder(
+            hidden=hidden, base_dim=hidden // 2, scalar_hidden=scalar_hidden,
         )
 
         # EMA target for occupancy encoder (z_y_raw JEPA target)
@@ -556,8 +558,10 @@ class UnifiedJEPA(nn.Module):
         return out
 
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
-                        scalar_known=None, scalar_values=None, use_ste=False):
-        """Decode predicted latents to surrogate-ready geometry (Phase 4 MD §1-§3).
+                        scalar_known=None, scalar_values=None, use_ste=False,
+                        hard_forward=False):
+        """Decode predicted latents to surrogate-ready geometry (Phase 4 MD §1-§3,
+        architecture_v5.md §4.1).
 
         Args:
             z_hat:       [B, 256, hidden] predicted occupancy latents.
@@ -566,24 +570,40 @@ class UnifiedJEPA(nn.Module):
             mask:        [B, 16, 16] 1=visible, 0=masked — retains visible pixels.
             scalar_known: [B, 3] bool — which scalars are observed. When provided
                          together with scalar_values, known scalars are
-                         substituted with their true values at assembly (the
-                         scalar analog of visible-occupancy retention); unknown
-                         scalars use scalar_pred.
+                         substituted with their true values (the scalar analog
+                         of visible-occupancy retention); unknown scalars use
+                         scalar_pred.
             scalar_values: [B, 3] true scalar values (used only where
                          scalar_known is True).
-            use_ste:     If True, use hard occupancy for surrogate input but
-                         soft gradient path (straight-through estimator).
+            use_ste:     If True (AND self.training), use hard occupancy for the
+                         surrogate input with a soft backward path
+                         (straight-through estimator). Training behavior only.
+            hard_forward: If True, threshold occupancy to binary for the forward
+                         geometry regardless of training mode (used by the
+                         soft-vs-hard diagnostic — see physics_loop).
 
         Returns:
             geometry:    [B, 3, 64, 64] — r_atom/5, h_atom, l_lattice/3.
             soft_occ:    [B, 1, 64, 64] — sigmoid occupancy logits.
         """
-        geometry_logits, occ_logits = self.geometry_decoder(z_hat)
+        # Effective scalar rule (architecture_v5.md §4.1): decode-time FiLM and
+        # assembly use the true value where known, the prediction where unknown —
+        # identical in training and inference.
+        if scalar_known is not None and scalar_values is not None:
+            scalar_for_assembly = torch.where(
+                scalar_known, scalar_values, scalar_pred)
+        else:
+            scalar_for_assembly = scalar_pred
+
+        # Decoder is FiLM-conditioned by the effective (l,h,r).
+        occ_logits = self.geometry_decoder(z_hat, scalar_for_assembly)
         soft_occ = torch.sigmoid(occ_logits)  # (B, 1, 64, 64)
 
         if use_ste and self.training:
             hard_occ = (soft_occ > 0.5).float()
             occ_for_assembly = hard_occ + soft_occ - soft_occ.detach()
+        elif hard_forward:
+            occ_for_assembly = (soft_occ > 0.5).float()
         else:
             occ_for_assembly = soft_occ
 
@@ -592,15 +612,6 @@ class UnifiedJEPA(nn.Module):
             up = mask.view(z_hat.shape[0], 1, 16, 16).repeat_interleave(4, 2).repeat_interleave(4, 3)
             vis = (up > 0.5).float()
             occ_for_assembly = occ_input * vis + occ_for_assembly * (1 - vis)
-
-        # Scalar analog of visible-pixel retention: known scalars are used
-        # exactly (never the model's untrained-on-known-positions guess);
-        # unknown scalars use the prediction.
-        if scalar_known is not None and scalar_values is not None:
-            scalar_for_assembly = torch.where(
-                scalar_known, scalar_values, scalar_pred)
-        else:
-            scalar_for_assembly = scalar_pred
 
         l = scalar_for_assembly[:, 0]
         h = scalar_for_assembly[:, 1]

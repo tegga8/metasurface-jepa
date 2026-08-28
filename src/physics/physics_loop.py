@@ -176,10 +176,16 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
                              device="cpu"):
     """Characterize soft vs. hard occupancy through the surrogate (Phase 4 MD §3).
 
-    Both branches go through decode_geometry with identical occ_input/mask, so
-    visible-pixel retention is applied identically on both sides and only
-    occupancy hardness (use_ste) varies — otherwise the comparison conflates
-    soft-vs-hard with retained-vs-unretained.
+    Compares:
+    - Soft geometry: sigmoid occupancy (soft_forward, use_ste=False)
+    - Hard-binary geometry: explicitly thresholded occupancy (hard_forward=True)
+
+    Both branches go through decode_geometry with identical occ_input/mask and
+    identical known-scalar substitution, so visible-pixel retention and scalar
+    handling are applied identically on both sides — the ONLY difference is
+    occupancy hardness. The diagnostic must NOT depend on model.training (STE
+    applies only under training; this test runs in eval mode), so the hard
+    branch uses hard_forward explicitly.
 
     Returns:
         dict with spectrum difference metrics.
@@ -192,11 +198,11 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
 
         geometry_soft, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"],
-            occ_input=occ, mask=mask, use_ste=False,
+            occ_input=occ, mask=mask, use_ste=False, hard_forward=False,
             scalar_known=sk, scalar_values=sv)
         geometry_hard, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"],
-            occ_input=occ, mask=mask, use_ste=True,
+            occ_input=occ, mask=mask, use_ste=False, hard_forward=True,
             scalar_known=sk, scalar_values=sv)
 
         spec_soft = surrogate(geometry_soft).prediction

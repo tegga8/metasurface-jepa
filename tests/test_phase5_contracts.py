@@ -199,16 +199,16 @@ def test_scalar_masking_does_not_modify_occupancy():
     occ, sv, spec, M = _batch(seed=4)
     occ_copy = occ.clone()
 
+    # Build scalar MLP inputs under different known/unknown regimes.
     sk_a = torch.ones(2, 3, dtype=torch.bool)
     sk_b = torch.zeros(2, 3, dtype=torch.bool)
-    sk_c = torch.tensor([[True, False, True], [False, True, False]])
+    _ = model._build_scalar_input(sv, sk_a)
+    _ = model._build_scalar_input(sv, sk_b)
 
-    occ_a, sv_a = model._build_scalar_input(sv, sk_a), sv  # scalar input
-    occ_b, sv_b = model._build_scalar_input(sv, sk_b), sv
-
-    # Occupancy must be identical regardless of scalar regime
-    assert torch.equal(occ_a, sv_a) or True  # scalars don't touch occ
-    assert torch.equal(occ, occ_copy)  # occ unchanged
+    # Occupancy must be identical regardless of scalar regime — scalar masking
+    # never touches the occupancy tensor.
+    assert torch.equal(occ, occ_copy), (
+        "scalar masking must not modify occupancy")
 
 
 def test_full_mask_no_visible_remains():

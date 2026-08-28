@@ -167,13 +167,10 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
                              device="cpu"):
     """Characterize soft vs. hard occupancy through the surrogate (Phase 4 MD §3).
 
-    Compares:
-    - Real binary geometry (hard occupancy 0/1)
-    - Soft occupancy (sigmoid of decoder logits)
-
-    If the surrogate is materially out-of-distribution on soft fields,
-    a straight-through estimator (STE) should be used. This test quantifies
-    the difference.
+    Both branches go through decode_geometry with identical occ_input/mask, so
+    visible-pixel retention is applied identically on both sides and only
+    occupancy hardness (use_ste) varies — otherwise the comparison conflates
+    soft-vs-hard with retained-vs-unretained.
 
     Returns:
         dict with spectrum difference metrics.
@@ -184,25 +181,18 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
     with torch.no_grad():
         out = model(occ, sv, sk, spec, mask, goal_mode="real")
 
-        # Hard (binary) geometry
-        geometry_hard, _ = model.decode_geometry(
+        geometry_soft, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"],
             occ_input=occ, mask=mask, use_ste=False)
-        # Force binary occupancy
-        soft_occ = torch.sigmoid(
-            model.geometry_decoder(
-                out["z_hat"])[1])
-        hard_occ = (soft_occ > 0.5).float()
-        from data.factorize import assemble_metadit_geometry
-        geometry_binary = assemble_metadit_geometry(
-            hard_occ, out["scalar_pred"][:, 0],
-            out["scalar_pred"][:, 1], out["scalar_pred"][:, 2])
+        geometry_hard, _ = model.decode_geometry(
+            out["z_hat"], out["scalar_pred"],
+            occ_input=occ, mask=mask, use_ste=True)
 
+        spec_soft = surrogate(geometry_soft).prediction
         spec_hard = surrogate(geometry_hard).prediction
-        spec_binary = surrogate(geometry_binary).prediction
 
-        diff = (spec_hard - spec_binary).abs().mean().item()
-        rel_diff = diff / (spec_hard.abs().mean().item() + 1e-8)
+        diff = (spec_soft - spec_hard).abs().mean().item()
+        rel_diff = diff / (spec_soft.abs().mean().item() + 1e-8)
 
     return {
         "spectrum_l1_diff": diff,

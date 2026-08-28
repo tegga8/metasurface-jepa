@@ -252,6 +252,39 @@ def test_soft_hard_occupancy_test():
     assert "ste_recommended" in result
 
 
+@pytest.mark.skipif(not _HAS_SURROGATE,
+                    reason="Surrogate weights not available")
+def test_soft_hard_occupancy_test_retains_visible_pixels_identically():
+    """Regression: both branches of soft_hard_occupancy_test must apply the same
+    visible-pixel retention, so rel_diff isolates occupancy hardness only.
+
+    With mask fully visible (all ones), decode_geometry's retention forces
+    occ_for_assembly to occ_input on 100% of pixels regardless of use_ste, so
+    the two branches must be numerically identical and rel_diff must be ~0.
+    Against the old implementation (where one branch bypassed decode_geometry
+    entirely and skipped retention) a fully-visible mask produced a nonzero
+    rel_diff coming entirely from the retention/no-retention confound.
+    """
+    from physics.physics_loop import load_surrogate, soft_hard_occupancy_test
+    model = _build_model()
+    surrogate = load_surrogate(_SURROGATE_PATH, device="cpu")
+
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    occ[:, :, :32, :32] = 1.0
+    sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]])
+    spec = torch.randn(2, 2, 301)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    M_fully_visible = torch.ones(2, 16, 16)
+
+    result = soft_hard_occupancy_test(
+        model, surrogate, occ, sv, spec, sk, M_fully_visible)
+    assert result["spectrum_rel_diff"] < 1e-5, (
+        "with a fully-visible mask, retention overrides decoder output "
+        "identically on both branches — any nonzero rel_diff indicates the "
+        "soft-vs-hard comparison was confounded by retention"
+    )
+
+
 # --------------------------------------------------------------------------
 # Scenario evaluators
 # --------------------------------------------------------------------------

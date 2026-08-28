@@ -86,6 +86,101 @@ def test_factorize_rejects_wrong_channels():
 
 
 # ---------------------------------------------------------------------------
+# Broadcast-invariant validator (cleanup item 2)
+# ---------------------------------------------------------------------------
+
+def test_validate_broadcast_valid_synthetic():
+    """Valid synthetic geometry passes the validator (no violations)."""
+    from data.factorize import validate_geometry_broadcast
+    G, *_ = _make_valid_broadcast_geometry(b=4, seed=3)
+    assert validate_geometry_broadcast(G) == []
+
+
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(REPO_ROOT, "data/metadit/split_data/train_set.mat")),
+    reason="real training split not present")
+def test_validate_broadcast_valid_real_data():
+    """Valid real geometry passes the validator (no violations)."""
+    from data.factorize import validate_geometry_broadcast
+    from data.dataset import MetaDiTDataset, collate_batch
+    ds = MetaDiTDataset(
+        os.path.join(REPO_ROOT, "data/metadit/split_data/train_set.mat"),
+        max_samples=2, seed=0)
+    G, _ = collate_batch([ds[0], ds[1]])
+    assert validate_geometry_broadcast(G) == []
+
+
+def test_validate_broadcast_catches_malformed_support_mismatch():
+    """Malformed geometry: support(G0) != support(G1) must be caught."""
+    from data.factorize import validate_geometry_broadcast
+    G, *_ = _make_valid_broadcast_geometry(b=1, seed=0)
+    # Break support agreement: zero out one occupied pixel in G1 only.
+    bad = G.clone()
+    occ_mask = bad[0, 0] != 0
+    idx = occ_mask.nonzero()[0]
+    bad[0, 1, idx[0], idx[1]] = 0.0
+    violations = validate_geometry_broadcast(bad)
+    assert any("support" in v for v in violations), (
+        f"expected a support-mismatch violation, got {violations}")
+
+
+def test_validate_broadcast_catches_nonconstant_occupied_values():
+    """Malformed geometry: non-constant occupied values must be caught."""
+    from data.factorize import validate_geometry_broadcast
+    G, *_ = _make_valid_broadcast_geometry(b=1, seed=0)
+    bad = G.clone()
+    # Perturb one occupied G0 pixel so occupied values are no longer constant.
+    occ_mask = bad[0, 0] != 0
+    idx = occ_mask.nonzero()[0]
+    bad[0, 0, idx[0], idx[1]] += 0.5
+    violations = validate_geometry_broadcast(bad)
+    assert any("G0" in v and "constant" in v for v in violations), (
+        f"expected a G0-constancy violation, got {violations}")
+
+
+def test_validate_broadcast_catches_nonconstant_g2():
+    """Malformed geometry: non-spatially-constant G2 must be caught."""
+    from data.factorize import validate_geometry_broadcast
+    G, *_ = _make_valid_broadcast_geometry(b=1, seed=0)
+    bad = G.clone()
+    bad[0, 2, 0, 0] += 1.0  # perturb one G2 pixel
+    violations = validate_geometry_broadcast(bad)
+    assert any("G2" in v for v in violations), (
+        f"expected a G2-constancy violation, got {violations}")
+
+
+def test_validate_broadcast_catches_nonpositive_h():
+    """Malformed geometry: h_atom <= 0 for an occupied sample must be caught."""
+    from data.factorize import validate_geometry_broadcast
+    G, *_ = _make_valid_broadcast_geometry(b=1, seed=0)
+    bad = G.clone()
+    bad[0, 1] *= -1.0  # flip h sign → h_atom < 0 on occupied pixels
+    violations = validate_geometry_broadcast(bad)
+    assert any("h_atom" in v for v in violations), (
+        f"expected an h_atom violation, got {violations}")
+
+
+def test_validate_factorized_roundtrip_ok():
+    """validate_factorized_geometry passes for a valid (occ, scalars) pair."""
+    from data.factorize import validate_factorized_geometry
+    G, _, _, _, occ = _make_valid_broadcast_geometry(b=2, seed=1)
+    _, scalars = factorize_geometry(G)
+    assert validate_factorized_geometry(occ, scalars) == []
+
+
+def test_validate_factorized_roundtrip_catches_bad_scalars():
+    """validate_factorized_geometry catches a negative scalar."""
+    from data.factorize import validate_factorized_geometry
+    G, _, _, _, occ = _make_valid_broadcast_geometry(b=2, seed=1)
+    _, scalars = factorize_geometry(G)
+    bad_scalars = scalars.clone()
+    bad_scalars[0, 1] = -0.5  # h_atom negative
+    violations = validate_factorized_geometry(occ, bad_scalars)
+    assert any("h_atom" in v for v in violations), (
+        f"expected an h_atom violation, got {violations}")
+
+
+# ---------------------------------------------------------------------------
 # Legacy round-trip equivalence
 # ---------------------------------------------------------------------------
 

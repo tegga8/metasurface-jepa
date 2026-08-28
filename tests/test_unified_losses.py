@@ -281,15 +281,22 @@ def test_physics_loss_enables():
 # --------------------------------------------------------------------------
 
 def test_curriculum_mask_ratios_include_full():
+    """Cleanup item 3: training ratios exclude 0.0 (masked-token objective
+    undefined), eval ratios include it as the unmasked reference. Full mask
+    (1.0) is in both."""
     import yaml
     cfg = yaml.safe_load(open(
         os.path.join(REPO_ROOT, "configs", "unified.yaml")))
-    ratios = cfg["curriculum"]["mask_ratios"]
-    assert 1.0 in ratios, "full mask (1.0) must be in curriculum"
-    assert 0.0 in ratios, "zero mask (0.0) must be in curriculum"
-    probs = cfg["curriculum"]["mask_ratio_probs"]
-    assert len(probs) == len(ratios)
-    assert abs(sum(probs) - 1.0) < 1e-6
+    train_ratios = cfg["curriculum"]["train_mask_ratios"]
+    train_probs = cfg["curriculum"]["train_mask_ratio_probs"]
+    eval_ratios = cfg["curriculum"]["eval_mask_ratios"]
+    assert 1.0 in train_ratios, "full mask (1.0) must be in training curriculum"
+    assert 0.0 not in train_ratios, (
+        "0.0 must be excluded from training (no masked tokens)")
+    assert len(train_probs) == len(train_ratios)
+    assert abs(sum(train_probs) - 1.0) < 1e-6
+    assert 0.0 in eval_ratios, "0.0 must be in eval ratios (unmasked reference)"
+    assert 1.0 in eval_ratios, "full mask (1.0) must be in eval ratios"
 
 
 def test_curriculum_scalar_regimes():

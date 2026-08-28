@@ -134,3 +134,90 @@ def assemble_metadit_geometry(occupancy, l_lattice, h_atom, r_atom):
     """
     scalars = torch.stack([l_lattice, h_atom, r_atom], dim=-1)
     return assemble_geometry(occupancy, scalars)
+
+
+def validate_geometry_broadcast(geometry, atol=1e-6):
+    """Validate a [B,3,64,64] tensor satisfies the MetaDiT broadcast invariants.
+
+    Cleanup item 2: factorize_geometry() is correct for VALID broadcast
+    geometry but assumes the invariants hold. This validator makes that
+    assumption explicit and checkable (preflight/tests only — it is NOT run
+    on every training sample, per the cleanup spec).
+
+    Invariants checked (per sample):
+        1. support(G0) == support(G1)   — occupancy masks agree across channels
+        2. G0 occupied values are constant (== r_atom/5)
+        3. G1 occupied values are constant (== h_atom)
+        4. G2 is spatially constant (== l_lattice/3)
+        5. h_atom > 0 for samples with any occupied pixels
+        6. r_atom > 0 for samples with any occupied pixels
+
+    Args:
+        geometry: (B, 3, 64, 64) float tensor in the broadcast convention.
+        atol: absolute tolerance for value-constancy comparisons.
+
+    Returns:
+        List[str] of violation messages. Empty list == geometry is valid.
+
+    Raises:
+        AssertionError: if geometry has the wrong shape.
+    """
+    assert geometry.dim() == 4 and geometry.shape[1] == 3, (
+        f"expected [B,3,64,64], got {tuple(geometry.shape)}")
+    violations = []
+    G = geometry.float()
+    for i in range(G.shape[0]):
+        g0, g1, g2 = G[i, 0], G[i, 1], G[i, 2]  # each (64, 64)
+
+        # 1. support(G0) == support(G1)
+        sup0 = g0 != 0
+        sup1 = g1 != 0
+        if not torch.equal(sup0, sup1):
+            violations.append(
+                f"sample {i}: support(G0) != support(G1) "
+                f"(G0 nonzero {sup0.sum().item()}, G1 nonzero {sup1.sum().item()})")
+
+        # 2/3. G0/G1 occupied values constant
+        for ch, name in ((g0, "G0"), (g1, "G1")):
+            occ_vals = ch[ch != 0]
+            if occ_vals.numel() > 0:
+                spread = (occ_vals.max() - occ_vals.min()).abs().item()
+                if spread > atol:
+                    violations.append(
+                        f"sample {i}: {name} occupied values not constant "
+                        f"(spread {spread:.3e} > atol {atol:.0e})")
+
+        # 4. G2 spatially constant
+        spread2 = (g2.max() - g2.min()).abs().item()
+        if spread2 > atol:
+            violations.append(
+                f"sample {i}: G2 not spatially constant "
+                f"(spread {spread2:.3e} > atol {atol:.0e})")
+
+        # 5/6. h_atom > 0, r_atom > 0 for occupied samples
+        if sup0.any():
+            h = g1.max().item()
+            r_scaled = g0.max().item()
+            if h <= 0:
+                violations.append(f"sample {i}: h_atom <= 0 ({h:.3e})")
+            if r_scaled <= 0:
+                violations.append(f"sample {i}: r_atom <= 0 ({r_scaled:.3e})")
+    return violations
+
+
+def validate_factorized_geometry(occupancy, scalars, atol=1e-6):
+    """Validate a factorized (occupancy, scalars) pair round-trips to valid
+    broadcast geometry.
+
+    Convenience wrapper: assemble then validate. Useful in preflight/tests.
+
+    Args:
+        occupancy: (B, 1, 64, 64) binary float tensor.
+        scalars:   (B, 3) = [l_lattice, h_atom, r_atom].
+        atol: absolute tolerance for the invariant checks.
+
+    Returns:
+        List[str] of violation messages. Empty list == valid.
+    """
+    return validate_geometry_broadcast(
+        assemble_geometry(occupancy, scalars), atol=atol)

@@ -120,15 +120,23 @@ def make_synthetic_dataset(n, device):
 # ---------------------------------------------------------------------------
 
 def sample_mask_ratio(cfg, rng):
-    """Sample an occupancy mask ratio from the curriculum distribution.
+    """Sample an occupancy mask ratio from the TRAINING curriculum distribution.
 
-    The 0.0 ratio (no masking) is excluded from TRAINING sampling: with zero
-    masked tokens the masked-token VICReg/JEPA objective is undefined (N>=2
-    required for variance/covariance). 0.0 remains a valid evaluation stratum
-    (easy regime)."""
-    ratios = cfg["curriculum"]["mask_ratios"]
-    probs = cfg["curriculum"]["mask_ratio_probs"]
-    # Exclude ratio 0.0 from training: no masked tokens → undefined objective.
+    Cleanup item 3: the config now distinguishes train_mask_ratios (which
+    EXCLUDE 0.0 — with zero masked tokens the masked-token VICReg/JEPA
+    objective is undefined) from eval_mask_ratios (which MAY include 0.0 as
+    the genuinely unmasked reference condition). This function samples from
+    the train list only; the 0.0-exclusion is explicit in config, not a
+    silent runtime filter.
+
+    Falls back to the legacy mask_ratios/mask_ratio_probs keys (with the
+    runtime 0.0 filter) if a config predates the split.
+    """
+    cur = cfg["curriculum"]
+    ratios = cur.get("train_mask_ratios", cur.get("mask_ratios"))
+    probs = cur.get("train_mask_ratio_probs", cur.get("mask_ratio_probs"))
+    # Defensive: even if 0.0 is present in the train list, exclude it — the
+    # masked-token objective is undefined at 0.0 (no masked tokens).
     pairs = [(r, p) for r, p in zip(ratios, probs) if r > 0.0]
     rs, ps = zip(*pairs) if pairs else ([1.0], [1.0])
     p = torch.tensor(ps, dtype=torch.float32)
@@ -138,38 +146,58 @@ def sample_mask_ratio(cfg, rng):
 
 
 def sample_scalar_known(B, cfg, rng, device=None):
-    """Sample scalar known/unknown flags per the curriculum regime.
+    """Sample scalar known/unknown flags via the CANONICAL ScalarMasker.
 
-    Fix 2 (spec §4): flags are constructed ON the model device so a CUDA
-    training step can never hand a CPU known-flags tensor to the model.
+    Cleanup item 1: the trainer delegates flag construction to
+    src/data/scalar_mask.py::ScalarMasker (the single canonical scalar-masking
+    implementation) instead of maintaining a duplicate sampler. The curriculum
+    regime is sampled from config (all_known / all_unknown / mixed), and
+    "mixed" maps to ScalarMasker's "independent" regime (each scalar known
+    with p=0.5 — the same per-scalar Bernoulli semantics the old sampler
+    used).
+
+    ScalarMasker constructs flags on the scalar_values device (CPU generator,
+    then .to(device)), so CUDA batches stay device-correct by construction.
 
     Returns:
         scalar_known: (B, 3) bool on `device`
-        regime: str
+        regime: str (curriculum regime name for logging)
     """
+    from data.scalar_mask import ScalarMasker
     regimes = cfg["curriculum"]["scalar_regimes"]
     probs = cfg["curriculum"]["scalar_regime_probs"]
     p = torch.tensor(probs)
     idx = torch.multinomial(p, 1, generator=rng).item()
     regime = regimes[idx]
 
-    if regime == "all_known":
-        return torch.ones(B, 3, dtype=torch.bool, device=device), regime
-    elif regime == "all_unknown":
-        return torch.zeros(B, 3, dtype=torch.bool, device=device), regime
-    else:  # "mixed"
-        # Sample on CPU with the CPU generator, then move to device (the
-        # device-aware pattern from ScalarMasker: a CPU torch.Generator
-        # cannot be passed alongside device="cuda").
-        return (torch.rand(B, 3, generator=rng) > 0.5).to(device), regime
+    # Map curriculum regime → canonical ScalarMasker regime.
+    regime_to_masker = {
+        "all_known": "all_known",
+        "all_unknown": "all_unknown",
+        "mixed": "independent",
+    }
+    if regime not in regime_to_masker:
+        raise ValueError(
+            f"unknown scalar regime {regime!r}; expected one of "
+            f"{list(regime_to_masker)}")
+    masker = ScalarMasker(
+        regime=regime_to_masker[regime],
+        p_independent=0.5, seed=0)
+    # ScalarMasker.sample returns (masked_values, known_flags) on the device
+    # of scalar_values; we only need the flags here.
+    sv_dummy = torch.zeros(B, 3, device=device)
+    _, known = masker.sample(sv_dummy)
+    return known, regime
 
 
 class RegimeLogger:
     """Log scalar regime and mask-ratio frequencies per Phase 3 MD §4."""
 
     def __init__(self, cfg):
-        self.mask_ratios = cfg["curriculum"]["mask_ratios"]
-        self.scalar_regimes = cfg["curriculum"]["scalar_regimes"]
+        cur = cfg["curriculum"]
+        # Train ratios (excludes 0.0); falls back to legacy keys.
+        self.mask_ratios = cur.get("train_mask_ratios", cur.get("mask_ratios"))
+        self.scalar_regimes = cur["scalar_regimes"]
         self.mask_counts = {r: 0 for r in self.mask_ratios}
         self.regime_counts = {r: 0 for r in self.scalar_regimes}
         self._total = 0
@@ -730,6 +758,56 @@ def preflight(cfg, device=None):
         scalar_known=sk, scalar_values=sv)
     spec_pred = surrogate(geometry).prediction
 
+    # Cleanup item 7: geometry broadcast invariants on the assembled tensor.
+    # The invariant check uses the HARD (binary) occupancy assembly — the
+    # broadcast invariants (constant occupied values per channel) are defined
+    # for the deterministic binary MetaDiT convention. The soft-occupancy
+    # path is the differentiable training path and legitimately has
+    # continuously-valued channels; it is checked separately via
+    # hard_forward=True here.
+    from data.factorize import validate_geometry_broadcast
+    geometry_hard, _ = model.decode_geometry(
+        out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+        scalar_known=sk, scalar_values=sv, hard_forward=True)
+    invariant_violations = validate_geometry_broadcast(geometry_hard)
+    if invariant_violations:
+        raise RuntimeError(
+            f"preflight: assembled geometry violates broadcast invariants: "
+            f"{invariant_violations}")
+
+    # Cleanup item 7: known-scalar precedence — the assembled geometry must
+    # use scalar_values where known and scalar_pred where unknown. Run a
+    # second decode with deliberately-wrong predictions and verify the known
+    # positions still carry the TRUE values. Hard assembly (binary occupancy)
+    # so the channel values are exactly the scalar values, not scaled by soft
+    # occupancy.
+    with torch.no_grad():
+        wrong_pred = torch.full_like(out["scalar_pred"], 999.0)
+        # sk is all-unknown in the main path; build an all-known path to
+        # verify known precedence.
+        sk_known = torch.ones(b, 3, dtype=torch.bool, device=device)
+        geom_known, _ = model.decode_geometry(
+            out["z_hat"], wrong_pred, occ_input=occ, mask=M,
+            scalar_known=sk_known, scalar_values=sv, hard_forward=True)
+        l_true = sv[:, 0] / 3.0
+        l_used = geom_known[:, 2, 0, 0]
+        if not torch.allclose(l_used, l_true, atol=1e-5):
+            raise RuntimeError(
+                "preflight: known-scalar precedence violated — assembly did "
+                "not use scalar_values for known scalars")
+        # Unknown precedence: all-unknown path must use scalar_pred, not sv.
+        sk_unknown = torch.zeros(b, 3, dtype=torch.bool, device=device)
+        geom_unknown, _ = model.decode_geometry(
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+            scalar_known=sk_unknown, scalar_values=sv, hard_forward=True)
+        # With hard occupancy the channel-2 value is l_pred/3 everywhere
+        # (l comes from scalar_pred when unknown). Verify it is NOT sv's l.
+        l_pred_used = geom_unknown[:, 2, 0, 0] * 3.0
+        if torch.allclose(l_pred_used, sv[:, 0], atol=1e-5):
+            raise RuntimeError(
+                "preflight: unknown-scalar precedence violated — assembly "
+                "appears to use scalar_values for unknown scalars")
+
     checks = {
         "occupancy_shape": list(occ.shape),
         "z_x_shape": list(out["z_x"].shape),
@@ -740,6 +818,9 @@ def preflight(cfg, device=None):
         "loss_finite": bool(torch.isfinite(loss)),
         "geometry_finite": bool(torch.isfinite(geometry).all()),
         "spec_pred_finite": bool(torch.isfinite(spec_pred).all()),
+        "geometry_invariants_ok": len(invariant_violations) == 0,
+        "known_scalar_precedence_ok": True,
+        "unknown_scalar_precedence_ok": True,
     }
 
     # Gradient ownership.

@@ -56,8 +56,15 @@ def main():
     sv = torch.tensor([[2.5, 0.8, 4.0], [2.8, 1.0, 4.2]]).to(device)
     spec = torch.randn(2, 2, 301).to(device)
 
-    ratios = cfg.get("curriculum", {}).get("mask_ratios",
-            [0.2, 0.4, 0.6, 0.8, 1.0])
+    # Cleanup item 3: prefer eval_mask_ratios (the evaluation-condition list;
+    # falls back to the legacy mask_ratios key). The guidance-gap sweep is
+    # defined over MASKED buckets (20/40/60/80/100%), so 0.0 — the unmasked
+    # reference — is filtered out here regardless of which key supplies the
+    # list.
+    ratios = cfg.get("curriculum", {}).get(
+        "eval_mask_ratios",
+        cfg.get("curriculum", {}).get("mask_ratios",
+                                      [0.2, 0.4, 0.6, 0.8, 1.0]))
     if 0.0 in ratios:
         ratios = [r for r in ratios if r > 0.0]
 

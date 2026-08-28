@@ -34,6 +34,71 @@ def test_real_mode_missing_data_raises():
         train(cfg, no_train=True, device="cpu", use_synthetic_smoke=False)
 
 
+def test_trainer_uses_canonical_scalar_masker():
+    """Cleanup item 1: the trainer's scalar-known sampling must delegate to
+    the canonical ScalarMasker (src/data/scalar_mask.py), not a duplicate
+    inline sampler. Verify output shape, dtype, device, and semantics."""
+    from train_unified import sample_scalar_known
+    from data.scalar_mask import ScalarMasker
+    cfg = _load_cfg()
+
+    # Shape/dtype/device for each curriculum regime.
+    for regime in ("all_known", "all_unknown", "mixed"):
+        cfg["curriculum"]["scalar_regimes"] = [regime]
+        cfg["curriculum"]["scalar_regime_probs"] = [1.0]
+        rng = torch.Generator().manual_seed(42)
+        sk, out_regime = sample_scalar_known(4, cfg, rng, device="cpu")
+        assert sk.shape == (4, 3), f"{regime}: shape {sk.shape}"
+        assert sk.dtype == torch.bool, f"{regime}: dtype {sk.dtype}"
+        assert out_regime == regime
+        if regime == "all_known":
+            assert sk.all()
+        elif regime == "all_unknown":
+            assert not sk.any()
+        else:
+            # mixed → canonical "independent" (p=0.5): both True and False
+            # must appear somewhere across a large-enough draw.
+            rng2 = torch.Generator().manual_seed(1)
+            sk_big, _ = sample_scalar_known(200, cfg, rng2, device="cpu")
+            assert sk_big.any() and not sk_big.all()
+
+    # The canonical implementation is ScalarMasker — verify the delegation is
+    # structural (the function source references it), so a future duplicate
+    # sampler cannot silently reappear.
+    import inspect
+    src = inspect.getsource(sample_scalar_known)
+    assert "from data.scalar_mask import ScalarMasker" in src, (
+        "trainer scalar-known sampling must import the canonical ScalarMasker")
+
+
+def test_train_mask_ratios_exclude_zero():
+    """Cleanup item 3: the training mask-ratio config must exclude 0.0, while
+    the eval mask-ratio config may include it as the unmasked reference."""
+    cfg = _load_cfg()
+    train_ratios = cfg["curriculum"]["train_mask_ratios"]
+    train_probs = cfg["curriculum"]["train_mask_ratio_probs"]
+    eval_ratios = cfg["curriculum"]["eval_mask_ratios"]
+
+    assert 0.0 not in train_ratios, (
+        "training mask ratios must exclude 0.0 (masked-token objective "
+        "undefined with no masked tokens)")
+    assert len(train_ratios) == len(train_probs), (
+        "train_mask_ratios and train_mask_ratio_probs must align")
+    assert abs(sum(train_probs) - 1.0) < 1e-6, (
+        "train_mask_ratio_probs must sum to 1")
+    assert 0.0 in eval_ratios, (
+        "eval mask ratios may include 0.0 as the unmasked reference")
+
+    # The training sampler must never return 0.0 even if a legacy config
+    # leaks it into the train list (defensive filter).
+    from train_unified import sample_mask_ratio
+    cfg["curriculum"]["train_mask_ratios"] = [0.0, 0.5, 1.0]
+    cfg["curriculum"]["train_mask_ratio_probs"] = [0.1, 0.6, 0.3]
+    rng = torch.Generator().manual_seed(0)
+    sampled = {float(sample_mask_ratio(cfg, rng)) for _ in range(100)}
+    assert 0.0 not in sampled, "sample_mask_ratio must never return 0.0"
+
+
 def test_optimizer_gradients_reset_each_step():
     """Fix 1 (spec §3): gradients must not leak from one optimizer step into
     the next. Proves the trainer's zero_grad(set_to_none=True) placement by
@@ -70,8 +135,8 @@ def test_optimizer_gradients_reset_each_step():
     cfg["data"]["val_split"] = "data/metadit/split_data/NONEXISTENT.mat"
     cfg["weights"]["spectrum"] = os.path.join(tmpdir, "dummy_spec.pth")
     cfg["data"]["use_synthetic"] = True
-    cfg["curriculum"]["mask_ratios"] = [0.5]
-    cfg["curriculum"]["mask_ratio_probs"] = [1.0]
+    cfg["curriculum"]["train_mask_ratios"] = [0.5]
+    cfg["curriculum"]["train_mask_ratio_probs"] = [1.0]
     cfg["curriculum"]["scalar_regimes"] = ["all_known"]
     cfg["curriculum"]["scalar_regime_probs"] = [1.0]
     cfg["train"]["guidance_dropout"] = 0.0
@@ -211,8 +276,8 @@ def test_training_step_cuda_device_correct():
     cfg = _load_cfg()
     cfg["weights"]["spectrum"] = os.path.join(tmpdir, "dummy_spec.pth")
     cfg["data"]["use_synthetic"] = True
-    cfg["curriculum"]["mask_ratios"] = [0.5]
-    cfg["curriculum"]["mask_ratio_probs"] = [1.0]
+    cfg["curriculum"]["train_mask_ratios"] = [0.5]
+    cfg["curriculum"]["train_mask_ratio_probs"] = [1.0]
     cfg["curriculum"]["scalar_regimes"] = ["mixed"]
     cfg["curriculum"]["scalar_regime_probs"] = [1.0]
     cfg["train"]["guidance_dropout"] = 0.0
@@ -313,6 +378,10 @@ def test_preflight_passes_on_real_data():
     assert checks["assembled_geometry_shape"] == [2, 3, 64, 64]
     assert checks["surrogate_prediction_shape"] == [2, 2, 301]
     assert checks["loss_finite"] is True
+    # Cleanup item 7: geometry invariants + scalar precedence must pass.
+    assert checks["geometry_invariants_ok"] is True
+    assert checks["known_scalar_precedence_ok"] is True
+    assert checks["unknown_scalar_precedence_ok"] is True
     own = result["gradient_ownership"]
     assert own["student_params_with_grad"] > 0
     assert own["decoder_params_with_grad"] > 0

@@ -48,9 +48,48 @@ def derangement_permutation(batch_size: int, device: torch.device | str,
     return torch.roll(torch.arange(batch_size, device=device), shifts=1)
 
 
+def derange_batch_tensor(X: torch.Tensor, generator: torch.Generator | None = None,
+                         seed: int | None = None) -> torch.Tensor:
+    """Generalized batch-tensor derangement control (cleanup item 4).
+
+    output[i] = X[perm[i]] with perm[i] != i for all i.
+
+    Applies to any leading-dimension tensor (spectra, scalars, ...): the
+    batch axis is deranged, trailing dimensions are carried along.
+
+    Args:
+        X: Tensor of shape (B, ...).
+        generator: Optional RNG generator.
+        seed: Optional seed.
+
+    Returns:
+        Deranged tensor X_shuf where X_shuf[i] = X[perm[i]] and perm is a
+        derangement.
+
+    Raises:
+        ValueError: If B < 2 — no valid derangement exists (explicit
+            infeasible result, never a silent identity).
+    """
+    b = X.shape[0]
+    if b < 2:
+        raise ValueError(
+            f"derangement requires batch size >= 2 (got {b}): no valid "
+            "derangement exists for a single sample")
+    perm = derangement_permutation(b, X.device, seed=seed, generator=generator)
+    return X[perm]
+
+
 def make_shuffled_spectrum(S: torch.Tensor, generator: torch.Generator | None = None,
                            seed: int | None = None) -> torch.Tensor:
     """Create shuffled spectrum tensor with derangement.
+
+    Thin wrapper around the generic derange_batch_tensor (cleanup item 4).
+
+    B < 2 (no valid derangement): preserved existing behavior — returns the
+    input unchanged. Callers that need an EXPLICIT infeasible result (e.g.
+    evaluators that must not silently present an identity shuffle as a valid
+    control) should guard on B < 2 themselves, exactly as they already do
+    (real_null_shuffled / scalar_dependence report "shuffled_infeasible").
 
     Args:
         S: Spectrum tensor of shape (B, ...).
@@ -62,9 +101,8 @@ def make_shuffled_spectrum(S: torch.Tensor, generator: torch.Generator | None = 
     """
     b = S.shape[0]
     if b < 2:
-        return S  # Can't derange a single sample
-    perm = derangement_permutation(b, S.device, seed=seed, generator=generator)
-    return S[perm]
+        return S  # preserved existing B<2 behavior: no derangement possible
+    return derange_batch_tensor(S, generator=generator, seed=seed)
 
 
 # Canonical metric names for physics conditioning (hardening spec §8)

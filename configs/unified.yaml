@@ -38,8 +38,16 @@ loss:
 
 # Mask curriculum (Phase 3 MD §4)
 curriculum:
-  mask_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
-  mask_ratio_probs: [0.2, 0.2, 0.3, 0.2, 0.1]
+  # TRAINING mask ratios: 0.0 is deliberately EXCLUDED — with zero masked
+  # tokens the masked-token VICReg/JEPA objective is undefined (variance/
+  # covariance require N>=2 valid samples). This exclusion is now explicit
+  # in the config (cleanup item 3), not a silent runtime filter.
+  train_mask_ratios: [0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
+  train_mask_ratio_probs: [0.25, 0.35, 0.25, 0.15]
+  # EVALUATION mask ratios: 0.0 IS included here as the genuinely unmasked
+  # reference condition (easy regime, separately reported — never pooled
+  # into the hard-stratum gate).
+  eval_mask_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]
   mask_placement: random      # "random" or "half_sensitivity" (architecture_v5.md §2)
   scalar_regimes: ["all_known", "all_unknown", "mixed"]
   scalar_regime_probs: [0.34, 0.33, 0.33]

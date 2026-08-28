@@ -38,7 +38,9 @@ from assembly import build_unified_model, load_into_model
 from data.factorize import factorize_geometry, assemble_metadit_geometry
 from data.mask import BlockMasker
 from physics.physics_loop import load_surrogate
-from runtime.physics_controls import make_shuffled_spectrum
+from runtime.physics_controls import (
+    make_shuffled_spectrum, derange_batch_tensor,
+)
 
 
 def _resolve(path):
@@ -222,7 +224,10 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
     results = {}
     for mode, sv_cond in [
         ("real", sv),
-        ("shuffled", make_shuffled_spectrum(sv, seed=0)),
+        # Scalar control: derange the scalar conditioning VALUES via the
+        # generic batch-tensor derangement (cleanup item 4). The decode/assembly
+        # path below still receives the TRUE sv for known positions.
+        ("shuffled", derange_batch_tensor(sv, seed=0)),
     ]:
         out = model(occ, sv_cond, scalar_known, spec, mask, goal_mode="real")
         geometry, _ = model.decode_geometry(
@@ -238,7 +243,24 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
 @torch.no_grad()
 def diversity_check(model, surrogate, occ, sv, spec, mask, scalar_known,
                     device, n_samples=5, perturbation_scale=0.0):
-    """Check generative diversity (Phase 5 MD §9)."""
+    """Repeated-generation diagnostic for the DETERMINISTIC inverse mapping.
+
+    Cleanup item 5: the unified inverse-design path has NO stochastic
+    latent/noise input — the mapping (context, goal) -> geometry is
+    deterministic. There is deliberately no manufactured generative
+    stochasticity. This diagnostic therefore:
+      - with perturbation_scale == 0 (default): verifies DETERMINISM —
+        repeated generations from the same input must be identical, so the
+        reported pairwise diversity is 0 and "deterministic" is True;
+      - with perturbation_scale > 0: applies an EXPLICIT latent-space
+        perturbation as a diagnostic-only sensitivity probe. This is NOT an
+        architectural stochastic mechanism and must not be presented as
+        genuine generative diversity.
+
+    Returns:
+        dict with n_samples, pairwise_spectrum_diversity, and the
+        "deterministic" flag (True iff perturbation_scale == 0).
+    """
     generations = []
     for i in range(n_samples):
         torch.manual_seed(1000 + i)

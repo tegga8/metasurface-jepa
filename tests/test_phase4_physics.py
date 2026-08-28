@@ -406,7 +406,13 @@ def test_surrogate_gradient_test():
 @pytest.mark.skipif(not _HAS_SURROGATE,
                     reason="Surrogate weights not available")
 def test_soft_hard_occupancy_test():
-    """Soft vs hard occupancy characterization (§3)."""
+    """Soft vs hard occupancy characterization (§3).
+
+    With a PARTIAL mask, the masked region contains the model's soft occupancy
+    (non-binary), so the soft-vs-hard branches genuinely differ at the
+    surrogate input — the diagnostic must detect a nonzero difference (Fix 3:
+    the diagnostic actually changes the surrogate input when the predicted
+    masked occupancy is non-binary)."""
     from physics.physics_loop import load_surrogate, soft_hard_occupancy_test
     model = _build_model()
     surrogate = load_surrogate(_SURROGATE_PATH, device="cpu")
@@ -416,7 +422,7 @@ def test_soft_hard_occupancy_test():
     spec = torch.randn(2, 2, 301)
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=42)
-    M = masker.sample(occ, ratio=0.5)
+    M = masker.sample(occ, ratio=0.5)  # partial mask → non-binary masked region
     sk = torch.ones(2, 3, dtype=torch.bool)
 
     result = soft_hard_occupancy_test(
@@ -424,6 +430,12 @@ def test_soft_hard_occupancy_test():
     assert "spectrum_l1_diff" in result
     assert "surrogate_out_of_distribution" in result
     assert "ste_recommended" in result
+    # Partially-masked soft occupancy differs from hard-thresholded occupancy,
+    # so the diagnostic must see a nonzero spectrum difference (unlike the
+    # fully-visible case where retention makes both branches identical).
+    assert result["spectrum_rel_diff"] > 1e-5, (
+        "with a partial mask the soft vs hard branches must produce different "
+        "surrogate inputs (the diagnostic must actually distinguish them)")
 
 
 @pytest.mark.skipif(not _HAS_SURROGATE,

@@ -179,6 +179,65 @@ def test_decode_geometry_ste():
     assert torch.isfinite(geometry).all()
 
 
+def test_decode_geometry_substitutes_known_scalars():
+    """Regression: decode_geometry must substitute true values for known
+    scalars at assembly (the scalar analog of visible-occupancy retention).
+
+    Known scalars must appear exactly (true value, not the model's guess) in
+    the assembled geometry's channel values; unknown scalars must use the
+    prediction. Deliberately wrong scalar_pred for the known scalar makes the
+    substitution observable via plain tensor equality.
+    """
+    model = _build_model()
+    model.eval()
+    z_hat = torch.randn(2, 256, 192)
+
+    # True scalars and a deliberately-wrong prediction.
+    sv = torch.tensor([[3.0, 1.0, 9.0], [4.0, 2.0, 8.0]])
+    scalar_pred = torch.tensor([[99.0, 99.0, 99.0], [99.0, 99.0, 99.0]])
+
+    # Sample 0: l known, h/r unknown. Sample 1: l/h known, r unknown.
+    sk = torch.tensor([[True, False, False], [True, True, False]])
+
+    geometry, _ = model.decode_geometry(
+        z_hat, scalar_pred, scalar_known=sk, scalar_values=sv)
+
+    # Channel 2 = l_lattice/3 everywhere → known l must be the true value.
+    assert torch.allclose(geometry[0, 2], torch.full((64, 64), 3.0 / 3.0),
+                          atol=1e-6), "known l (sample 0) must use the true value"
+    assert torch.allclose(geometry[1, 2], torch.full((64, 64), 4.0 / 3.0),
+                          atol=1e-6), "known l (sample 1) must use the true value"
+
+    # Channel 1 = h_atom on occupied pixels → sample 0 h unknown (uses pred),
+    # sample 1 h known (uses true value). Use a fully-occupied occupancy via
+    # occ_input + fully-visible mask so the assembled geometry is deterministic.
+    occ = torch.ones(2, 1, 64, 64)
+    M_vis = torch.ones(2, 16, 16)
+    geometry2, _ = model.decode_geometry(
+        z_hat, scalar_pred, occ_input=occ, mask=M_vis,
+        scalar_known=sk, scalar_values=sv)
+
+    # Sample 0: h unknown → prediction (99.0).
+    assert torch.allclose(geometry2[0, 1], torch.full((64, 64), 99.0),
+                          atol=1e-6), "unknown h (sample 0) must use the prediction"
+    # Sample 1: h known → true value (2.0).
+    assert torch.allclose(geometry2[1, 1], torch.full((64, 64), 2.0),
+                          atol=1e-6), "known h (sample 1) must use the true value"
+
+    # Channel 0 = r_atom/5 on occupied pixels → r unknown in both samples.
+    assert torch.allclose(geometry2[0, 0], torch.full((64, 64), 99.0 / 5.0),
+                          atol=1e-6), "unknown r (sample 0) must use the prediction"
+    assert torch.allclose(geometry2[1, 0], torch.full((64, 64), 99.0 / 5.0),
+                          atol=1e-6), "unknown r (sample 1) must use the prediction"
+
+    # Default (no scalar_known/scalar_values) must keep pre-fix behavior:
+    # everything uses the prediction.
+    geometry3, _ = model.decode_geometry(
+        z_hat, scalar_pred, occ_input=occ, mask=M_vis)
+    assert torch.allclose(geometry3[0, 2], torch.full((64, 64), 99.0 / 3.0),
+                          atol=1e-6), "default path must use scalar_pred everywhere"
+
+
 # --------------------------------------------------------------------------
 # Physics loop (requires surrogate weights)
 # --------------------------------------------------------------------------

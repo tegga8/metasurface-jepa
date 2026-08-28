@@ -556,7 +556,7 @@ class UnifiedJEPA(nn.Module):
         return out
 
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
-                        use_ste=False):
+                        scalar_known=None, scalar_values=None, use_ste=False):
         """Decode predicted latents to surrogate-ready geometry (Phase 4 MD §1-§3).
 
         Args:
@@ -564,8 +564,15 @@ class UnifiedJEPA(nn.Module):
             scalar_pred: [B, 3] (l_lattice, h_atom, r_atom) physical values.
             occ_input:   [B, 1, 64, 64] original binary occupancy (for retention).
             mask:        [B, 16, 16] 1=visible, 0=masked — retains visible pixels.
+            scalar_known: [B, 3] bool — which scalars are observed. When provided
+                         together with scalar_values, known scalars are
+                         substituted with their true values at assembly (the
+                         scalar analog of visible-occupancy retention); unknown
+                         scalars use scalar_pred.
+            scalar_values: [B, 3] true scalar values (used only where
+                         scalar_known is True).
             use_ste:     If True, use hard occupancy for surrogate input but
-                        soft gradient path (straight-through estimator).
+                         soft gradient path (straight-through estimator).
 
         Returns:
             geometry:    [B, 3, 64, 64] — r_atom/5, h_atom, l_lattice/3.
@@ -586,9 +593,18 @@ class UnifiedJEPA(nn.Module):
             vis = (up > 0.5).float()
             occ_for_assembly = occ_input * vis + occ_for_assembly * (1 - vis)
 
-        l = scalar_pred[:, 0]
-        h = scalar_pred[:, 1]
-        r = scalar_pred[:, 2]
+        # Scalar analog of visible-pixel retention: known scalars are used
+        # exactly (never the model's untrained-on-known-positions guess);
+        # unknown scalars use the prediction.
+        if scalar_known is not None and scalar_values is not None:
+            scalar_for_assembly = torch.where(
+                scalar_known, scalar_values, scalar_pred)
+        else:
+            scalar_for_assembly = scalar_pred
+
+        l = scalar_for_assembly[:, 0]
+        h = scalar_for_assembly[:, 1]
+        r = scalar_for_assembly[:, 2]
         geometry = assemble_metadit_geometry(occ_for_assembly, l, h, r)
         return geometry, occ_for_assembly
 

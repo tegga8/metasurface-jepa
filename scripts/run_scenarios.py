@@ -116,7 +116,8 @@ def generate_geometry(model, inputs, surrogate, device, n_samples=1,
                 inputs.mask, goal_mode=goal_mode)
     geometry, soft_occ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
-        occ_input=inputs.occ, mask=inputs.mask, use_ste=False)
+        occ_input=inputs.occ, mask=inputs.mask, use_ste=False,
+        scalar_known=inputs.scalar_known, scalar_values=inputs.sv)
     spectrum_pred = surrogate(geometry).prediction
 
     return {
@@ -196,7 +197,8 @@ def real_null_shuffled_evaluation(model, surrogate, occ, sv, spec, mask,
 
         out = model(occ, sv, scalar_known, spec_eval, mask, goal_mode=gm)
         geometry, _ = model.decode_geometry(
-            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask)
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv)
         spectrum_pred = surrogate(geometry).prediction
 
         # For shuffled/null, the "target" is still the original spec

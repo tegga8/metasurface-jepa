@@ -97,7 +97,8 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
                 mask, goal_mode="real")
     geometry, soft_occ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
-        occ_input=occ, mask=mask, use_ste=False)
+        occ_input=occ, mask=mask, use_ste=False,
+        scalar_known=scalar_known, scalar_values=sv)
     spectrum_pred = surrogate(geometry).prediction
 
     # Spectrum error
@@ -144,7 +145,8 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
 
         out = model(occ, sv, scalar_known, spec_eval, mask, goal_mode=mode)
         geometry, _ = model.decode_geometry(
-            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask)
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
 
@@ -170,7 +172,8 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
     ]:
         out = model(occ, sv_eval, scalar_known, spec, mask, goal_mode="real")
         geometry, _ = model.decode_geometry(
-            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask)
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
 
@@ -196,7 +199,8 @@ def diversity_check(model, surrogate, occ, sv, spec, mask, scalar_known,
             z_hat = z_hat + torch.randn_like(z_hat) * perturbation_scale
         geometry, _ = model.decode_geometry(
             out["z_hat"] if perturbation_scale == 0 else z_hat,
-            out["scalar_pred"], occ_input=occ, mask=mask)
+            out["scalar_pred"], occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv)
         generations.append(geometry)
 
     # Pairwise spectrum differences
@@ -315,7 +319,8 @@ def run_all_scenarios(cfg, ckpt_path, device):
     # Collapse check
     pred_occ = model.decode_geometry(
         model(occ, sv, sk_a, spec, M_a)["z_hat"],
-        model(occ, sv, sk_a, spec, M_a)["scalar_pred"])[1]
+        model(occ, sv, sk_a, spec, M_a)["scalar_pred"],
+        scalar_known=sk_a, scalar_values=sv)[1]
     results["collapse_check"] = {
         "pred_occupancy_fraction": float(pred_occ.mean().item()),
         "all_empty": float(pred_occ.mean().item()) < 0.01,

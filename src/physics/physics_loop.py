@@ -80,10 +80,13 @@ def physics_loss(model, surrogate, occ, sv, sk, spec, mask,
     """
     out = model(occ, sv, sk, spec, mask, goal_mode=goal_mode)
 
-    # Decode: z_hat (predicted latents) + scalar_pred → geometry
+    # Decode: z_hat (predicted latents) + scalar_pred → geometry.
+    # Known scalars (sk) are substituted with their true values (sv) at
+    # assembly — the scalar analog of visible-occupancy retention.
     geometry, soft_occ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
-        occ_input=occ, mask=mask, use_ste=use_ste)
+        occ_input=occ, mask=mask, use_ste=use_ste,
+        scalar_known=sk, scalar_values=sv)
 
     # Forward through frozen surrogate — autograd MUST flow (Phase 4 MD §4)
     result = surrogate(geometry)
@@ -133,7 +136,12 @@ def surrogate_gradient_test(model, surrogate, occ, sv, spec, mask, device="cpu")
 
     # Collect student params that require grad
     student_params = [p for p in model.parameters() if p.requires_grad]
-    sk = torch.ones(occ.shape[0], 3, dtype=torch.bool, device=device)
+    # All scalars UNKNOWN: this test verifies dS/dG flows through the model's
+    # PREDICTED path (z_hat + scalar_pred → geometry → surrogate). If scalars
+    # were all-known, known-scalar substitution would freeze them at their true
+    # (constant) values and the assembled geometry would no longer depend on
+    # scalar_pred — severing the very path this test exists to validate.
+    sk = torch.zeros(occ.shape[0], 3, dtype=torch.bool, device=device)
 
     # Try soft occupancy first (Phase 4 MD §3 default representation).
     L_phys, _, _ = physics_loss(
@@ -183,10 +191,12 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
 
         geometry_soft, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"],
-            occ_input=occ, mask=mask, use_ste=False)
+            occ_input=occ, mask=mask, use_ste=False,
+            scalar_known=sk, scalar_values=sv)
         geometry_hard, _ = model.decode_geometry(
             out["z_hat"], out["scalar_pred"],
-            occ_input=occ, mask=mask, use_ste=True)
+            occ_input=occ, mask=mask, use_ste=True,
+            scalar_known=sk, scalar_values=sv)
 
         spec_soft = surrogate(geometry_soft).prediction
         spec_hard = surrogate(geometry_hard).prediction

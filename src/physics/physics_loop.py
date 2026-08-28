@@ -10,8 +10,9 @@ Per Phase 4 MD §4: the surrogate is frozen (eval mode, no param gradient) but
 autograd MUST flow through the geometry input — never torch.no_grad() around
 the surrogate in a physics-loss step.
 
-Per Phase 4 MD §6: visible pixels are retained from the input occupancy
-(L_preserve), so physics loss does not overwrite observed geometry.
+Per Phase 4 MD §6: visible occupancy pixels and known scalars are hard-retained
+inside decode_geometry (retention + known-scalar substitution), so physics
+loss cannot overwrite observed geometry.
 """
 
 import os
@@ -211,41 +212,3 @@ def soft_hard_occupancy_test(model, surrogate, occ, sv, spec, sk, mask,
         "ste_recommended": rel_diff > 0.1,
     }
 
-
-# ---------------------------------------------------------------------------
-# Preservation loss (Phase 4 MD §6)
-# ---------------------------------------------------------------------------
-
-def preservation_loss(occ_pred, occ_input, mask, scalar_pred, scalar_known, true_scalars):
-    """L_preserve: penalize changes to known occupancy/scalars (Phase 4 MD §6).
-
-    For partial/retrofit scenarios:
-    - Visible occupancy pixels must match the input.
-    - Known scalars must match the true values.
-
-    Args:
-        occ_pred:   [B,1,64,64] predicted (soft) occupancy.
-        occ_input:  [B,1,64,64] input binary occupancy.
-        mask:       [B,16,16] 1=visible, 0=masked.
-        scalar_pred: [B,3] predicted scalars.
-        scalar_known: [B,3] bool — which scalars are observed.
-        true_scalars: [B,3] true scalar values.
-
-    Returns:
-        scalar tensor
-    """
-    # Upsample mask to pixel level
-    b = occ_pred.shape[0]
-    up = mask.view(b, 1, 16, 16).repeat_interleave(4, 2).repeat_interleave(4, 3)
-    vis = (up > 0.5).float()
-
-    # Occupancy preservation on visible pixels
-    occ_err = (occ_pred - occ_input.float()) * vis
-    L_occ = occ_err.abs().sum() / (vis.sum() + 1.0)
-
-    # Scalar preservation for known scalars
-    known = scalar_known.float()
-    sc_err = (scalar_pred - true_scalars) * known
-    L_sc = sc_err.abs().sum() / (known.sum() + 1.0)
-
-    return L_occ + L_sc

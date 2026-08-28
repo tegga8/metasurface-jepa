@@ -583,7 +583,10 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         ckpt = load_checkpoint(
             resume_path, model, objective, optimizer, scheduler, device,
             strict_objective=True, strict_optimizer=True, masker=masker)
-        start_step = ckpt.get("step", 0)
+        # Checkpoint `step` is the optimizer step that has ALREADY completed.
+        # Resume at step+1 so a checkpoint saved at step 1499 resumes at step
+        # 1500 (the next un-run step), not re-running step 1499.
+        start_step = ckpt.get("step", -1) + 1
         # Fix 3: restore the persistent scalar-masker RNG state so resumed
         # training continues the same scalar-masking sequence (not restarting
         # from seed).

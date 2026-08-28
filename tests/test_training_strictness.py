@@ -527,6 +527,82 @@ def test_preflight_passes_on_real_data():
     assert own["released_params_with_grad"] == 0
 
 
+def test_resume_step_is_next_unrun_step():
+    """Fix (resume off-by-one): checkpoint `step` is the LAST COMPLETED
+    optimizer step, so resume must continue at step+1. A run that saves a
+    checkpoint at step 4 (5 steps, total_steps=5) and resumes with
+    total_steps=10 must run steps 5..9 — NOT re-run step 4 (steps 4..9).
+
+    Discriminator: the training loop prints the actual step number each log
+    interval; capture stdout and verify the first executed step is 5, not 4.
+    (final_step in the report is hardcoded to total_steps-1, so it cannot
+    distinguish the two behaviors.)"""
+    import contextlib
+    import io
+    import re
+    import tempfile
+    from train_unified import train
+
+    def _cfg(tmpdir, total_steps):
+        cfg = _load_cfg()
+        cfg["data"]["train_split"] = "data/metadit/split_data/NONEXISTENT.mat"
+        cfg["data"]["val_split"] = "data/metadit/split_data/NONEXISTENT.mat"
+        cfg["weights"]["spectrum"] = os.path.join(tmpdir, "dummy_spec.pth")
+        cfg["data"]["use_synthetic"] = True
+        cfg["train"]["total_steps"] = total_steps
+        cfg["train"]["grad_accum"] = 1
+        cfg["train"]["ckpt_every_steps"] = 1000  # no mid-run ckpt writes
+        cfg["train"]["log_every_steps"] = 1
+        cfg["train"]["val_every_steps"] = 1000
+        cfg["train"]["guidance_dropout"] = 0.0
+        cfg["curriculum"]["train_mask_ratios"] = [0.5]
+        cfg["curriculum"]["train_mask_ratio_probs"] = [1.0]
+        cfg["curriculum"]["scalar_regimes"] = ["all_known"]
+        cfg["curriculum"]["scalar_regime_probs"] = [1.0]
+        cfg["loss"]["lambda_phys"] = 0.0
+        return cfg
+
+    def _run(cfg, resume_path=None):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            train(cfg, resume_path=resume_path, no_train=False,
+                  device="cpu", use_synthetic_smoke=True)
+        return buf.getvalue()
+
+    def _steps_captured(out):
+        # Lines like "step     0  loss=..." -> set of executed step numbers.
+        return {int(m) for m in re.findall(r"step\s+(\d+)\s+loss=", out)}
+
+    with tempfile.TemporaryDirectory() as td:
+        # Run 1: 5 steps -> final checkpoint at step 4.
+        cfg1 = _cfg(td, total_steps=5)
+        out1 = _run(cfg1)
+        assert 4 in _steps_captured(out1), "run 1 must execute step 4"
+        ckpt_path = os.path.join(REPO_ROOT, "checkpoints", "unified",
+                                 "final.pt")
+        assert os.path.exists(ckpt_path), "resume checkpoint must exist"
+
+        # Run 2: resume from that checkpoint, run to total_steps=10.
+        cfg2 = _cfg(td, total_steps=10)
+        out2 = _run(cfg2, resume_path=ckpt_path)
+        steps2 = _steps_captured(out2)
+        assert 5 in steps2, (
+            f"resume must start at checkpoint step+1 (step 5); captured "
+            f"steps {sorted(steps2)}")
+        assert 4 not in steps2, (
+            f"resume must NOT re-run the already-completed step 4; captured "
+            f"steps {sorted(steps2)}")
+        assert 9 in steps2, (
+            f"resume must run through the final step 9; captured "
+            f"steps {sorted(steps2)}")
+
+        # Clean up the smoke-run checkpoint artifacts.
+        for f in ("latest.pt", "final.pt"):
+            p = os.path.join(REPO_ROOT, "checkpoints", "unified", f)
+            if os.path.exists(p):
+                os.remove(p)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

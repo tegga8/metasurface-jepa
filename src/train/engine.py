@@ -695,6 +695,15 @@ def load_checkpoint(path, model, objective, optimizer, scheduler, device,
             f"checkpoint {path} was saved for objective {saved_name!r} but "
             f"{objective.name!r} is being loaded — refusing to cross objectives "
             f"(spec §30 strict objective-name match)")
+    # Validate optimizer ownership BEFORE any checkpoint state is restored
+    # into the model/objective/optimizer: the live optimizer's parameter
+    # fingerprint must match the checkpoint's, or loading its state would
+    # train different weights. Checking first means a genuine mismatch is
+    # raised while all runtime modules are still in their pre-load state
+    # (a mis-constructed optimizer is caught before any state mutation).
+    if optimizer is not None and obj.get("optimizer") is not None \
+            and strict_optimizer:
+        _check_optimizer_ownership(optimizer, obj.get("optimizer_param_shapes"))
     from assembly import load_into_model
     load_into_model(model, obj["model"], device)
     if "objective_state" in obj:
@@ -731,8 +740,6 @@ def load_checkpoint(path, model, objective, optimizer, scheduler, device,
             f"continue with a freshly-initialized projector (spec §12/§30: "
             f"fail loudly)")
     if optimizer is not None and obj.get("optimizer") is not None:
-        if strict_optimizer:
-            _check_optimizer_ownership(optimizer, obj.get("optimizer_param_shapes"))
         optimizer.load_state_dict(obj["optimizer"])
     if scheduler is not None and obj.get("scheduler_state") is not None:
         scheduler.load_state_dict(obj["scheduler_state"])

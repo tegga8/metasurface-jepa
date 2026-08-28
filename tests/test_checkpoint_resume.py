@@ -187,6 +187,61 @@ def test_optimizer_ownership_mismatch_raises(tmp_path):
         load_checkpoint(path, m2, obj2, opt2, sched2, "cpu")
 
 
+def test_optimizer_ownership_checked_before_state_restoration(tmp_path):
+    """The optimizer ownership check must run BEFORE any checkpoint state is
+    restored into the model/objective/optimizer. A mismatched optimizer must
+    raise while the live model/objective/optimizer still hold their PRE-LOAD
+    (mutated) state — proving the check precedes state mutation."""
+    path = str(tmp_path / "ckpt.pt")
+    m1, obj1, opt1, sched1 = _model_and_opt(seed=0, in_feat=4, out_feat=4)
+    save_checkpoint(path, m1, obj1, opt1, sched1, {}, global_step=1,
+                    epoch=0, micro_step=0, is_epoch_end=True,
+                    ema_state=collect_ema_state(m1),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None,
+                    device="cpu", artifact_type="full")
+
+    # Live objects are deliberately MUTATED (simulating a run that already
+    # moved on); a mismatched optimizer must raise BEFORE load_into_model /
+    # objective.load_state_dict overwrite them.
+    m2, obj2, opt2, sched2 = _model_and_opt(seed=3, in_feat=8, out_feat=8)
+    _mutate(m2, obj2)
+    w_before = {k: v.clone() for k, v in m2.state_dict().items()}
+    os_before = {k: v.clone() for k, v in obj2.state_dict().items()}
+    with pytest.raises(RuntimeError, match="fingerprint|shape|owner"):
+        load_checkpoint(path, m2, obj2, opt2, sched2, "cpu")
+    # Nothing was restored: model + objective keep their pre-load state.
+    for k in w_before:
+        assert torch.equal(m2.state_dict()[k], w_before[k]), (
+            f"model {k} must NOT be restored when ownership check fails first")
+    for k in os_before:
+        assert torch.equal(obj2.state_dict()[k], os_before[k]), (
+            f"objective {k} must NOT be restored when ownership check fails first")
+
+
+def test_optimizer_ownership_identical_fingerprint_loads(tmp_path):
+    """A valid (identical) optimizer fingerprint loads successfully: the
+    pre-restoration check must NOT reject an optimizer that owns exactly the
+    same parameter shapes as the checkpoint."""
+    path = str(tmp_path / "ckpt.pt")
+    m1, obj1, opt1, sched1 = _model_and_opt(seed=0, in_feat=4, out_feat=4)
+    _advance(opt1, sched1, steps=5)
+    os1 = {k: v.clone() for k, v in obj1.state_dict().items()}
+    save_checkpoint(path, m1, obj1, opt1, sched1, {}, global_step=7,
+                    epoch=0, micro_step=0, is_epoch_end=False,
+                    ema_state=collect_ema_state(m1),
+                    best_prediction={}, best_healthy_prediction={},
+                    masker_rng_state=None,
+                    device="cpu", artifact_type="latest")
+
+    m2, obj2, opt2, sched2 = _model_and_opt(seed=1, in_feat=4, out_feat=4)
+    _mutate(m2, obj2)
+    load_checkpoint(path, m2, obj2, opt2, sched2, "cpu")
+    for k in os1:
+        assert torch.equal(obj2.state_dict()[k], os1[k]), (
+            f"objective {k} not restored (identical-fingerprint load)")
+
+
 def test_missing_objective_state_fails_loudly(tmp_path):
     """A parametric objective (owns a trainable projector) must NOT silently
     resume with a freshly-initialized projector when objective_state is missing

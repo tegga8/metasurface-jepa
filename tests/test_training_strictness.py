@@ -725,6 +725,57 @@ def test_frozen_surrogate_not_in_optimizer():
         "must not be no_grad)")
 
 
+def test_surrogate_stays_eval_through_objective_train():
+    """Diagnostic-protocol finding: objective.train() recursively put the
+    frozen surrogate's BatchNorm2d layers into TRAIN mode, corrupting the
+    physics loss (batch-stat BN over batch size 2) and drifting BN running
+    stats. The surrogate must remain in eval mode through train/eval cycles,
+    and its output for identical geometry must be call-order invariant."""
+    import torch.nn as nn
+    from losses.unified_losses import UnifiedJEPALoss
+
+    class _BNSurrogate(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bn = nn.BatchNorm2d(3)
+            self.conv = nn.Conv2d(3, 2, 1)
+
+        def forward(self, x):
+            return type("R", (), {"prediction": self.conv(self.bn(x))})()
+
+    surr = _BNSurrogate().eval()
+    for p in surr.parameters():
+        p.requires_grad_(False)
+    obj = UnifiedJEPALoss(hidden=192, lambda_phys=0.01, surrogate=surr)
+
+    x = torch.randn(2, 3, 8, 8)
+    with torch.no_grad():
+        out_before = surr(x).prediction.clone()
+
+    obj.train()
+    assert surr.training is False, (
+        "objective.train() must leave the frozen surrogate in eval mode")
+    assert all(not m.training for m in surr.modules()
+               if isinstance(m, nn.BatchNorm2d)), (
+        "surrogate BatchNorm layers must stay in eval mode")
+    with torch.no_grad():
+        out_train_mode = surr(x).prediction.clone()
+    assert torch.allclose(out_before, out_train_mode, atol=1e-6), (
+        "surrogate output must be call-order invariant (BN must not switch "
+        "to batch statistics or drift running stats during training)")
+
+    obj.eval()
+    with torch.no_grad():
+        out_after = surr(x).prediction.clone()
+    assert torch.allclose(out_before, out_after, atol=1e-6)
+
+    # Gradient still flows through the eval-mode surrogate w.r.t. input.
+    x2 = x.clone().requires_grad_(True)
+    surr(x2).prediction.sum().backward()
+    assert x2.grad is not None and x2.grad.abs().sum() > 0, (
+        "eval-mode surrogate must stay differentiable w.r.t. geometry input")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

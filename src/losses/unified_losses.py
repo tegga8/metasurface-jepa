@@ -222,6 +222,25 @@ class UnifiedJEPALoss(nn.Module):
             "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full},
         }
 
+    def train(self, mode=True):
+        """Override: the frozen MetaDiT surrogate registered as self.surrogate
+        must stay in EVAL mode regardless of the objective's training mode.
+
+        Diagnostic-protocol finding: objective.train() recursively put the
+        surrogate's 38 BatchNorm2d layers into train mode, so every training
+        physics forward normalized by BATCH statistics (batch size 2) and
+        mutated BN running stats — the physics loss trained against a
+        corrupted surrogate, and surrogate outputs for identical geometry
+        differed before/after the first train-mode call (measured: spectrum
+        error 19.58 eval vs 0.59 train-BN for the same geometry). Eval-mode
+        BN remains differentiable w.r.t. its input, so the physics gradient
+        path is unchanged.
+        """
+        super().train(mode)
+        if self.surrogate is not None:
+            self.surrogate.eval()
+        return self
+
     def on_optimizer_step(self, model, step):
         """Update both EMA targets after optimizer step (Phase 2 §6)."""
         model.ema.update(model.occupancy_encoder, step)

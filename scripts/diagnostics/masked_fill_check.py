@@ -174,7 +174,12 @@ def locality_probe(predict_fn, occ, mask, k=64):
 
     vis_flat = vis.view(b, -1)
     d_flat = dist.view(b, -1)
-    k = max(1, min(int(k), int(vis_flat.sum(dim=1).min().item())))
+    min_vis = int(vis_flat.sum(dim=1).min().item())
+    if min_vis < 2:
+        return {"applicable": False, "k": 0, "change_near": None, "change_far": None,
+                "locality_ratio": None, "localized": None,
+                "reason": "no visible context (e.g. full mask) — locality undefined"}
+    k = max(1, min(int(k), min_vis))
     d_near = torch.where(vis_flat, d_flat, torch.full_like(d_flat, 1e9))
     d_far = torch.where(vis_flat, d_flat, torch.full_like(d_flat, -1.0))
     near_idx = d_near.topk(k, dim=1, largest=False).indices
@@ -192,6 +197,7 @@ def locality_probe(predict_fn, occ, mask, k=64):
     ch_far = float((predict_fn(occ_far, mask) - base).abs()[filled].mean().item())
     ratio = ch_far / (ch_near + 1e-12)
     return {
+        "applicable": True,
         "k": k,
         "change_near": ch_near,
         "change_far": ch_far,
@@ -220,29 +226,31 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     model, surrogate = es._load_eval(cfg, args.checkpoint, args.device)
+    model.eval()
     occ, sv, spec = es._load_val_batch(cfg, torch.device(args.device),
                                        smoke=False, n_samples=args.samples)
     masker = es.BlockMasker(placement="random", grid=16, min_side=3,
                             k_range=(1, 4), seed=999)
     out = {}
-    for name, ratio, sk in (("A", 1.0, torch.zeros(occ.shape[0], 3, dtype=torch.bool)),
-                            ("B", 0.5, es._scenario_b_known_flags(occ.shape[0], occ.device)),
-                            ("C", 0.25, torch.ones(occ.shape[0], 3, dtype=torch.bool))):
-        sk = sk.to(occ.device)
-        M = masker.sample(occ, ratio=ratio).to(occ.device)
-        res = model(occ, sv, sk, spec, M, goal_mode="real", with_target=False)
-        deployed, _ = model.decode_geometry(
-            res["z_hat"], res["scalar_pred"], occ_input=occ, mask=M,
-            scalar_known=sk, scalar_values=sv, hard_forward=True)
+    with torch.no_grad():
+        for name, ratio, sk in (("A", 1.0, torch.zeros(occ.shape[0], 3, dtype=torch.bool)),
+                                ("B", 0.5, es._scenario_b_known_flags(occ.shape[0], occ.device)),
+                                ("C", 0.25, torch.ones(occ.shape[0], 3, dtype=torch.bool))):
+            sk = sk.to(occ.device)
+            M = masker.sample(occ, ratio=ratio).to(occ.device)
+            res = model(occ, sv, sk, spec, M, goal_mode="real", with_target=False)
+            _, deployed = model.decode_geometry(
+                res["z_hat"], res["scalar_pred"], occ_input=occ, mask=M,
+                scalar_known=sk, scalar_values=sv, hard_forward=True)
 
-        def predict_fn(o, m):
-            o_out = model(o, sv, sk, spec, m, goal_mode="real", with_target=False)
-            return model.decode_occupancy_prob(o_out["z_hat"], o_out["scalar_pred"],
-                                               scalar_known=sk, scalar_values=sv)
+            def predict_fn(o, m):
+                o_out = model(o, sv, sk, spec, m, goal_mode="real", with_target=False)
+                return model.decode_occupancy_prob(o_out["z_hat"], o_out["scalar_pred"],
+                                                   scalar_known=sk, scalar_values=sv)
 
-        report = masked_fill_report(deployed, occ, occ, M)
-        report["locality"] = locality_probe(predict_fn, occ, M)
-        out[f"scenario_{name}"] = report
+            report = masked_fill_report(deployed, occ, occ, M)
+            report["locality"] = locality_probe(predict_fn, occ, M)
+            out[f"scenario_{name}"] = report
     print(json.dumps(out, indent=2, default=float))
 
 

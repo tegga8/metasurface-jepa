@@ -111,6 +111,15 @@ def test_locality_probe_separates_local_from_global():
     assert local["locality_ratio"] < glob["locality_ratio"]
 
 
+def test_locality_probe_not_applicable_when_no_visible_context():
+    occ = _occ(1)
+    mask = torch.zeros(1, 16, 16)  # fully masked -> no visible pixels
+    r = mfc.locality_probe(_LocalStub(), occ, mask, k=8)
+    assert r["applicable"] is False
+    assert r["locality_ratio"] is None
+    assert r["localized"] is None
+
+
 if __name__ == "__main__":
     funcs = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

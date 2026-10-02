@@ -618,7 +618,8 @@ def _collapse_metrics(model, occ, sv, spec, mask, scalar_known, device):
     }
 
 
-def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
+def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
+                      scenarios=("A", "B", "C")):
     """Run all scenarios + diagnostics on the real validation split.
 
     Audit B27: `n_samples` sets the evaluation batch for every comparison below —
@@ -626,6 +627,11 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
     scalar-dependence checks and the guidance sweep. It defaults to
     `eval.n_samples` (32); it is deliberately independent of
     `train.batch_size`.
+
+    `scenarios` selects which of A/B/C are evaluated (review C2: the CLI
+    `--scenario` flag was parsed but ignored). The scenario-independent
+    diagnostics (scalar dependence, diversity, sensitivity, CFG sweep, NN,
+    collapse) always run.
     """
     model, surrogate = _load_eval(cfg, ckpt_path, device)
 
@@ -646,11 +652,13 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
     # active device before any model forward.
     M_a = masker.sample(occ, ratio=1.0).to(device)
     assert M_a.device == occ.device, "scenario A mask must be on the model device"
-    results["scenario_A_pure_inverse"] = evaluate_scenario(
-        model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
-    results["scenario_A_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_a, device, sk_a,
-        seed=cfg["train"].get("seed", 42) + 1, gate_threshold=_gate_threshold(cfg))
+    if "A" in scenarios:
+        results["scenario_A_pure_inverse"] = evaluate_scenario(
+            model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
+        results["scenario_A_rns"] = real_null_shuffled(
+            model, surrogate, occ, sv, spec, M_a, device, sk_a,
+            seed=cfg["train"].get("seed", 42) + 1,
+            gate_threshold=_gate_threshold(cfg))
 
     # Scenario B: partial-parameter (50% mask + some scalars known)
     # Fix 5 (spec §7): construct the known-flags pattern programmatically for
@@ -658,24 +666,28 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
     # safe for b <= 2). Deterministic alternating rows preserve the intended
     # representative partial-known semantics: every row has exactly one known
     # scalar, alternating which one.
-    sk_b = _scenario_b_known_flags(b, device)
-    M_b = masker.sample(occ, ratio=0.5).to(device)
-    assert M_b.device == occ.device, "scenario B mask must be on the model device"
-    results["scenario_B_partial"] = evaluate_scenario(
-        model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
-    results["scenario_B_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_b, device, sk_b,
-        seed=cfg["train"].get("seed", 42) + 2, gate_threshold=_gate_threshold(cfg))
+    if "B" in scenarios:
+        sk_b = _scenario_b_known_flags(b, device)
+        M_b = masker.sample(occ, ratio=0.5).to(device)
+        assert M_b.device == occ.device, "scenario B mask must be on the model device"
+        results["scenario_B_partial"] = evaluate_scenario(
+            model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
+        results["scenario_B_rns"] = real_null_shuffled(
+            model, surrogate, occ, sv, spec, M_b, device, sk_b,
+            seed=cfg["train"].get("seed", 42) + 2,
+            gate_threshold=_gate_threshold(cfg))
 
     # Scenario C: retrofit (25% mask + all scalars known)
-    sk_c = torch.ones(b, 3, dtype=torch.bool, device=device)
-    M_c = masker.sample(occ, ratio=0.25).to(device)
-    assert M_c.device == occ.device, "scenario C mask must be on the model device"
-    results["scenario_C_retrofit"] = evaluate_scenario(
-        model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
-    results["scenario_C_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_c, device, sk_c,
-        seed=cfg["train"].get("seed", 42) + 3, gate_threshold=_gate_threshold(cfg))
+    if "C" in scenarios:
+        sk_c = torch.ones(b, 3, dtype=torch.bool, device=device)
+        M_c = masker.sample(occ, ratio=0.25).to(device)
+        assert M_c.device == occ.device, "scenario C mask must be on the model device"
+        results["scenario_C_retrofit"] = evaluate_scenario(
+            model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
+        results["scenario_C_rns"] = real_null_shuffled(
+            model, surrogate, occ, sv, spec, M_c, device, sk_c,
+            seed=cfg["train"].get("seed", 42) + 3,
+            gate_threshold=_gate_threshold(cfg))
 
     # Scalar dependence on a NON-EMPTY known-scalar stratum (Fix 9):
     # fully-masked occupancy + exactly one known scalar.
@@ -761,14 +773,23 @@ def main():
     parser.add_argument("--smoke", action="store_true",
                         help="Explicit smoke mode: synthetic data allowed. "
                              "Never used for scientific evaluation.")
+    parser.add_argument("--out", type=str, default="",
+                        help="write the results JSON to this path (review C1)")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    scenarios = (("A", "B", "C") if args.scenario == "all"
+                 else (args.scenario,))
     results = run_all_scenarios(cfg, args.checkpoint, args.device,
-                                smoke=args.smoke, n_samples=args.samples)
-    print(json.dumps(results, indent=2, default=float))
+                                smoke=args.smoke, n_samples=args.samples,
+                                scenarios=scenarios)
+    text = json.dumps(results, indent=2, default=float)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text)
 
 
 if __name__ == "__main__":

@@ -216,6 +216,8 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--samples", type=int, default=32)
+    parser.add_argument("--out", type=str, default="",
+                        help="write the results JSON to this path (review C1)")
     args = parser.parse_args()
 
     sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
@@ -251,7 +253,11 @@ def main():
             report = masked_fill_report(deployed, occ, occ, M)
             report["locality"] = locality_probe(predict_fn, occ, M)
             out[f"scenario_{name}"] = report
-    print(json.dumps(out, indent=2, default=float))
+    text = json.dumps(out, indent=2, default=float)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text)
 
 
 if __name__ == "__main__":

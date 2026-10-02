@@ -174,7 +174,12 @@ def _ensure_spectrum_weights(path, device, allow_dummy=False):
     if os.path.exists(path):
         return path
     if allow_dummy:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Review C6: NEVER write the dummy to the configured released-weights
+        # path — real mode later accepts that path on a bare os.path.exists, so
+        # a leftover dummy would silently stand in for the frozen encoder. The
+        # dummy goes to a distinct sibling name that real mode never reads.
+        dummy_path = path + ".smoke_dummy"
+        os.makedirs(os.path.dirname(dummy_path), exist_ok=True)
         try:
             from model.spec_encoder import VanillaSpectrumEncoder
         except ImportError:
@@ -182,9 +187,10 @@ def _ensure_spectrum_weights(path, device, allow_dummy=False):
                 f"spectrum checkpoint {path} missing and VanillaSpectrumEncoder "
                 "unavailable — cannot create smoke dummy") from None
         enc = VanillaSpectrumEncoder()
-        torch.save(enc.state_dict(), path)
-        print(f"[smoke] Created dummy spectrum encoder checkpoint at {path}")
-        return path
+        torch.save(enc.state_dict(), dummy_path)
+        print(f"[smoke] Created DUMMY spectrum encoder at {dummy_path} "
+              f"(released path {path} left untouched)")
+        return dummy_path
     raise RuntimeError(
         f"released spectrum encoder checkpoint not found at {path}. "
         "Real training requires the released weights; pass --use-synthetic-smoke "

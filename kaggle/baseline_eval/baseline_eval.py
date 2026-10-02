@@ -67,29 +67,44 @@ print("checkpoint:", ckpts[0], "->", target)
 OUT.mkdir(parents=True, exist_ok=True)
 
 
-def battery(name, cmd):
-    out = OUT / f"{name}.json"
+def battery(name, cmd, json_out=None):
+    """Run a command; keep stdout as <name>.log (never a fake .json), and read
+    the real JSON from `json_out` if the command writes one (review C1)."""
+    log = OUT / f"{name}.log"
     r = subprocess.run(cmd, shell=True, cwd=REPO, capture_output=True, text=True)
     print(f"\n=== {name} (exit {r.returncode}) ===\n{r.stdout[-4000:]}", flush=True)
     if r.stderr:
         print(f"--- stderr ---\n{r.stderr[-2000:]}", flush=True)
-    out.write_text(r.stdout)
+    log.write_text(r.stdout)
+    if json_out and not Path(json_out).exists():
+        print(f"[warn] {name} produced no JSON at {json_out}", flush=True)
+        return -1
     return r.returncode
 
 
 CKPT = "checkpoints/unified/latest.pt"
 codes = {
-    "benchmark": battery("baseline_scenarioA",
+    "benchmark": battery(
+        "baseline_scenarioA",
         f"python scripts/benchmark/benchmark_metadit.py --config configs/unified.yaml "
         f"--checkpoint {CKPT} --split test --scenario A --samples 0 --candidates 4 "
-        f"--nn-samples 512 --device cuda"),
-    "eval_scenarios": battery("baseline_eval_scenarios",
+        f"--nn-samples 512 --nn-pools 512,5000,20000 --device cuda "
+        f"--out {OUT}/baseline_scenarioA.json",
+        json_out=f"{OUT}/baseline_scenarioA.json"),
+    "eval_scenarios": battery(
+        "baseline_eval_scenarios",
         f"python scripts/eval/eval_scenarios.py --config configs/unified.yaml "
-        f"--checkpoint {CKPT} --scenario all --samples 512 --device cuda"),
-    "masked_fill": battery("baseline_masked_fill",
+        f"--checkpoint {CKPT} --scenario all --samples 512 --device cuda "
+        f"--out {OUT}/baseline_eval_scenarios.json",
+        json_out=f"{OUT}/baseline_eval_scenarios.json"),
+    "masked_fill": battery(
+        "baseline_masked_fill",
         f"python scripts/diagnostics/masked_fill_check.py --config configs/unified.yaml "
-        f"--checkpoint {CKPT} --samples 32 --device cuda"),
-    "guidance_gap": battery("baseline_guidance_gap",
+        f"--checkpoint {CKPT} --samples 32 --device cuda "
+        f"--out {OUT}/baseline_masked_fill.json",
+        json_out=f"{OUT}/baseline_masked_fill.json"),
+    "guidance_gap": battery(
+        "baseline_guidance_gap",
         f"python scripts/diagnostics/run_guidance_gap_sweep.py --config configs/unified.yaml "
         f"--checkpoint {CKPT} --device cuda"),
 }

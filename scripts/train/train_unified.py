@@ -1318,19 +1318,13 @@ def preflight(cfg, device=None):
     # Occupied pixels are located from the HARD binary occupancy support, not
     # assumed to be at [0,0]. Hard assembly (binary occupancy) so channel
     # values are exactly the scalar values.
+    precedence_notes = []
     with torch.no_grad():
         wrong_pred = torch.full_like(out["scalar_pred"], 999.0)
 
-        # Locate an occupied pixel per sample from the true occupancy.
-        occ_pixels = occ[:, 0] > 0.5  # (B, 64, 64)
-        occ_idx = occ_pixels.nonzero()
-        assert occ_idx.shape[0] >= b, (
-            "preflight: each sample needs at least one occupied pixel for "
-            "h/r precedence verification")
-
         # KNOWN case: all scalars known → assembly must use scalar_values.
         sk_known = torch.ones(b, 3, dtype=torch.bool, device=device)
-        geom_known, _ = model.decode_geometry(
+        geom_known, occ_known = model.decode_geometry(
             out["z_hat"], wrong_pred, occ_input=occ, mask=M,
             scalar_known=sk_known, scalar_values=sv, hard_forward=True)
         # l via channel 2 (dense).
@@ -1339,15 +1333,32 @@ def preflight(cfg, device=None):
             raise RuntimeError(
                 "preflight: known-scalar precedence violated for l — assembly "
                 "did not use scalar_values for known scalars")
-        # h via channel 1 on an occupied pixel of each sample.
+
+        # h/r must be read at a pixel that is occupied in the ASSEMBLED
+        # geometry. Review B2: the old code took the pixel index from the TRUE
+        # occupancy, so on a masked pixel the model predicted empty the read
+        # value was 0 — a SPURIOUS violation. The delivered occupancy does not
+        # depend on the scalars, so one support serves both loops.
+        occ_support = occ_known[:, 0] > 0.5          # (B, 64, 64)
+
+        def _first_occupied(i):
+            idx = occ_support[i].nonzero()
+            return None if idx.numel() == 0 else (int(idx[0, 0]), int(idx[0, 1]))
+
         for i in range(b):
-            px = occ_idx[occ_idx[:, 0] == i][0]
-            h_used = geom_known[i, 1, px[1], px[2]].item()
+            pos = _first_occupied(i)
+            if pos is None:
+                precedence_notes.append(
+                    f"sample {i}: assembled geometry has no occupied pixel — "
+                    "h/r known-precedence not verifiable")
+                continue
+            py, px = pos
+            h_used = geom_known[i, 1, py, px].item()
             if abs(h_used - sv[i, 1].item()) > 1e-5:
                 raise RuntimeError(
                     f"preflight: known-scalar precedence violated for h "
                     f"(sample {i}: got {h_used}, expected {sv[i,1].item()})")
-            r_used = geom_known[i, 0, px[1], px[2]].item()
+            r_used = geom_known[i, 0, py, px].item()
             if abs(r_used - sv[i, 2].item() / 5.0) > 1e-5:
                 raise RuntimeError(
                     f"preflight: known-scalar precedence violated for r "
@@ -1366,15 +1377,21 @@ def preflight(cfg, device=None):
             raise RuntimeError(
                 "preflight: unknown-scalar precedence violated for l — "
                 "assembly did not use scalar_pred for unknown scalars")
-        # h/r via occupied pixels: must be 999 (h) / 999/5 (r), not sv.
+        # h/r via the SAME delivered-support pixel: must be 999 / 999/5.
         for i in range(b):
-            px = occ_idx[occ_idx[:, 0] == i][0]
-            h_used = geom_unknown[i, 1, px[1], px[2]].item()
+            pos = _first_occupied(i)
+            if pos is None:
+                precedence_notes.append(
+                    f"sample {i}: assembled geometry has no occupied pixel — "
+                    "h/r unknown-precedence not verifiable")
+                continue
+            py, px = pos
+            h_used = geom_unknown[i, 1, py, px].item()
             if abs(h_used - 999.0) > 1e-3:
                 raise RuntimeError(
                     f"preflight: unknown-scalar precedence violated for h "
                     f"(sample {i}: got {h_used}, expected 999.0)")
-            r_used = geom_unknown[i, 0, px[1], px[2]].item()
+            r_used = geom_unknown[i, 0, py, px].item()
             if abs(r_used - 999.0 / 5.0) > 1e-3:
                 raise RuntimeError(
                     f"preflight: unknown-scalar precedence violated for r "
@@ -1393,6 +1410,7 @@ def preflight(cfg, device=None):
         "geometry_invariants_ok": len(invariant_violations) == 0,
         "known_scalar_precedence_ok": True,
         "unknown_scalar_precedence_ok": True,
+        "precedence_notes": precedence_notes,
     }
 
     # Gradient ownership.

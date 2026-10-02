@@ -6,6 +6,9 @@ Side-by-side comparisons of this repo's models against published baselines.
   JEPA vs MetaDiT-S (diffusion): paradigm, architecture and measured parameter
   counts, spectral-fidelity benchmarks, and the JEPA-vs-diffusion axes
   (determinism, diversity, partial-context, inference cost).
+- **[overfitting.md](./overfitting.md)** — train vs held-out check on Scenario A:
+  **not overfit** (medians match); the train/held-out mean gap is a ~0.2 %
+  catastrophic tail, not fitting.
 
 Headline: ours is **~3.3× smaller trainable** (11.4 M vs 37.2 M, same 256-token grid),
 **~500× cheaper at inference** (1 forward vs ~500–1000 denoising evals), and

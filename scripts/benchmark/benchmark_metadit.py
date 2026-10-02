@@ -296,7 +296,7 @@ def main():
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--split", type=str, default="test",
-                        choices=["val", "test"])
+                        choices=["train", "val", "test"])
     parser.add_argument("--scenario", type=str, default="A",
                         choices=["A", "B", "C"])
     parser.add_argument("--samples", type=int, default=512,

@@ -1,0 +1,19 @@
+{
+  "id": "tejaspbiradar/metasurface-jepa-baseline",
+  "title": "metasurface-jepa baseline (Phase 1)",
+  "code_file": "baseline_eval.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["metasurface", "jepa", "benchmark"],
+  "dataset_sources": [
+    "tejaspbiradar/metadit-aaai2026",
+    "anosvol/metasurface-jepa-192d-full-epoch-ckpt"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

@@ -138,11 +138,11 @@ def run(cfg, args):
     n_total = args.samples if args.samples and args.samples > 0 else None
 
     mae_items, aae_items = [], []
+    floor_mae_items, floor_aae_items = [], []
     aae_cols = None
     sec = {"normalized_l1": [], "occupancy_iou_masked": [],
            "occupancy_f1_masked": [], "pred_occupancy_fraction": [],
            "scalar_mae_unknown": [], "scalar_mae_known": []}
-    first = None
     all_spec = []
     n_done = 0
 
@@ -159,6 +159,11 @@ def run(cfg, args):
 
             mae_items.append(mm.per_item_mae(spec, spec_det))
             aae_items.append(mm.per_item_aae(spec, spec_det))
+            # Surrogate floor, per item (review A5: was first-batch only).
+            geom_true = assemble_metadit_geometry(occ, sv[:, 0], sv[:, 1], sv[:, 2])
+            pred_true = surrogate(geom_true).prediction
+            floor_mae_items.append(mm.per_item_mae(spec, pred_true))
+            floor_aae_items.append(mm.per_item_aae(spec, pred_true))
             mat = cs.candidate_aae_matrix(
                 model, surrogate, out, occ, M, sk, sv, spec,
                 args.noise_std, args.candidates, seed=args.seed + 7)
@@ -181,8 +186,6 @@ def run(cfg, args):
                 sec["scalar_mae_known"].append(
                     float((out["scalar_pred"] - sv)[known].abs().mean().item()))
 
-            if first is None:
-                first = (occ, sv, spec, M, sk)
             all_spec.append(spec.cpu())
             n_done += occ.shape[0]
 
@@ -197,17 +200,45 @@ def run(cfg, args):
 
     # Baselines.
     all_spec = torch.cat(all_spec, 0).to(device)
-    baseline_out = {
-        "avg1": bl.avg1_metrics(all_spec, bl.mean_spectrum(all_spec)),
-    }
-    obsv, svf, specf, Mf, skf = first
-    baseline_out["surrogate_floor"] = bl.surrogate_floor_metrics(
-        obsv, svf, specf, surrogate)
+
+    # AVG1 from the TRAIN mean (review A4: the old version used the evaluated
+    # split's own mean — transductive and not the paper's baseline).
+    if args.smoke:
+        avg1_mean, avg1_source = bl.mean_spectrum(all_spec), "eval-split mean (SMOKE)"
+    else:
+        avg1_mean = bl.train_mean_spectrum(_split_path(cfg, "train")).to(device)
+        avg1_source = "train-split mean"
+    baseline_out = {"avg1": {**bl.avg1_metrics(all_spec, avg1_mean),
+                             "source": avg1_source}}
+
+    # Surrogate floor over ALL evaluated items (review A5).
+    baseline_out["surrogate_floor"] = {
+        "MAE": float(torch.cat(floor_mae_items).mean().item()),
+        "AAE": float(torch.cat(floor_aae_items).mean().item()),
+        "n": int(n_done)}
+
+    # NN retrieval, like-for-like (review A2): same items/n as the model, plus
+    # a training-pool-size curve. Both NN and model are scored on the first
+    # `n_nn` evaluated items, so the comparison is not handicapped.
     if args.nn_samples > 0:
+        n_nn = min(int(args.nn_samples), n_done)
+        pools = [int(x) for x in str(args.nn_pools).split(",") if x.strip()]
+        max_pool = min(max(pools), n_nn) if args.smoke else (max(pools) if pools else n_nn)
         tr_specs, tr_occ, tr_sv = _load_train_representations(
-            cfg, device, args.smoke, args.nn_samples)
-        baseline_out["nn"] = bl.nn_metrics(
-            all_spec[:args.nn_samples], tr_specs, tr_occ, tr_sv, surrogate)
+            cfg, device, args.smoke, max_pool)
+        curve = {}
+        for pool in pools:
+            p = min(pool, tr_specs.shape[0])
+            curve[str(p)] = bl.nn_metrics(
+                all_spec[:n_nn], tr_specs[:p], tr_occ[:p], tr_sv[:p], surrogate)
+        baseline_out["nn"] = {**curve[str(min(max_pool, tr_specs.shape[0]))],
+                              "eval_items": n_nn,
+                              "pool": int(min(max_pool, tr_specs.shape[0]))}
+        baseline_out["nn_pool_curve"] = curve
+        baseline_out["model_same_n"] = {
+            "MAE": float(mae_all[:n_nn].mean().item()),
+            "AAE": float(aae_all[:n_nn].mean().item()),
+            "n": int(n_nn)}
 
     result = {
         "meta": {
@@ -265,13 +296,21 @@ def _print_table(result):
     print("\n=== Unified JEPA vs MetaDiT (MAE / AAE, paper units) ===")
     print(f"split={result['meta']['split']} scenario={result['meta']['scenario']} "
           f"n={p['n']} mode={result['meta']['data_mode']}")
-    rows = [("Unified JEPA (ours)", p["MAE"], p["AAE"], "Scenario " + result["meta"]["scenario"])]
+    rows = [("Unified JEPA (ours)", p["MAE"], p["AAE"],
+             f"Scenario {result['meta']['scenario']}, n={p['n']}")]
     b = result["baselines"]
     if "nn" in b:
-        rows.append(("NN retrieval", b["nn"]["MAE"], b["nn"]["AAE"], f"n={b['nn']['n']}"))
-    rows.append(("AVG1 (mean spectrum)", b["avg1"]["MAE"], b["avg1"]["AAE"], "eval-split mean"))
+        if "model_same_n" in b:
+            rows.append((f"  ours @ n={b['model_same_n']['n']}",
+                         b["model_same_n"]["MAE"], b["model_same_n"]["AAE"],
+                         "same items as NN"))
+        rows.append((f"NN retrieval (pool {b['nn']['pool']})", b["nn"]["MAE"],
+                     b["nn"]["AAE"], f"n={b['nn']['eval_items']} like-for-like"))
+    rows.append((f"AVG1 ({b['avg1'].get('source', 'mean spectrum')})",
+                 b["avg1"]["MAE"], b["avg1"]["AAE"], ""))
     rows.append(("surrogate floor", b["surrogate_floor"]["MAE"],
-                 b["surrogate_floor"]["AAE"], "G_true -> surrogate"))
+                 b["surrogate_floor"]["AAE"],
+                 f"G_true -> surrogate, n={b['surrogate_floor']['n']}"))
     r = result.get("metadit_reproduced")
     if r:
         rows.append(("MetaDiT-S (reproduced)", r["MAE"], r["AAE"], "seed0.json"))
@@ -287,6 +326,9 @@ def _print_table(result):
         ks = "  ".join(f"{k}={v:.2f}" for k, v in sorted(aaek.items()))
         print(f"ours AAE&K: {ks}   (paper: {PAPER['aaek']})  "
               f"[latent-jitter analogue, not seed diversity]")
+    if "nn_pool_curve" in b:
+        curve = {k: round(v["MAE"], 4) for k, v in b["nn_pool_curve"].items()}
+        print(f"NN pool curve (MAE, same {b['nn']['eval_items']} items): {curve}")
     print("secondary:", {k: (round(v, 4) if isinstance(v, float) else v)
                          for k, v in result["secondary"].items()})
 
@@ -306,8 +348,12 @@ def main():
                         help="K for the AAE&K analogue")
     parser.add_argument("--noise-std", type=float, default=0.05,
                         help="latent-jitter sigma for the candidate generator")
-    parser.add_argument("--nn-samples", type=int, default=0,
-                        help="0 disables the (slower) NN baseline")
+    parser.add_argument("--nn-samples", type=int, default=512,
+                        help="held-out items the NN baseline is scored on (the "
+                             "SAME items as the model); 0 disables it")
+    parser.add_argument("--nn-pools", type=str, default="512,5000,20000",
+                        help="comma-separated training-pool sizes for the NN "
+                             "pool-size curve")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--smoke", action="store_true",

@@ -32,6 +32,21 @@ def mean_spectrum(specs):
     return specs.mean(dim=0)
 
 
+def train_mean_spectrum(mat_path):
+    """Exact mean spectrum over the TRAINING split — the standard AVG1 predictor.
+
+    Computed from the raw `.mat` arrays, NOT from the evaluated split. The
+    previous AVG1 used the test-set's own mean, which is transductive and not
+    the paper's baseline (review A4).
+    """
+    import numpy as np
+    from scipy import io
+    raw = io.loadmat(mat_path)
+    real = np.asarray(raw["real"], dtype=np.float32).mean(axis=0)
+    imag = np.asarray(raw["imag"], dtype=np.float32).mean(axis=0)
+    return torch.from_numpy(np.stack([real, imag], axis=0))  # (2, 301)
+
+
 @torch.no_grad()
 def avg1_metrics(target_spec, mean_spec):
     """AVG1: the same constant spectrum predicted for every item."""

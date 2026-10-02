@@ -10,23 +10,34 @@ See `ROADMAP.md` §"Standard phase protocol" and `BASELINE.md`.
 
 ## Baseline — current architecture (Phase 1)
 
-- date: _TBD_   commit: _TBD_   config: `configs/unified.yaml`   checkpoint: `checkpoints/unified/latest.pt`
-- artifact: `checkpoints/benchmark/baseline_scenarioA.json`
+- date: 2026-10-02   commit: `5d228ac` (kernel) / `5d27bc5` (masked-fill fix)
+- platform: Kaggle GPU kernel `tejaspbiradar/metasurface-jepa-baseline-phase-1`
+- checkpoint: `full_epoch_final.pt` (`anosvol/metasurface-jepa-192d-full-epoch-ckpt`)
+- artifacts: `checkpoints/benchmark/baseline_scenarioA.json`,
+  `baseline_eval_scenarios.json`, `baseline_masked_fill.json`, `baseline_guidance_gap.json`
 
 | quantity | value | notes |
 |---|---|---|
-| tests | _TBD_ passed / _TBD_ skipped / _TBD_ failed | |
-| MAE (ours, Scenario A, test) | _TBD_ | MetaDiT-S 0.0801 |
-| AAE (ours) | _TBD_ | 48.2495 |
-| AAE&2 / AAE&4 | _TBD_ | analogue; paper 58.80 / 68.73 |
-| AVG1 MAE / AAE | _TBD_ | 0.5860 / 352.7424 |
-| NN MAE / AAE | _TBD_ | |
-| surrogate floor MAE | _TBD_ | ≈0.0084 |
-| A / B / C win rate | _TBD_ | gate ≥ 0.75 |
-| scalar-dep. one-known / two-known | _TBD_ | **expected FAIL ≈0.50** |
-| guidance gap (hard) | _TBD_ | |
-| physics gradient share | _TBD_ | **expected ≈66 %** |
-| masked-fill seam / roughness / locality | _TBD_ | |
+| tests | 328 passed / 8 skipped / 1 failed | failure pre-existing & unrelated |
+| MAE (ours, Scenario A, test, n=17,489) | **0.0673** | beats MetaDiT-S 0.0801 |
+| AAE (ours) | **40.535** | beats 48.2495 |
+| AAE&2 / AAE&4 | 42.14 / 43.95 | analogue; paper 58.80 / 68.73 |
+| AVG1 MAE / AAE | 0.2574 / 154.966 | eval-split mean |
+| NN MAE / AAE (n=512) | 0.0551 / 33.161 | **better than ours** |
+| surrogate floor MAE | 0.0065 | |
+| A / B / C win rate (n=512) | 0.9941 / 0.9668 / 0.8984 | gate ≥ 0.75 → PASS |
+| scalar-dep one-known / two-known | 0.5059 / 0.4512 | **FAIL** |
+| guidance gap (hard stratum) | 185.28 | large → not Failure Mode 2 |
+| occupancy IoU/F1 (A, masked) | 0.7481 / 0.8559 | |
+| pred occupancy fraction (A) | 0.4270 (true 0.4247); std 0.0673 | not collapsed |
+| masked-fill filled IoU A/B/C | 0.7446 / 0.8053 / 0.8616 | n=32 |
+| masked-fill visible_identity_maxdiff | 0.0 | only the hole is filled |
+| masked-fill seam_mismatch A/B/C | n/a / 0.0684 / 0.0587 | |
+| masked-fill locality_ratio A/B/C | n/a / 0.496 / 0.385 | partially localised |
+| physics gradient share | not measured in this run | train-time; ~66 % per REPORT §13.1 |
+
+**Gate:** baseline recorded; failing = scalar dependence; the rest are no-regress
+constraints → proceed to Phase 2.
 
 ---
 

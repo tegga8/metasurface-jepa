@@ -39,16 +39,18 @@ reproduction (`checkpoints/phase0/seed0_metric.json`).
 | backbone | DiT, depth **12**, hidden **384**, heads **6**, patch **2** | occupancy encoder depth **6** + fusion depth **2** + predictor depth **8**, hidden **192**, heads **6**, patch **4** |
 | latent/token grid | 3×32×32 (symmetric quadrant) → **256 tokens** | 64×64, single-channel occupancy → **256 tokens** |
 | latent width | 384 | 192 |
-| trainable params | **37.20 M** (DiT) | **11.37 M** |
-| total params (own weights) | 37.20 M DiT (+4.53 M spectrum encoder) | 18.90 M total (incl. 3.01 M frozen EMA targets + 4.53 M frozen released encoder) |
+| trainable params | **37.20 M** (DiT, incl. its 4.53 M spectrum encoder) | **11.37 M** |
+| total params (own weights) | 37.20 M (32.67 M DiT + 4.53 M spectrum encoder) | 18.90 M (incl. 3.01 M frozen EMA + 4.53 M frozen released encoder) |
 | frozen shared components | spectrum encoder (inside `y_embedder`) | spectrum encoder (inside `spectrum_path`) — same released 4.53 M weights |
 | physics scorer | released `surrogate_s3` (6.33 M), frozen | same surrogate, frozen |
 
-**Size takeaway:** our trainable footprint is **~3.3× smaller** (11.4 M vs 37.2 M)
-at the same 256-token grid, and our *total* is ~half the DiT alone. Both share the
-same frozen spectrum encoder and surrogate, so the *effective* ecosystem is
-MetaDiT ≈ 48 M (DiT + spec enc + surrogate) vs ours ≈ 30 M (model + spec enc +
-surrogate).
+**Size takeaway (corrected — review C3):** our trainable footprint is **~3.3×
+smaller** (11.37 M vs 37.20 M) at the same 256-token grid. The 37.20 M **already
+includes** MetaDiT's internal 4.53 M spectrum encoder (live-built: 37,197,644 incl.
+4,526,144 → **32.67 M** DiT alone; the paper's "32.57 M" is that encoder-excluded
+figure). Counting the shared frozen components once per system: MetaDiT ≈ **43.5 M**
+(37.20 + 6.33 surrogate) vs ours ≈ **25.2 M** (18.90 + 6.33). The earlier "≈ 48 M vs
+≈ 30 M" double-counted MetaDiT's encoder; the headline is unchanged.
 
 ## 3. Data and training
 
@@ -92,8 +94,9 @@ standard axes that apply to *both* families, and where each stands:
 | determinism / reproducibility | stochastic — each seed differs | **deterministic** — one output per input |
 | generative diversity / mode coverage | multi-seed sampling gives diversity (AAE&K captures worst-of-K) | **deterministic** → diversity only via injected jitter/CFG (a structural JEPA limitation) |
 | robustness (worst-of-K) | AAE&2 58.8, AAE&4 68.7 | 42.1 / 44.0 (analogue) |
-| parameter fidelity | parameters implicit in the generated 3-channel grid | explicit scalar heads, **scalar MAE 0.088** (≈ 2 % of the r≈4.25 range; 0.5–1.0 range for h) |
-| partial / constrained generation | S→G only | B (partial parameters, gate 0.967), C (retrofit, gate 0.898) |
+| parameter **prediction** (from the spectrum) | parameters implicit in the generated 3-channel grid | explicit scalar heads, **scalar MAE 0.088** — accurate |
+| parameter **conditioning** (use user-supplied scalars) | n/a (S→G) | **fails** — scalar-dependence gate at chance (0.506 / 0.451) |
+| partial-observation **occupancy** conditioning | S→G only | **supported** — B (gate 0.967), C (0.898); visible-identity holds |
 | inference cost | ~500–1000 net evals per design | **1 net eval per design** |
 | collapse behaviour (JEPA-specific) | n/a | occupancy fraction std 0.067, not collapsed; **scalar path at chance (0.51/0.45)** |
 

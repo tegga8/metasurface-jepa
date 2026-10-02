@@ -91,7 +91,8 @@ it is a *domain transfer*, not yet a *method*.
 |---|---|---|
 | spectral fidelity (paper metric) | **beats MetaDiT-S** (0.0673 vs 0.0801) | strong *if* real (§6 leakage) |
 | vs trivial retrieval baseline | **loses** (0.0673 vs 0.0551) | **blocking** |
-| parameter prediction (scalars) | **fails** (at chance) | **blocking** |
+| parameter prediction (from spectrum) | accurate (scalar MAE 0.088) | fine — not a blocker |
+| parameter conditioning (use given scalars) | **fails** (at chance) | **blocking** |
 | partial-observation capability | A/B/C gates pass; B/C are not S→G | potential novelty |
 | efficiency | 11.4 M, 1 forward | strong |
 | determinism / diversity | deterministic (no mode coverage) | liability vs the field |
@@ -135,11 +136,16 @@ These must be resolved before any publication claim:
    the gap there.
 2. **Scalar conditioning is dead** (§17 of the report). Blocks claims (2) and "all
    parameters".
-3. **Possible surrogate leakage.** Our **physics loss optimises through the released
-   `surrogate_model.bin`**. If that surrogate was trained on all splits (incl. test),
-   our test numbers are optimistically biased. MetaDiT's paper reports its *own*
-   surrogate (StarNet-MLP, 1.9 M, MAE 0.0084); the shared released weights and their
-   training split must be verified. **This is a real methodological risk.**
+3. **Surrogate training-split leakage — RESOLVED by the independent review.** The
+   reviewer inspected the released training scripts (`external/metadit/scripts/
+   train_*.sh`): the surrogate, spectrum encoder and DiT all train on
+   `train_set.mat` (+ val for selection) — **the test split is not used.** So there
+   is no data leakage. The residual risk is **reward-hacking / metric circularity**:
+   our physics loss optimises through the *same* frozen surrogate that scores the
+   headline metric (MetaDiT only evaluates with it). Mitigation: report a co-primary
+   metric that is not the training objective (occupancy IoU/F1, seam/locality, gate
+   win rates — already computed), add full-wave validation on ~32 designs, and state
+   the asymmetry explicitly in the paper.
 4. **Released spectrum encoder** was contrastively pretrained on the dataset (both
    models use it) — shared, but it means the "input" already encodes dataset structure.
 5. **1 epoch vs 500 epochs.** Our win over MetaDiT is too large for the training
@@ -219,3 +225,41 @@ full paper once §8's must-fix items clear.
 - [Tutorial on JEPA (2026)](https://openreview.net/pdf?id=Zr4PUe0ZNl)
 - [AI-enabled metasurface design review (2026)](https://www.oejournal.org/ioe/article/doi/10.67704/ioe.2026.260011)
 - [Review of deep learning in metasurface modeling & design (Prog. Quantum Electron. 2026)](https://www.sciencedirect.com/science/article/pii/S0079672725000023)
+
+---
+
+## Appendix — independent review (2026-10-02) and disposition
+
+An adversarial review of this project confirmed both headline blockers, sharpened
+one (the NN gap is measured unfairly *in both directions*), and resolved one (the
+surrogate leakage fear). It also found eight verification-hygiene issues. Disposition
+of the P0 items — all now fixed in the repo, each as its own commit:
+
+- **A1 (broken physics-gradient guard) — FIXED.** `test_physics_gradient_regression`
+  called the removed `objective.physics_loss.enable()` and was `skipif`-ed without
+  the weights → inert everywhere. Rewritten to the current API with a differentiable
+  stub fallback. The full suite is now **328 passed / 8 skipped / 0 failed** (the
+  previously-reported "pre-existing failure" is gone).
+- **B1 (vacuous tests) — FIXED.** Six tests rewritten behaviourally.
+- **A2 (unfair NN comparison) — FIXED.** Same items / same n as the model + a
+  training-pool-size curve.
+- **A4 (transductive AVG1) — FIXED.** AVG1 uses the exact TRAIN-split mean.
+- **A5 (small-n diagnostics) — FIXED.** Surrogate floor over all items; n labelled.
+- **B2 (preflight precedence) — FIXED.** Pixel index from the *delivered* occupancy;
+  empty-support samples recorded, not asserted. Real preflight passes.
+- **C1/C2/C6 — FIXED.** Real JSON via `--out`; `--scenario` wired; smoke dummy to a
+  `.smoke_dummy` sibling.
+- **A3 — wording FIXED** (prediction vs conditioning, above). **C3 — parameter
+  accounting FIXED** (`docs/comparison/metadit_vs_unified_jepa.md`).
+
+**Still open (P1 — needs cloud runs / real research):** A6 circularity (co-primary
+non-objective metrics + full-wave), B3 multi-seed CIs, B4 full-wave validation, B5 the
+1-epoch-vs-500 budget question, and the research items (fix scalar conditioning; beat
+NN retrieval).
+
+**C4 (branch divergence):** this clone is the benchmarking line only. The reviewer's
+local door-(b)/preflight branch is not present here, so its two findings (C5 comment;
+B2-local `NameError`) could not be fixed in this tree and must be handled at the
+merge. **Consequence for the numbers:** the recorded Phase-1 baseline (MAE 0.0673,
+NN 0.0551, AVG1 0.2574) predates the A2/A4/A5 corrections — the NN row and AVG1 row
+must be regenerated with the fixed driver before publication.

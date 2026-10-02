@@ -10,6 +10,13 @@ See `ROADMAP.md` §"Standard phase protocol" and `BASELINE.md`.
 
 ## Baseline — current architecture (Phase 1)
 
+> **Corrections pending re-run (review A2/A4/A5).** The numbers below were produced
+> by the *pre-fix* driver: the NN row is **not** like-for-like (512-item pool, first
+> 512 test items vs the model's full 17,489) and the AVG1 row used the evaluated
+> split's own mean (transductive), not the train mean. The driver has been fixed;
+> this block must be **regenerated** before it is cited. The MAE/AAE/AAE&K headline
+> and the A/B/C gates are unaffected by these fixes.
+
 - date: 2026-10-02   commit: `5d228ac` (kernel) / `5d27bc5` (masked-fill fix)
 - platform: Kaggle GPU kernel `tejaspbiradar/metasurface-jepa-baseline-phase-1`
 - checkpoint: `full_epoch_final.pt` (`anosvol/metasurface-jepa-192d-full-epoch-ckpt`)

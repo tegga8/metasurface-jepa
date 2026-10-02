@@ -131,7 +131,10 @@ def test_contract_target_latent_shape():
 
 
 def test_contract_surrogate_spectrum_shape():
-    """Surrogate output: [B, 2, 301]."""
+    """Surrogate output: [B, 2, 301] — actually exercised (review B1).
+
+    Runs the released surrogate when staged, the differentiable stub
+    otherwise, so the contract is tested in every environment."""
     model = _build_model()
     occ, sv, spec, M = _batch(seed=1)
     sk = torch.ones(2, 3, dtype=torch.bool)
@@ -139,6 +142,10 @@ def test_contract_surrogate_spectrum_shape():
     geometry, _ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M)
     assert geometry.shape == (2, 3, 64, 64)
+    surrogate = _stub_or_real_surrogate()
+    with torch.no_grad():
+        prediction = surrogate(geometry).prediction
+    assert prediction.shape == (2, 2, 301)
 
 
 # --------------------------------------------------------------------------
@@ -178,37 +185,47 @@ def test_data_invariant_roundtrip_real():
 # §4 Mask isolation
 # --------------------------------------------------------------------------
 
-def test_masking_does_not_modify_scalars():
-    """Occupancy masking must not modify scalar values/flags."""
+def test_scalar_input_masks_values_and_preserves_inputs():
+    """Behavioural (review B1): `_build_scalar_input` must zero values where a
+    scalar is unknown, keep them where known, and never mutate sv/sk.
+
+    The previous version compared sv to a copy of sv with no masking call."""
     model = _build_model()
-    occ, sv, spec, M = _batch(seed=3)
+    sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]], dtype=torch.float32)
     sk = torch.tensor([[True, False, True], [False, True, False]])
+    sv_copy, sk_copy = sv.clone(), sk.clone()
 
-    sv_copy = sv.clone()
-    sk_copy = sk.clone()
-    sv_masked, sk_masked = model._build_scalar_input(sv, sk), sk
+    xi = model._build_scalar_input(sv, sk)          # (B, 6)
+    assert xi.shape == (2, 6)
+    for j in range(3):
+        val, flag = xi[:, 2 * j], xi[:, 2 * j + 1]
+        assert torch.equal(flag, sk[:, j].float())
+        assert torch.equal(
+            val, torch.where(sk[:, j], sv[:, j], torch.zeros_like(sv[:, j])))
+    assert torch.equal(sv, sv_copy), "sv must not be mutated"
+    assert torch.equal(sk, sk_copy), "sk must not be mutated"
 
-    # Occupy masking is separate from scalar masking
-    assert torch.equal(sv[:], sv_copy[:])  # sv unchanged
-    assert torch.equal(sk[:], sk_copy[:])  # sk unchanged
 
+def test_full_forward_does_not_mutate_inputs():
+    """Behavioural (review B1): a full model forward must not mutate the
+    occupancy / scalar / spectrum / mask tensors it is given, under either
+    scalar regime.
 
-def test_scalar_masking_does_not_modify_occupancy():
-    """Scalar known/unknown masking must not modify occupancy."""
+    The previous version asserted occ == occ_copy with nothing running."""
     model = _build_model()
+    model.eval()
     occ, sv, spec, M = _batch(seed=4)
-    occ_copy = occ.clone()
+    occ_c, sv_c, spec_c, M_c = occ.clone(), sv.clone(), spec.clone(), M.clone()
 
-    # Build scalar MLP inputs under different known/unknown regimes.
-    sk_a = torch.ones(2, 3, dtype=torch.bool)
-    sk_b = torch.zeros(2, 3, dtype=torch.bool)
-    _ = model._build_scalar_input(sv, sk_a)
-    _ = model._build_scalar_input(sv, sk_b)
+    with torch.no_grad():
+        for sk in (torch.ones(2, 3, dtype=torch.bool),
+                   torch.zeros(2, 3, dtype=torch.bool)):
+            model(occ, sv, sk, spec, M)
 
-    # Occupancy must be identical regardless of scalar regime — scalar masking
-    # never touches the occupancy tensor.
-    assert torch.equal(occ, occ_copy), (
-        "scalar masking must not modify occupancy")
+    assert torch.equal(occ, occ_c), "occupancy must not be mutated"
+    assert torch.equal(sv, sv_c), "scalars must not be mutated"
+    assert torch.equal(spec, spec_c), "spectrum must not be mutated"
+    assert torch.equal(M, M_c), "mask must not be mutated"
 
 
 def test_full_mask_no_visible_remains():
@@ -223,22 +240,18 @@ def test_full_mask_no_visible_remains():
 
 
 def test_scalar_flags_match_regime():
-    """Known flags must exactly match the intended scalar regime."""
-    b = 4
-    for regime, expected in [("all_known", True), ("all_unknown", False),
-                              ("mixed", None)]:
-        sk = torch.tensor([[True, False, True],
-                           [False, True, False],
-                           [True, True, True],
-                           [False, False, False]])[:b]
-        if regime == "all_known":
-            sk_match = torch.ones(b, 3, dtype=torch.bool)
-        elif regime == "all_unknown":
-            sk_match = torch.zeros(b, 3, dtype=torch.bool)
-        else:
-            sk_match = sk
-        assert sk_match.shape == (b, 3)
-        assert sk_match.dtype == torch.bool
+    """Behavioural (review B1): ScalarMasker flags must match the regime, and
+    unknown values must be zeroed. The previous version constructed a tensor
+    and asserted its own shape/dtype."""
+    from data.scalar_mask import ScalarMasker
+    sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]], dtype=torch.float32)
+    for regime, check in (("all_known", lambda k: bool(k.all())),
+                          ("all_unknown", lambda k: not bool(k.any()))):
+        m = ScalarMasker(regime=regime, seed=0)
+        vals, known = m.sample(sv)
+        assert known.dtype == torch.bool and known.shape == (2, 3)
+        assert check(known), f"{regime}: flags {known.tolist()}"
+        assert torch.equal(vals[~known], torch.zeros_like(vals[~known]))
 
 
 # --------------------------------------------------------------------------
@@ -299,25 +312,37 @@ def test_ema_update_uses_correct_momentum():
 
 
 def test_target_uses_scalar_mlp_ema():
-    """Target-side FiLM must use scalar_mlp_ema, not live scalar MLP (Phase 5
-    MD §5)."""
+    """Behavioural (review B1): the target latent must depend on the EMA scalar
+    target, NOT the live scalar encoder.
+
+    Perturbing the LIVE scalar encoder must leave z_y_raw unchanged;
+    perturbing the EMA target must move it. The previous version compared a
+    tensor with its own alias under an unchanged input, so it could not detect
+    a live-vs-EMA mixup."""
     model = _build_model()
+    model.eval()
     occ, sv, spec, M = _batch(seed=7)
     sk = torch.ones(2, 3, dtype=torch.bool)
 
-    out = model(occ, sv, sk, spec, M, with_target=True)
-    assert "z_y_raw" in out
+    with torch.no_grad():
+        base = model(occ, sv, sk, spec, M, with_target=True)["z_y_raw"].clone()
 
-    # The target FiLM uses scalar_mlp_ema — verify by checking that
-    # changing the live scalar encoder doesn't affect z_y_raw (EMA frozen)
-    sv2 = sv.clone()
-    out2 = model(occ, sv2, sk, spec, M, with_target=True)
-    # z_y_raw should be deterministic given fixed target EMA state
-    assert torch.allclose(out["z_y_raw"], out2["z_y"], atol=1e-5)
+        for p in model.scalar_encoder.parameters():
+            p.add_(torch.randn_like(p) * 0.5)
+        after_live = model(occ, sv, sk, spec, M, with_target=True)["z_y_raw"]
+        assert torch.allclose(base, after_live, atol=1e-6), (
+            "live scalar encoder must not affect the EMA target z_y_raw")
+
+        for p in model.scalar_mlp_ema.target.parameters():
+            p.add_(torch.randn_like(p) * 0.5)
+        after_ema = model(occ, sv, sk, spec, M, with_target=True)["z_y_raw"]
+        assert not torch.allclose(base, after_ema, atol=1e-6), (
+            "EMA scalar target must drive z_y_raw")
 
 
 # --------------------------------------------------------------------------
-# §6 Physics gradient regression test (automated)
+# §6 Physics gradient regression test (automated; runs with OR without the
+# released surrogate — never skipped)
 # --------------------------------------------------------------------------
 
 _SURROGATE_PATH = os.path.join(
@@ -325,58 +350,82 @@ _SURROGATE_PATH = os.path.join(
 _HAS_SURROGATE = os.path.exists(_SURROGATE_PATH)
 
 
-@pytest.mark.skipif(not _HAS_SURROGATE,
-                    reason="Surrogate weights not available")
-def test_physics_gradient_regression():
-    """Regression test: gradients flow from surrogate output through geometry
-    to student, but NOT to surrogate params (Phase 5 MD §6).
+class _StubSurrogateOut:
+    def __init__(self, prediction):
+        self.prediction = prediction
 
-    Do not use torch.no_grad() around the surrogate.
+
+class _StubSurrogate(nn.Module):
+    """Minimal differentiable stand-in with the released surrogate's interface:
+    forward(geometry[B,3,64,64]) -> object with `.prediction [B,2,301]`.
+
+    Lets the physics-gradient guard run in EVERY environment. The previous
+    version called the removed `objective.physics_loss.enable()` and was
+    decorated with skipif(not _HAS_SURROGATE), so it was skipped where the
+    weights were absent and raised AttributeError where they were present —
+    inert everywhere (review A1).
     """
-    from physics.physics_loop import load_surrogate, physics_loss
+
+    def __init__(self):
+        super().__init__()
+        self.mix = nn.Linear(3, 2)
+
+    def forward(self, geometry):
+        pooled = geometry.mean(dim=(2, 3))                   # (B, 3)
+        pred = self.mix(pooled)[:, :, None].expand(-1, -1, 301)
+        return _StubSurrogateOut(pred)
+
+
+def _stub_or_real_surrogate():
+    if _HAS_SURROGATE:
+        from physics.physics_loop import load_surrogate
+        return load_surrogate(_SURROGATE_PATH, device="cpu")
+    stub = _StubSurrogate()
+    for p in stub.parameters():
+        p.requires_grad_(False)
+    stub.eval()
+    return stub
+
+
+def test_physics_gradient_regression():
+    """Regression guard (Phase 5 MD §6): gradients flow from the surrogate
+    output through the assembled geometry to the STUDENT (decoder, predictor,
+    occupancy encoder), but NOT into the surrogate or the EMA target.
+
+    Uses the real released surrogate when staged, a differentiable stub
+    otherwise; physics activates via `lambda_phys>0 and surrogate is not None
+    and model.training and goal_mode!='null'` (there is no `.enable()`).
+    """
     model = _build_model()
     model.train()
-    surrogate = load_surrogate(_SURROGATE_PATH, device="cpu")
-    surrogate.eval()
+    surrogate = _stub_or_real_surrogate()
 
     occ, sv, spec, M = _batch(seed=8)
     sk = torch.ones(2, 3, dtype=torch.bool)
 
-    # Enable physics loss with a small lambda
     objective = UnifiedJEPALoss(
         hidden=192, lambda_phys=1.0, lambda_inv=0.0,
-        lambda_var=0.0, lambda_cov=0.0, lambda_scalar=0.0)
-    objective.surrogate = surrogate
-    objective.physics_loss.enable()
+        lambda_var=0.0, lambda_cov=0.0, lambda_scalar=0.0,
+        surrogate=surrogate)
 
     result = objective(model, occ, sv, sk, spec, M)
     loss = result["total_loss"]
     assert loss.requires_grad, "physics loss must be differentiable"
     loss.backward()
 
-    # 1. Surrogate params must have NO gradient (frozen)
+    # 1. Surrogate params must have NO gradient (frozen).
     for name, p in surrogate.named_parameters():
         assert p.grad is None, f"surrogate param has gradient: {name}"
 
-    # 2. Geometry input (via decoder) must have gradient path
-    decoder_has_grad = any(p.grad is not None
-                           for p in model.occupancy_decoder.parameters()
-                           if p.requires_grad)
-    assert decoder_has_grad, "decoder must receive physics gradient"
+    # 2. Student modules on the geometry path must receive the gradient.
+    for mod, label in ((model.occupancy_decoder, "decoder"),
+                       (model.predictor, "predictor"),
+                       (model.occupancy_encoder, "occupancy encoder")):
+        has_grad = any(p.grad is not None
+                       for p in mod.parameters() if p.requires_grad)
+        assert has_grad, f"{label} must receive physics gradient"
 
-    # 3. Predictor must receive gradient
-    pred_has_grad = any(p.grad is not None
-                        for p in model.predictor.parameters()
-                        if p.requires_grad)
-    assert pred_has_grad, "predictor must receive physics gradient"
-
-    # 4. Occupancy encoder must receive gradient
-    enc_has_grad = any(p.grad is not None
-                       for p in model.occupancy_encoder.parameters()
-                       if p.requires_grad)
-    assert enc_has_grad, "occupancy encoder must receive physics gradient"
-
-    # 5. EMA target must have NO gradient
+    # 3. EMA target must have NO gradient.
     for name, p in model.ema.named_parameters():
         assert p.grad is None, f"EMA target has gradient: {name}"
 
@@ -399,20 +448,46 @@ def test_occupancy_fraction_in_valid_range():
     assert 0.01 < frac < 0.99, f"occupancy fraction {frac} suggests collapse"
 
 
-def test_evaluator_flags_all_empty():
-    """All-empty prediction should be flagged as collapse."""
-    occ = torch.zeros(1, 1, 64, 64)  # all empty
-    frac = float(occ.mean().item())
-    assert frac < 0.01
-    # The collapse check in eval_scenarios.py would flag this
+class _StubCollapseModel:
+    """Minimal model for _collapse_metrics: returns a constant occupancy prob
+    so the collapse thresholds are exercised for real (review B1)."""
+
+    def __init__(self, b, fill):
+        self.b, self.fill = b, fill
+
+    def __call__(self, occ, sv, sk, spec, mask):
+        return {"z_hat": torch.zeros(self.b, 1, 1),
+                "scalar_pred": torch.zeros(self.b, 3)}
+
+    def decode_occupancy_prob(self, z_hat, scalar_pred, scalar_known=None,
+                              scalar_values=None):
+        if torch.is_tensor(self.fill):
+            return self.fill
+        return torch.full((self.b, 1, 64, 64), self.fill)
 
 
-def test_evaluator_flags_all_occupied():
-    """All-occupied prediction should be flagged as collapse."""
-    occ = torch.ones(1, 1, 64, 64)  # all occupied
-    frac = float(occ.mean().item())
-    assert frac > 0.99
-    # The collapse check in eval_scenarios.py would flag this
+def test_collapse_metrics_flags_all_empty_and_all_occupied():
+    """Behavioural (review B1): the real collapse check must flag all-empty and
+    all-occupied predictions, and neither for a half-filled one.
+
+    The previous two tests asserted `0.0 < 0.01` / `1.0 > 0.99` on hand-made
+    constants — the collapse check itself never ran."""
+    from scripts.eval.eval_scenarios import _collapse_metrics
+    b = 2
+    occ = torch.zeros(b, 1, 64, 64)
+    sv = torch.zeros(b, 3)
+    spec = torch.randn(b, 2, 301)
+    mask = torch.ones(b, 16, 16)
+    sk = torch.ones(b, 3, dtype=torch.bool)
+
+    empty = _collapse_metrics(_StubCollapseModel(b, 0.0), occ, sv, spec, mask, sk, "cpu")
+    occd = _collapse_metrics(_StubCollapseModel(b, 1.0), occ, sv, spec, mask, sk, "cpu")
+    half_fill = torch.cat([torch.ones(b, 1, 64, 32), torch.zeros(b, 1, 64, 32)], dim=3)
+    half = _collapse_metrics(_StubCollapseModel(b, half_fill), occ, sv, spec, mask, sk, "cpu")
+
+    assert empty["all_empty"] is True and empty["all_occupied"] is False
+    assert occd["all_occupied"] is True and occd["all_empty"] is False
+    assert half["all_empty"] is False and half["all_occupied"] is False
 
 
 # --------------------------------------------------------------------------

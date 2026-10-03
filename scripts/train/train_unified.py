@@ -318,6 +318,16 @@ def _physics_lambda_at(step, lambda_phys, start_step=0, ramp_steps=0):
     return float(lambda_phys) * frac
 
 
+def _ramp_frac(step, start_step=0, ramp_steps=0):
+    """Linear 0->1 ramp factor for a weight that turns on at `start_step`
+    (Phase 4 multi-target warmup)."""
+    if step < start_step:
+        return 0.0
+    if ramp_steps <= 0:
+        return 1.0
+    return min(1.0, (step - start_step + 1) / ramp_steps)
+
+
 def _build_scalar_masker_bank(cfg, seed=0):
     """Build one persistent ScalarMasker per configured curriculum regime.
 
@@ -875,6 +885,10 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     # Phase 4 MD §4: load frozen surrogate when physics loss is active
     lambda_phys = loss_cfg.get("lambda_phys", 0.0)
     ramp_steps = cfg.get("staging", {}).get("lambda_phys_ramp_steps", 0)
+    lambda_cond = loss_cfg.get("lambda_cond", 0.0)
+    lambda_scal_t = loss_cfg.get("lambda_scal_t", 0.0)
+    mt_start = int(cfg.get("staging", {}).get("multi_target_start_step", 0) or 0)
+    mt_ramp = int(cfg.get("staging", {}).get("multi_target_ramp_steps", 0) or 0)
     surrogate = None
     if lambda_phys > 0:
         # Fix 3 (spec §5): a real-mode run that requests physics loss but
@@ -1118,6 +1132,12 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         if ramp_steps > 0 or phys_start > 0:
             objective.lambda_phys = _physics_lambda_at(
                 step, lambda_phys, phys_start, ramp_steps)
+        # Phase 4: ramp the multi-target weights in after a warmup so they never
+        # hijack the gradient budget early (the failure mode of the first attempt).
+        if lambda_cond > 0 or lambda_scal_t > 0:
+            f = _ramp_frac(step, mt_start, mt_ramp)
+            objective.lambda_cond = lambda_cond * f
+            objective.lambda_scal_t = lambda_scal_t * f
 
         # Explicitly reset gradients at the START of each optimizer step
         # (Fix 1, spec §3): gradients must accumulate only across the

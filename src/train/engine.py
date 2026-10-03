@@ -173,20 +173,6 @@ def collect_ema_state(model):
                 for k, v in scalar_target.state_dict().items()
             }
         state["scalar_mlp_ema"] = scalar_state
-    spectrum_ema = getattr(model, "spectrum_film_ema", None)
-    if spectrum_ema is not None:
-        spec_state = {
-            "momentum_start": spectrum_ema.momentum_start,
-            "momentum_end": spectrum_ema.momentum_end,
-            "total_steps": spectrum_ema.total_steps,
-        }
-        spec_target = getattr(spectrum_ema, "target", None)
-        if spec_target is not None:
-            spec_state["target"] = {
-                k: v.detach().cpu().clone()
-                for k, v in spec_target.state_dict().items()
-            }
-        state["spectrum_film_ema"] = spec_state
     return state
 
 
@@ -230,19 +216,6 @@ def restore_ema_state(model, ema_state):
                           "weights — left at current init.")
                 else:
                     scalar_target.load_state_dict(saved_scalar)
-    spec_ema_state = ema_state.get("spectrum_film_ema")
-    if spec_ema_state is not None:
-        spec_ema = getattr(model, "spectrum_film_ema", None)
-        if spec_ema is not None:
-            spec_ema.momentum_start = float(spec_ema_state["momentum_start"])
-            spec_ema.momentum_end = float(spec_ema_state["momentum_end"])
-            if "total_steps" in spec_ema_state:
-                spec_ema.set_total_steps(spec_ema_state["total_steps"])
-            spec_target = getattr(spec_ema, "target", None)
-            if spec_target is not None:
-                saved_spec = spec_ema_state.get("target")
-                if saved_spec is not None:
-                    spec_target.load_state_dict(saved_spec)
 
 
 def _optimizer_param_shapes(optimizer):

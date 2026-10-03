@@ -1,6 +1,10 @@
 """Phase 4 — multi-target objective (spectrum-conditioned geometry target +
 scalar-latent target), keeping the stable spectrum-free target.
 
+Corrected design (see docs/benchmarking/PHASE4_DIAGNOSIS.md): cosine (scale-free)
+losses, ramped in; the spectrum film is FROZEN with a small non-zero init so the
+target is genuinely spectrum-dependent and cannot be optimized back to identity.
+
 Run:  python -m pytest tests/test_phase4_multitarget.py -v
       python tests/test_phase4_multitarget.py
 """
@@ -10,6 +14,7 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "train"))
 
 import pytest
 import torch
@@ -18,6 +23,7 @@ import torch.nn as nn
 from assembly import UnifiedJEPA
 from data.mask import BlockMasker
 from losses.unified_losses import UnifiedJEPALoss
+from train_unified import _ramp_frac
 
 
 class _StubReleasedEncoder(nn.Module):
@@ -41,7 +47,6 @@ def _model():
     m.spectrum_path.released = stub
     m.ema.target.load_state_dict(m.occupancy_encoder.state_dict())
     m.scalar_mlp_ema.target.load_state_dict(m.scalar_encoder.state_dict())
-    m.spectrum_film_ema.target.load_state_dict(m.spectrum_film.state_dict())
     return m
 
 
@@ -56,40 +61,34 @@ def _batch(b=2, seed=0):
     return occ, sv, spec, M
 
 
-def test_multitarget_shapes_and_stable_target_is_spectrum_free():
+def test_multitarget_shapes_and_spectrum_dependence():
     model = _model()
     model.eval()
     occ, sv, spec, M = _batch()
     sk = torch.ones(2, 3, dtype=torch.bool)
     with torch.no_grad():
         out = model(occ, sv, sk, spec, M, with_target=True)
+        out2 = model(occ, sv, sk, spec * 1.5, M, with_target=True)
+
     assert out["z_y_occ_spec"].shape == (2, 256, 192)
     assert out["z_y_scal"].shape == (2, 192)
     assert out["z_hat_occ_spec"].shape == (2, 256, 192)
     assert out["z_hat_scal"].shape == (2, 192)
 
-    with torch.no_grad():
-        out2 = model(occ, sv, sk, spec * 1.5, M, with_target=True)
-    # The stable target is spectrum-free by construction.
-    assert torch.allclose(out["z_y_raw"], out2["z_y_raw"], atol=1e-6), (
-        "the stable target must stay spectrum-free")
+    # Stable target stays spectrum-free; the spec target must depend on it — and
+    # it does from step 0, because the film is non-identity (not zero-init).
+    assert torch.allclose(out["z_y_raw"], out2["z_y_raw"], atol=1e-6)
+    assert not torch.allclose(out["z_y_occ_spec"], out2["z_y_occ_spec"], atol=1e-6)
 
 
-def test_spec_target_depends_on_spectrum_once_film_trains():
-    """At init the spectrum FiLM is IDENTITY (AdaLN-zero), so the spec target
-    equals the stable target; it becomes spectrum-dependent as the (EMA) film
-    trains. Verify that dependence once the EMA film is non-identity."""
+def test_spectrum_film_is_frozen_and_spectrum_dependent():
     model = _model()
-    model.eval()
-    occ, sv, spec, M = _batch()
-    sk = torch.ones(2, 3, dtype=torch.bool)
-    with torch.no_grad():
-        for p in model.spectrum_film_ema.target.parameters():
-            p.add_(torch.randn_like(p) * 0.5)
-        out = model(occ, sv, sk, spec, M, with_target=True)["z_y_occ_spec"]
-        out2 = model(occ, sv, sk, spec * 1.5, M, with_target=True)["z_y_occ_spec"]
-    assert not torch.allclose(out, out2, atol=1e-6), (
-        "the spectrum-conditioned target must depend on the spectrum")
+    assert all(not p.requires_grad for p in model.spectrum_film.parameters()), (
+        "the spectrum conditioning must be frozen (non-nullifiable)")
+    c1, c2 = torch.randn(2, 384), torch.randn(2, 384)
+    g1 = model.spectrum_film(c1)[0][0]
+    g2 = model.spectrum_film(c2)[0][0]
+    assert not torch.equal(g1, g2), "the film must depend on c_physics"
 
 
 def test_spec_head_depends_on_goal_no_shortcut():
@@ -112,7 +111,7 @@ def test_multitarget_loss_terms_and_gradient_ownership():
     obj = UnifiedJEPALoss(
         hidden=192, lambda_inv=0.0, lambda_var=0.0, lambda_cov=0.0,
         lambda_scalar=0.0, lambda_occ=0.0, lambda_phys=0.0, lambda_summary=0.0,
-        lambda_cond=1.0, lambda_scal_t=1.0)
+        lambda_cond=0.5, lambda_scal_t=0.5)
     occ, sv, spec, M = _batch(seed=1)
     sk = torch.ones(2, 3, dtype=torch.bool)
     res = obj(model, occ, sv, sk, spec, M)
@@ -120,27 +119,20 @@ def test_multitarget_loss_terms_and_gradient_ownership():
 
     res["total_loss"].backward()
 
-    # The live spectrum FiLM and the spec head receive gradient ...
+    # The live spec head receives gradient; the frozen film receives none.
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for p in model.spec_proj.parameters())
-    assert any(p.grad is not None and p.grad.abs().sum() > 0
-               for p in model.spectrum_film.parameters())
-    # ... the EMA copy gets none.
-    assert all(p.grad is None for p in model.spectrum_film_ema.parameters())
+    assert all(p.grad is None for p in model.spectrum_film.parameters())
     # Target latents carry no gradient (stop-grad at the EMA boundary).
     assert not res["out"]["z_y_occ_spec"].requires_grad
     assert not res["out"]["z_y_scal"].requires_grad
 
 
-def test_spectrum_film_zero_init_is_identity():
-    model = _model()
-    c = torch.randn(3, 384)
-    params = model.spectrum_film(c)
-    assert len(params) == 2
-    for gamma, beta in params:
-        assert gamma.shape == (3, 192) and beta.shape == (3, 192)
-        assert torch.allclose(gamma, torch.ones_like(gamma)), "gamma init must be 1"
-        assert torch.allclose(beta, torch.zeros_like(beta)), "beta init must be 0"
+def test_multi_target_ramp():
+    assert _ramp_frac(999, 1000, 2000) == 0.0
+    assert 0.0 < _ramp_frac(1500, 1000, 2000) < 1.0
+    assert _ramp_frac(3000, 1000, 2000) == pytest.approx(1.0)
+    assert _ramp_frac(5, 0, 0) == 1.0
 
 
 if __name__ == "__main__":

@@ -30,11 +30,15 @@ import torch.nn.functional as F
 from losses.vicreg import VICRegProjector, build_projector, vicreg_branch_terms
 
 
-def _masked_mse(a, b, mask_bool):
-    """Mean squared error over MASKED tokens (Phase 4 multi-target terms)."""
-    d = (a - b) ** 2
-    m = mask_bool.unsqueeze(-1).to(d.dtype)
-    return (d * m).sum() / m.sum().clamp(min=1.0)
+def _masked_cosine(a, b, mask_bool):
+    """1 - mean cosine similarity over MASKED tokens (scale-free; Phase 4).
+
+    Cosine rather than raw MSE: the multi-target terms run through a randomly
+    initialized head, and an un-normalized multi-dim MSE dominates the gradient
+    budget (measured: 91-99 % of it), collapsing training. Cosine is bounded in
+    [0, 2] and normalized by the vector norms.
+    """
+    return 1.0 - F.cosine_similarity(a[mask_bool], b[mask_bool], dim=-1).mean()
 
 
 class ScalarPredictionLoss(nn.Module):
@@ -254,13 +258,14 @@ class UnifiedJEPALoss(nn.Module):
         else:
             L_summary = torch.zeros((), device=z_hat.device)
 
-        # Phase 4 multi-target terms.
+        # Phase 4 multi-target terms (scale-free cosine).
         if self.lambda_cond > 0 and "z_y_occ_spec" in out:
-            L_cond = _masked_mse(out["z_hat_occ_spec"], out["z_y_occ_spec"], mask_bool)
+            L_cond = _masked_cosine(out["z_hat_occ_spec"], out["z_y_occ_spec"], mask_bool)
         else:
             L_cond = torch.zeros((), device=z_hat.device)
         if self.lambda_scal_t > 0 and "z_y_scal" in out:
-            L_scal_t = F.mse_loss(out["z_hat_scal"], out["z_y_scal"])
+            L_scal_t = 1.0 - F.cosine_similarity(
+                out["z_hat_scal"], out["z_y_scal"], dim=-1).mean()
         else:
             L_scal_t = torch.zeros((), device=z_hat.device)
 
@@ -337,5 +342,3 @@ class UnifiedJEPALoss(nn.Module):
         adds the spectrum-FiLM EMA)."""
         model.ema.update(model.occupancy_encoder, step)
         model.scalar_mlp_ema.update(model.scalar_encoder, step)
-        if hasattr(model, "spectrum_film_ema"):
-            model.spectrum_film_ema.update(model.spectrum_film, step)

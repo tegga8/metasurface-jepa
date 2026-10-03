@@ -76,9 +76,10 @@ loss:
   # MLP+BN is the incumbent; the ablation tests whether the BatchNorm helps or
   # hurts on the hard stratum.
   projector_type: mlp_bn
-  # Phase 4 multi-target weights.
-  lambda_cond: 1.0      # spectrum-conditioned geometry target (forces spectrum use)
-  lambda_scal_t: 1.0    # scalar-latent target (forces the scalar path)
+  # Phase 4 multi-target weights (ramped in via staging.multi_target_*). Cosine
+  # (scale-free) losses; kept modest so they cannot hijack the gradient budget.
+  lambda_cond: 0.5      # spectrum-conditioned geometry target (forces spectrum use)
+  lambda_scal_t: 0.5    # scalar-latent target (forces the scalar path)
 
 # Mask curriculum (Phase 3 MD §4)
 curriculum:
@@ -127,6 +128,10 @@ staging:
   # log (train.log_grad_share_every_steps).
   lambda_phys_start_step: 2000
   lambda_phys_ramp_steps: 3000  # ramp lambda_phys 0 -> 3.32 over steps 2000..5000
+  # Phase 4: ramp the multi-target weights in from step 1000, after the
+  # representation has formed on the proven objective.
+  multi_target_start_step: 1000
+  multi_target_ramp_steps: 2000
                        # (03_training_and_objective.md §5: "Ramp lambda_phys from
                        # zero. Do not immediately turn on a large physics loss.")
   physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:

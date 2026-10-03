@@ -137,6 +137,34 @@ constraints → proceed to Phase 2.
   spectrum FiLM, or a detached fixed projection); (iii) one corrective 10k arm,
   checking the gradient share lands in a sane band **before** re-examining gates.
 
+### Phase 4 — corrected run (commit `904856e`) — PARTIAL
+
+- Fix (`docs/benchmarking/PHASE4_DIAGNOSIS.md`): cosine (scale-free) losses, ramped
+  in from step 1000, and a **frozen non-identity** spectrum film. No collapse.
+
+| metric | Phase-2 control | **Phase 4 (fixed)** |
+|---|---|---|
+| MAE (test, n=17,489) | 0.0792 | **0.0789** |
+| normalized-L1 (A) | 0.1378 | 0.1369 |
+| occupancy IoU / F1 (A) | 0.7025 / 0.8244 | 0.708 / 0.8284 |
+| A / B / C win rate | 0.982 / 0.910 / **0.736** | 0.988 / 0.934 / **0.771 (PASS)** |
+| scalar-dep. one / two known | 0.617 / 0.553 | **0.641 / 0.615** |
+| guidance gap (hard stratum) | ~41 | **~27 (fell)** |
+| `L_cond` / `L_scal_t` grad share | — | **~0.1–0.2 % (inert)** |
+
+- **No collapse and no regression**; A/B/C all pass (C 0.736 → 0.771), scalar
+  dependence +2–6 pp. **The fix removed the failure.**
+- **But the gate is NOT met:** the hard-stratum guidance gap **fell** (~41 → 27)
+  instead of rising, the scalar gates are still far below 0.94–0.97, and the
+  multi-target terms are now **nearly inert** (~0.1–0.2 % share) — the fix
+  over-corrected from 91–99 % to almost nothing, so the *forcing* mechanism barely
+  acts.
+- **Verdict: PARTIAL** — the collapse is fixed; the mechanism's intended effect is
+  not demonstrated at this weight.
+- **Next:** raise `λ_cond`/`λ_scal_t` toward a sane band (~2–5 % share, comparable to
+  `L_occ`/`L_summary`) and/or strengthen the film's init, then one 10k arm — the
+  `[grad-share]` probe says when the weight is right, before gates are re-examined.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

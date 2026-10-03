@@ -21,7 +21,7 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
 | Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
-| Phase 4 — multi-target objective | **ATTEMPTED — FAILED the gate** (L_cond hijacked 91–99 % of the gradient; model collapsed). Diagnosis + fix in `RESULTS.md`; **halted here** |
+| Phase 4 — multi-target objective | **PARTIAL** — first attempt collapsed (`L_cond` 91–99 % share); fixed (`904856e`: cosine + ramp + frozen conditioning) → no regression, C gate 0.736→0.771, scalar +2–6 pp, **but** terms now ~0.1 % share (inert) and the guidance gap fell → gate not met. See `PHASE4_DIAGNOSIS.md` |
 | Phases 5–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
@@ -105,9 +105,16 @@ gradient and its zero-init keeps the target spectrum-free forever.
   un-normalized masked MSE through a random head, degenerate with the stable target
   at init), collapsing the representation and the occupancy decoder; every gate
   failed. See `RESULTS.md`.
-- **Halted here** (no loosening). Fix path, diagnose first: normalize/ramp `λ_cond`
-  and break the init degeneracy; re-check the gradient-share band before re-examining
-  gates.
+- **Fix applied** (`904856e`, per `PHASE4_DIAGNOSIS.md`): cosine (scale-free) losses,
+  ramped in from step 1000, and a **FROZEN non-identity** spectrum film
+  (non-nullifiable). The corrected 10k run **does not collapse and does not regress**
+  (MAE 0.0789 vs 0.0792; A/B/C 0.988/0.934/0.771 — C crosses the gate; scalar
+  dependence +2–6 pp) — **but** the multi-target terms are now only **~0.1 %** of the
+  gradient (inert; over-corrected) and the hard-stratum guidance gap **fell**
+  (~41→27), so the forcing is **not demonstrated**. Status: **PARTIAL**.
+- **Next:** raise `λ_cond`/`λ_scal_t` toward a sane band (~2–5 % share, comparable to
+  `L_occ`/`L_summary`) and/or strengthen the film init; re-run one 10k arm, checking
+  the share band with the `[grad-share]` probe before re-examining gates.
 
 ### Phase 5 — Scalar capacity & bounds (issues 3, 9)
 - **5a** bound decoded scalars to verified ranges (config-sourced).

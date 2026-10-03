@@ -36,6 +36,10 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 
 ## Standard phase protocol (every phase)
 
+See [`ACCEPTANCE_PROTOCOL.md`](./ACCEPTANCE_PROTOCOL.md): no model/training result is
+**established** without ≥3 training seeds; evaluation seeds are separate and quantify
+measurement noise on a fixed checkpoint; every number states its replication unit.
+
 1. **Baseline** — record current numbers before touching code.
 2. **Change** — one behaviour change + a regression test that fails before / passes after.
 3. **Measure** — same battery, same split / config / seed.

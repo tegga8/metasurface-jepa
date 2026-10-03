@@ -274,6 +274,28 @@ constraints → proceed to Phase 2.
   unestablished; the only results that survive the CIs are the robust gates (A/B),
   the NN loss, and the scalar failure.
 
+### Scenario C — evaluation-seed precision (A3/A4) + tail diagnosis (A5)
+
+- A1 added `--eval-seed` (measurement-only; `E=0` reproduces the historical numbers).
+  Fixed checkpoint = the **seed-0 checkpoint of the 3-seed CI** (`ms/seed0.pt`).
+  Protocol unchanged: val split, n=512, ratio 0.25, random placement, all scalars
+  known, frozen model+surrogate.
+- **A4 — 5 evaluation seeds {3,4,5,6,7} on the fixed checkpoint** (headline
+  `scenario_C_rns.gap.real_beats_shuffled_fraction`): 0.75195, 0.74414, 0.74805,
+  0.73828, 0.75195 → **mean 0.7469 ± 0.0058 (5 evaluation seeds)**; 95 % Student-t CI
+  (df=4) **[0.7397, 0.7541] → straddles 0.75 → UNRESOLVED.**
+  Evaluation-seed std (0.006) ≪ training-seed std (0.037): C's uncertainty is
+  **training-seed variance, not measurement noise.**
+- **A5 — per-sample tail** (pooled 2,560 samples = 5 × 512): real median 0.096 / mean
+  0.128; shuffled median 0.175 / mean 0.233; paired-diff median 0.054; pooled
+  `real<shuffled` fraction 0.7469. **~25 % of samples fail** (`fail_diff_mean` −0.061
+  vs `win_diff_mean` +0.162). Masked IoU stable 0.742–0.759; no collapse (pred occ
+  frac 0.443 vs true 0.425). → the shortfall is **broad (~25 %), not a narrow tail**.
+- **Decision (per the plan's rule): Case 3 — unresolved.** A5 done; **do not add more
+  seeds** (eval noise already shown small); **B/C not triggered** (C is not
+  *established* below 0.75). The crossed variance design (3 ckpts × 3 eval seeds) is
+  available but would formalise a conclusion the two stds already give.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

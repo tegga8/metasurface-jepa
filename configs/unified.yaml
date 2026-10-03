@@ -76,6 +76,9 @@ loss:
   # MLP+BN is the incumbent; the ablation tests whether the BatchNorm helps or
   # hurts on the hard stratum.
   projector_type: mlp_bn
+  # Phase 4 multi-target weights.
+  lambda_cond: 1.0      # spectrum-conditioned geometry target (forces spectrum use)
+  lambda_scal_t: 1.0    # scalar-latent target (forces the scalar path)
 
 # Mask curriculum (Phase 3 MD §4)
 curriculum:

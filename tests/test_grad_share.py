@@ -24,7 +24,8 @@ from data.mask import BlockMasker
 from losses.unified_losses import UnifiedJEPALoss
 from train_unified import per_term_grad_share
 
-TERMS = {"L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys", "L_summary"}
+TERMS = {"L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys", "L_summary",
+         "L_cond", "L_scal_t"}
 
 
 class _StubReleasedEncoder(nn.Module):

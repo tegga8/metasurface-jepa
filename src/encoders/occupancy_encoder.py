@@ -62,17 +62,21 @@ class OccupancyEncoder(nn.Module):
             [TransformerBlock(hidden, num_heads) for _ in range(depth)]
         )
 
-    def forward(self, occupancy, film_params=None, mask=None, mask_token=None):
+    def forward(self, occupancy, film_params=None, mask=None, mask_token=None,
+                spectrum_film_params=None):
         """Encode single-channel occupancy into 256 latent tokens.
 
         Args:
-            occupation: (B, 1, 64, 64) binary float occupancy.
-            film_params: Optional list of (gamma, beta) tuples, one per block.
-                Each is (B, hidden). If None, no FiLM is applied (identity).
+            occupancy: (B, 1, 64, 64) binary float occupancy.
+            film_params: Optional list of (gamma, beta) tuples, one per block
+                (scalar FiLM). Each is (B, hidden). If None, identity.
             mask: Optional (B, 16, 16) mask (1=visible, 0=masked). If provided
                 with mask_token, masked patch positions are replaced with the
                 learned placeholder before pos embedding (§2 / architecture_v5.md).
             mask_token: (1, 1, hidden) learned placeholder for masked patches.
+            spectrum_film_params: Optional list of (gamma, beta) tuples, one per
+                block, from the goal spectrum (Phase 4). Applied AFTER the scalar
+                FiLM; identity when None.
 
         Returns:
             (B, 256, hidden) occupancy latent tokens.
@@ -87,6 +91,9 @@ class OccupancyEncoder(nn.Module):
             x = block(x)
             if film_params is not None:
                 gamma, beta = film_params[i]
+                x = gamma[:, None, :] * x + beta[:, None, :]
+            if spectrum_film_params is not None:
+                gamma, beta = spectrum_film_params[i]
                 x = gamma[:, None, :] * x + beta[:, None, :]
 
         return x

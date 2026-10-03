@@ -916,6 +916,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         lambda_occ=loss_cfg.get("lambda_occ", 0.0),
         # Phase 3b: projector ablation (none | linear | mlp | mlp_bn).
         projector_type=loss_cfg.get("projector_type", "mlp_bn"),
+        lambda_cond=loss_cfg.get("lambda_cond", 0.0),
+        lambda_scal_t=loss_cfg.get("lambda_scal_t", 0.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)
@@ -1364,6 +1366,8 @@ def preflight(cfg, device=None):
         lambda_summary=cfg.get("loss", {}).get("lambda_summary", 0.0),
         lambda_phys=max(cfg.get("loss", {}).get("lambda_phys", 0.0), 1.0),
         projector_type=cfg.get("loss", {}).get("projector_type", "mlp_bn"),
+        lambda_cond=cfg.get("loss", {}).get("lambda_cond", 0.0),
+        lambda_scal_t=cfg.get("loss", {}).get("lambda_scal_t", 0.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)

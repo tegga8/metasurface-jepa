@@ -30,6 +30,13 @@ import torch.nn.functional as F
 from losses.vicreg import VICRegProjector, build_projector, vicreg_branch_terms
 
 
+def _masked_mse(a, b, mask_bool):
+    """Mean squared error over MASKED tokens (Phase 4 multi-target terms)."""
+    d = (a - b) ** 2
+    m = mask_bool.unsqueeze(-1).to(d.dtype)
+    return (d * m).sum() / m.sum().clamp(min=1.0)
+
+
 class ScalarPredictionLoss(nn.Module):
     """L1 regression on scalar parameters at positions marked unknown.
 
@@ -114,14 +121,14 @@ class UnifiedJEPALoss(nn.Module):
 
     name = "unified_jepa"
     term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys",
-                  "L_summary")
+                  "L_summary", "L_cond", "L_scal_t")
 
     def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
                  lambda_cov=1.0, lambda_scalar=1.0, lambda_phys=0.0,
                  lambda_occ=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
                  surrogate=None, physics_use_ste=True, lambda_summary=0.0,
-                 projector_type="mlp_bn"):
+                 projector_type="mlp_bn", lambda_cond=0.0, lambda_scal_t=0.0):
         super().__init__()
         # Phase 3b: objective-owned projector, ablable via loss.projector_type
         # (none | linear | mlp | mlp_bn). Spec §17: there is no model.proj.
@@ -144,6 +151,10 @@ class UnifiedJEPALoss(nn.Module):
         # Door (a): weight of the summary-token read-out. 0.0 keeps the shipped
         # behaviour bit-identical (the term is then exactly zero).
         self.lambda_summary = lambda_summary
+        # Phase 4: multi-target weights — spectrum-conditioned geometry target,
+        # and scalar-latent target.
+        self.lambda_cond = lambda_cond
+        self.lambda_scal_t = lambda_scal_t
 
         # Fix 6 (spec §8): self.occupancy_loss removed — it was constructed
         # but never called; forward() computes the projected JEPA/VICReg
@@ -243,11 +254,23 @@ class UnifiedJEPALoss(nn.Module):
         else:
             L_summary = torch.zeros((), device=z_hat.device)
 
+        # Phase 4 multi-target terms.
+        if self.lambda_cond > 0 and "z_y_occ_spec" in out:
+            L_cond = _masked_mse(out["z_hat_occ_spec"], out["z_y_occ_spec"], mask_bool)
+        else:
+            L_cond = torch.zeros((), device=z_hat.device)
+        if self.lambda_scal_t > 0 and "z_y_scal" in out:
+            L_scal_t = F.mse_loss(out["z_hat_scal"], out["z_y_scal"])
+        else:
+            L_scal_t = torch.zeros((), device=z_hat.device)
+
         total = (L_inv_w + L_var_w + L_cov_w
                  + self.lambda_scalar * L_scalar
                  + self.lambda_occ * L_occ
                  + self.lambda_phys * L_phys
-                 + self.lambda_summary * L_summary)
+                 + self.lambda_summary * L_summary
+                 + self.lambda_cond * L_cond
+                 + self.lambda_scal_t * L_scal_t)
 
         # Per-term WEIGHTED losses, exposed so the trainer can attribute the
         # gradient budget live (Phase 2a of the roadmap — until now the physics
@@ -259,6 +282,8 @@ class UnifiedJEPALoss(nn.Module):
             "L_occ": self.lambda_occ * L_occ,
             "L_phys": self.lambda_phys * L_phys,
             "L_summary": self.lambda_summary * L_summary,
+            "L_cond": self.lambda_cond * L_cond,
+            "L_scal_t": self.lambda_scal_t * L_scal_t,
         }
 
         out["loss_components"] = {
@@ -273,6 +298,10 @@ class UnifiedJEPALoss(nn.Module):
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_summary": float(L_summary.detach()),
             "L_summary_weighted": float((self.lambda_summary * L_summary).detach()),
+            "L_cond": float(L_cond.detach()),
+            "L_scal_t": float(L_scal_t.detach()),
+            "L_cond_weighted": float((self.lambda_cond * L_cond).detach()),
+            "L_scal_t_weighted": float((self.lambda_scal_t * L_scal_t).detach()),
             "L_total": float(total.detach()),
         }
         return {
@@ -304,6 +333,9 @@ class UnifiedJEPALoss(nn.Module):
         return self
 
     def on_optimizer_step(self, model, step):
-        """Update both EMA targets after optimizer step (Phase 2 §6)."""
+        """Update the EMA targets after an optimizer step (Phase 2 §6; Phase 4
+        adds the spectrum-FiLM EMA)."""
         model.ema.update(model.occupancy_encoder, step)
         model.scalar_mlp_ema.update(model.scalar_encoder, step)
+        if hasattr(model, "spectrum_film_ema"):
+            model.spectrum_film_ema.update(model.spectrum_film, step)

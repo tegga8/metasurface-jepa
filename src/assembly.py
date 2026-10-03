@@ -110,6 +110,33 @@ def load_into_model(model, sd, device, strict=True):
 UNIFIED_ARCHITECTURE_ID = "unified_occ_param_spectrum_jepa_v1"
 
 
+class SpectrumFilm(nn.Module):
+    """Phase 4: map c_physics [B, c_dim] to per-block (gamma, beta) FiLM.
+
+    Zero-initialized to identity (gamma -> 1, beta -> 0), the repo's AdaLN-zero
+    convention, so the encoder is unmodified at step 0. Shared by the student
+    occupancy encoder and — via an EMA copy — the spectrum-conditioned target.
+    """
+
+    def __init__(self, c_dim=384, hidden=192, n_blocks=6):
+        super().__init__()
+        self.hidden = hidden
+        self.heads = nn.ModuleList(
+            [nn.Linear(c_dim, 2 * hidden) for _ in range(n_blocks)])
+        for head in self.heads:
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+            with torch.no_grad():
+                head.bias[:hidden].fill_(1.0)   # gamma init = 1
+
+    def forward(self, c_physics):
+        out = []
+        for head in self.heads:
+            gamma, beta = head(c_physics).chunk(2, dim=-1)
+            out.append((gamma, beta))
+        return out
+
+
 class UnifiedJEPA(nn.Module):
     """Unified occupancy + scalar + spectrum JEPA (architecture_v5.md §3.1-§3.6).
 
@@ -160,6 +187,16 @@ class UnifiedJEPA(nn.Module):
         self.scalar_encoder = ScalarEncoder(
             hidden=hidden, scalar_hidden=scalar_hidden, n_film_blocks=n_film_blocks
         )
+
+        # Phase 4: spectrum-conditioned FiLM (shared by the student encoder and,
+        # via its EMA copy, the spectrum-conditioned target), plus the head that
+        # predicts that target from the predictor trunk.
+        self.spectrum_film = SpectrumFilm(
+            c_dim=384, hidden=hidden, n_blocks=n_film_blocks)
+        self.spectrum_film_ema = EMAEncoder(
+            self.spectrum_film, momentum_start=momentum_start,
+            momentum_end=momentum_end)
+        self.spec_proj = nn.Linear(hidden, hidden, bias=True)
 
         # Spectrum path — stays at 384-D (architecture_v5.md §3.3)
         self.spectrum_path = SpectrumPath(
@@ -214,17 +251,21 @@ class UnifiedJEPA(nn.Module):
             assert not param.requires_grad, f"occupancy EMA trainable: {name}"
         for name, param in self.scalar_mlp_ema.named_parameters():
             assert not param.requires_grad, f"scalar_mlp_ema trainable: {name}"
+        for name, param in self.spectrum_film_ema.named_parameters():
+            assert not param.requires_grad, f"spectrum_film_ema trainable: {name}"
 
     # --- EMA helpers -------------------------------------------------------
 
     def set_total_steps(self, n):
         self.ema.set_total_steps(n)
         self.scalar_mlp_ema.set_total_steps(n)
+        self.spectrum_film_ema.set_total_steps(n)
 
     def enforce_frozen_reference_modes(self):
         """Keep frozen reference modules in eval() regardless of student mode."""
         self.ema.target.eval()
         self.scalar_mlp_ema.target.eval()
+        self.spectrum_film_ema.target.eval()
         released = getattr(self.spectrum_path, "released", None)
         if released is not None:
             released.eval()
@@ -275,20 +316,24 @@ class UnifiedJEPA(nn.Module):
         # 2. Scalar encoder (live) → FiLM params + scalar summary token
         film_params, scalar_summary = self.scalar_encoder(scalar_mlp_input)
 
-        # 3. Occupancy encoder (student) with TOKEN-level mask replacement + FiLM.
-        # Phase 3a: the raw pixel mask (apply_mask_to_pixels) was REMOVED — it was
-        # redundant. patch_embed is a non-overlapping stride-4 conv, so zeroing a
-        # 4x4 pixel block changes only that block's token, which the encoder then
-        # overwrites with `mask_token`; the masked pixel values never reached the
-        # output. Masking is now purely token-level (the I-JEPA convention).
+        # 3. Spectrum path (frozen released encoder + trainable read-out)
+        c_physics, a_goal = self.spectrum_path(spectrum, goal_mode=goal_mode)
+        # c_physics: (B, 384), a_goal: (B, 16, 384)
+
+        # 3b. Phase 4: spectrum FiLM for the student occupancy path (from the goal
+        #     spectrum the model is given). The target side uses the EMA copy.
+        spectrum_film_params = self.spectrum_film(c_physics)
+
+        # 4. Occupancy encoder (student) with TOKEN-level mask replacement + FiLM.
+        # Phase 3a: the raw pixel mask was removed (redundant — patch_embed is a
+        # non-overlapping stride-4 conv, and masked tokens are overwritten with
+        # `mask_token`). Phase 4: the encoder is additionally FiLM-conditioned on
+        # the goal spectrum, so the context representation is spectrum-aware.
         z_x = self.occupancy_encoder(
             occupancy, film_params=film_params,
             mask=mask, mask_token=self.mask_token,
+            spectrum_film_params=spectrum_film_params,
         )  # (B, 256, hidden)
-
-        # 4. Spectrum path (frozen)
-        c_physics, a_goal = self.spectrum_path(spectrum, goal_mode=goal_mode)
-        # c_physics: (B, 384), a_goal: (B, 16, 384)
 
         # 5. Fusion: 256 occupancy + 16 goal (projected 384→192) + 1 scalar summary
         fused = self.fusion_encoder(z_x, a_goal, scalar_summary)  # (B, 273, hidden)
@@ -317,6 +362,11 @@ class UnifiedJEPA(nn.Module):
         occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
         scalar_summary_pred = z_hat_raw[:, 256, :]     # (B, hidden)
 
+        # 8b. Phase 4: the spectrum-conditioned target head (a projection off the
+        #     predictor trunk) and the scalar-latent prediction.
+        z_hat_occ_spec = self.spec_proj(occupancy_pred)   # (B, 256, hidden)
+        z_hat_scal = scalar_summary_pred                  # (B, hidden)
+
         # 9. Scalar decode
         scalar_pred = self.scalar_decoder(scalar_summary_pred)  # (B, 3)
 
@@ -331,6 +381,8 @@ class UnifiedJEPA(nn.Module):
             a_goal=a_goal,
             scalar_pred=scalar_pred,
             scalar_summary_pred=scalar_summary_pred,
+            z_hat_occ_spec=z_hat_occ_spec,
+            z_hat_scal=z_hat_scal,
             attn_weights=(attn_weights if need_attn else None),
             # The scalar encoder's pooled conditioning token, exposed so the
             # objective can attach its own read-out to it (door (a) of the scalar
@@ -347,9 +399,23 @@ class UnifiedJEPA(nn.Module):
                     scalar_values[:, 1], torch.ones_like(scalar_values[:, 1]),
                     scalar_values[:, 2], torch.ones_like(scalar_values[:, 2]),
                 ], dim=-1)  # (B, 6)
-                film_params_ema, _ = self.scalar_mlp_ema(true_input)
+                film_params_ema, scalar_summary_ema = self.scalar_mlp_ema(true_input)
+                # Stable, spectrum-FREE geometry target (the answer key + the
+                # clean real/null/shuffled control), unchanged from v5.
                 z_y_raw = self.ema(occupancy, film_params=film_params_ema)
+                # Phase 4 spectrum-conditioned geometry target: the teacher is
+                # conditioned on the TRUE spectrum, so matching it REQUIRES using
+                # the goal spectrum. Uses the EMA copy of the spectrum FiLM.
+                spec_film_ema = self.spectrum_film_ema(c_physics)
+                z_y_occ_spec = self.ema(
+                    occupancy, film_params=film_params_ema,
+                    spectrum_film_params=spec_film_ema)
+                # Phase 4 scalar latent target (EMA scalar encoder summary of the
+                # true scalars) — forces the scalar path to carry the conditioning.
+                z_y_scal = scalar_summary_ema.reshape(b, -1)
                 out["z_y_raw"] = z_y_raw
+                out["z_y_occ_spec"] = z_y_occ_spec
+                out["z_y_scal"] = z_y_scal
                 # Explicit feature-wise normalization boundary (documented
                 # contract, audit B15): the active UnifiedJEPALoss consumes
                 # z_y_raw through its own objective-owned projector, so this

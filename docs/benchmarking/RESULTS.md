@@ -80,10 +80,29 @@ constraints → proceed to Phase 2.
 
 ---
 
-## Phase 3 — representation hygiene
+## Phase 3 — representation hygiene  ·  DONE
 
-- date: _TBD_   commit: _TBD_   change: _
-- before / after / delta / gate: _
+- date: 2026-10-02   commit: `b811da6`
+- change: **3a** removed the redundant pre-patch-embed pixel mask (proven
+  behaviour-neutral by the masked-pixel-invariance test — no run needed); **3b**
+  made the objective projector ablable (`loss.projector_type`).
+- **3b projector ablation** — 10k steps, same schedule, Kaggle
+  `…-phase-3-projector` (mlp_bn row = the Phase-2 reference run at the same 10k):
+
+| arm | MAE | AAE | norm-L1 (A) | A / B / C win rate | scalar 1 / 2 known |
+|---|---|---|---|---|---|
+| none | 0.0958 | 57.66 | 0.1653 | 0.965 / 0.908 / 0.828 | 0.469 / 0.545 |
+| linear | 0.0849 | 51.11 | 0.1485 | 0.982 / 0.939 / 0.863 | 0.527 / 0.572 |
+| mlp | 0.0864 | 52.00 | 0.1522 | 0.980 / 0.949 / 0.811 | 0.627 / — |
+| **mlp_bn (shipped)** | **0.0749** | **45.12** | **0.1298** | **0.996** / 0.941 / 0.779 | 0.660 / 0.623 |
+
+- **Decision: keep `mlp_bn`.** The shipped BatchNorm projector wins the decisive
+  metrics (MAE/AAE ≈ −12 % vs linear, −22 % vs none; best Scenario-A gate and scalar
+  dependence). The review's "BatchNorm can hide collapse" concern is **not supported**
+  here — BN is empirically helpful. Nuance: the non-BN arms do better on Scenario C
+  (retrofit 0.863 / 0.811 vs 0.779) — revisit only if C becomes the primary gate.
+- Gate (hard stratum + MAE/AAE): **met** with the incumbent unchanged.
+- Next: Phase 4 (multi-target objective).
 
 ---
 

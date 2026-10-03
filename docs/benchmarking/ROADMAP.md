@@ -20,7 +20,8 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Phase 2 — representation-first training schedule (2a/2b/2c) | **DONE** — gate MET at 10k (Scenario C 0.736→0.779; MAE −5.4 %); see `RESULTS.md` |
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
-| Phases 3–7 below | **TODO** |
+| Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
+| Phases 4–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
 
@@ -83,10 +84,12 @@ at the same 512 test items (NN beats us ~2.4×; pool curve 512→0.0551, 5000→
   0.736 → 0.779 (crosses the 0.75 gate), scalar dependence +4–7 pp. Open follow-up: a
   λ re-sweep to land the gradient share at ~10–25 % — the probe now measures it live.
 
-### Phase 3 — Representation hygiene (issues 2, 8)
-- **3a** remove the redundant pixel mask (`assembly.py:280`); keep token masking.
-- **3b** projector ablation {none, linear, MLP, MLP+BN} on the hard stratum.
-- **Gate:** Scenario-A MAE/AAE + hard-stratum gate.
+### Phase 3 — Representation hygiene (issues 2, 8) · DONE
+- **3a — DONE** (`b811da6`): removed the redundant pre-patch-embed pixel mask; masking
+  is now token-level only. Behaviour-neutral (masked-pixel-invariance test).
+- **3b — DONE** (`b811da6`): projector is ablable (`loss.projector_type`); the
+  ablation keeps **`mlp_bn`** (best MAE/AAE and Scenario-A gate; the non-BN arms win
+  only on Scenario C). See `RESULTS.md`.
 
 ### Phase 4 — Multi-target objective — spectrum + scalar in the target side (issues 4, 11)
 `TARGET_DESIGN.md` is the authority. **4a** spectrum-conditioned geometry target

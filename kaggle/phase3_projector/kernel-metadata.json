@@ -1,0 +1,18 @@
+{
+  "id": "tejaspbiradar/metasurface-jepa-phase-3-projector",
+  "title": "metasurface-jepa Phase-3 projector",
+  "code_file": "ablation.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["metasurface", "jepa", "projector"],
+  "dataset_sources": [
+    "tejaspbiradar/metadit-aaai2026"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

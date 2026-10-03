@@ -618,8 +618,26 @@ def _collapse_metrics(model, occ, sv, spec, mask, scalar_known, device):
     }
 
 
+def _eval_seeds(cfg, eval_seed):
+    """Evaluation-seed-derived stochastic seeds (A1 measurement control).
+
+    The evaluator is NOT parameterized by a shell seed: the 512 validation items are
+    fixed (`MetaDiTDataset(..., seed=42)`) and the masker is seeded once. This helper
+    derives the seeds that actually vary a Scenario draw, so `--eval-seed E` gives an
+    independent evaluation draw while `E=0` reproduces the historical numbers exactly
+    (masker 999; derangements `train.seed + {1,2,3}`).
+
+    Eval seeds vary MASK PLACEMENT and the SHUFFLED control only — never the items,
+    the ratio, the placement mode, or the gate.
+    """
+    base = int(cfg.get("train", {}).get("seed", 42))
+    off = int(eval_seed)
+    return {"masker": 999 + off, "A": base + 1 + off, "B": base + 2 + off,
+            "C": base + 3 + off}
+
+
 def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
-                      scenarios=("A", "B", "C")):
+                      scenarios=("A", "B", "C"), eval_seed=0):
     """Run all scenarios + diagnostics on the real validation split.
 
     Audit B27: `n_samples` sets the evaluation batch for every comparison below —
@@ -642,8 +660,9 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
                            "shuffled-spectrum controls")
 
 
+    seeds = _eval_seeds(cfg, eval_seed)
     masker = BlockMasker(placement="random", grid=16, min_side=3,
-                         k_range=(1, 4), seed=999)
+                         k_range=(1, 4), seed=seeds["masker"])
     results = {}
 
     # Scenario A: pure inverse design (full mask + all scalars unknown)
@@ -657,7 +676,7 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
             model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
         results["scenario_A_rns"] = real_null_shuffled(
             model, surrogate, occ, sv, spec, M_a, device, sk_a,
-            seed=cfg["train"].get("seed", 42) + 1,
+            seed=seeds["A"],
             gate_threshold=_gate_threshold(cfg))
 
     # Scenario B: partial-parameter (50% mask + some scalars known)
@@ -674,7 +693,7 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
             model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
         results["scenario_B_rns"] = real_null_shuffled(
             model, surrogate, occ, sv, spec, M_b, device, sk_b,
-            seed=cfg["train"].get("seed", 42) + 2,
+            seed=seeds["B"],
             gate_threshold=_gate_threshold(cfg))
 
     # Scenario C: retrofit (25% mask + all scalars known)
@@ -686,7 +705,7 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None,
             model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
         results["scenario_C_rns"] = real_null_shuffled(
             model, surrogate, occ, sv, spec, M_c, device, sk_c,
-            seed=cfg["train"].get("seed", 42) + 3,
+            seed=seeds["C"],
             gate_threshold=_gate_threshold(cfg))
 
     # Scalar dependence on a NON-EMPTY known-scalar stratum (Fix 9):
@@ -775,6 +794,10 @@ def main():
                              "Never used for scientific evaluation.")
     parser.add_argument("--out", type=str, default="",
                         help="write the results JSON to this path (review C1)")
+    parser.add_argument("--eval-seed", type=int, default=0,
+                        help="evaluation seed: reseeds the mask draw and the "
+                             "shuffled control (A1). 0 reproduces the historical "
+                             "numbers exactly; items/split/ratio/gate unchanged.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -784,7 +807,7 @@ def main():
                  else (args.scenario,))
     results = run_all_scenarios(cfg, args.checkpoint, args.device,
                                 smoke=args.smoke, n_samples=args.samples,
-                                scenarios=scenarios)
+                                scenarios=scenarios, eval_seed=args.eval_seed)
     text = json.dumps(results, indent=2, default=float)
     print(text)
     if args.out:

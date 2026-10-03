@@ -21,7 +21,8 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
 | Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
-| Phases 4–7 below | **TODO** |
+| Phase 4 — multi-target objective | **ATTEMPTED — FAILED the gate** (L_cond hijacked 91–99 % of the gradient; model collapsed). Diagnosis + fix in `RESULTS.md`; **halted here** |
+| Phases 5–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
 
@@ -91,12 +92,22 @@ at the same 512 test items (NN beats us ~2.4×; pool curve 512→0.0551, 5000→
   ablation keeps **`mlp_bn`** (best MAE/AAE and Scenario-A gate; the non-BN arms win
   only on Scenario C). See `RESULTS.md`.
 
-### Phase 4 — Multi-target objective — spectrum + scalar in the target side (issues 4, 11)
-`TARGET_DESIGN.md` is the authority. **4a** spectrum-conditioned geometry target
-(`z_y_occ_spec`); **4b** scalar-latent target (`z_y_scal`); **keep** the stable
-spectrum-free target and scalar FiLM on the geometry target.
-- **Gate:** scalar-dependence win rate moves off ~0.5 toward 0.94–0.97; hard-stratum
-  guidance gap rises; **no-shortcut probe passes**; MAE/AAE no regress.
+### Phase 4 — Multi-target objective (issues 4, 11) · ATTEMPTED — FAILED
+Implemented (commit `72195e6`): a trainable `SpectrumFilm` (c_physics → per-block
+FiLM), shared by the student occupancy encoder and — via an EMA copy — the
+spectrum-conditioned geometry target `z_y_occ_spec`; the scalar-latent target
+`z_y_scal`; `z_hat_occ_spec` (a `spec_proj` head off the predictor trunk) and
+`z_hat_scal`; losses `L_cond` / `L_scal_t`. The stable spectrum-free target is kept.
+**Deviation from `TARGET_DESIGN.md`:** the spectrum FiLM is shared with the *student*
+encoder (not target-only), because a target-only conditioning module receives no
+gradient and its zero-init keeps the target spectrum-free forever.
+- **Result: FAILED.** `L_cond` took **91–99 % of the gradient budget** (an
+  un-normalized masked MSE through a random head, degenerate with the stable target
+  at init), collapsing the representation and the occupancy decoder; every gate
+  failed. See `RESULTS.md`.
+- **Halted here** (no loosening). Fix path, diagnose first: normalize/ramp `λ_cond`
+  and break the init degeneracy; re-check the gradient-share band before re-examining
+  gates.
 
 ### Phase 5 — Scalar capacity & bounds (issues 3, 9)
 - **5a** bound decoded scalars to verified ranges (config-sourced).

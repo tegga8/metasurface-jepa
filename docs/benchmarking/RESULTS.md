@@ -106,11 +106,36 @@ constraints → proceed to Phase 2.
 
 ---
 
-## Phase 4 — multi-target objective (spectrum + scalar in the target side)
+## Phase 4 — multi-target objective  ·  ATTEMPTED — FAILED (gate not met)
 
-- date: _TBD_   commit: _TBD_   change: _
-- before / after / delta / gate: _
-- shortcut probe (null vs real at fixed occupancy): _TBD_
+- date: 2026-10-02   commit: `72195e6`   Kaggle `…-phase-4-multitarget`
+- change: added the spectrum-conditioned geometry target (`z_y_occ_spec`), the
+  scalar-latent target (`z_y_scal`), their predictions, and the losses
+  `L_cond` / `L_scal_t` (λ = 1 each), keeping the stable spectrum-free target.
+- **Result: the model COLLAPSED.** vs the Phase-2 control (same 10k schedule):
+
+| metric | Phase-2 control | **Phase 4** |
+|---|---|---|
+| MAE (test, n=17,489) | 0.0792 | **0.3214** |
+| normalized-L1 (A) | 0.1378 | **0.5546** |
+| occupancy IoU / F1 (A, masked) | 0.7025 / 0.8244 | **0.020 / 0.039** |
+| pred occupancy fraction | 0.45 | **0.012 (near-empty)** |
+| A / B / C win rate | 0.982 / 0.910 / 0.736 | **0.512 / 0.512 / 0.266 (all FAIL)** |
+| scalar-dep. one / two known | 0.617 / 0.553 | **0.242 / 0.246 (below chance)** |
+| guidance gap (hard) | ~41 | ~208 |
+
+- **Root cause (measured, not guessed):** `L_cond` took **91–99 % of the gradient
+  budget from step 0** (live `[grad-share]`), starving every other term (<2 %).
+  `L_cond` is an **un-normalized masked MSE over 192-D latents through a
+  randomly-initialized `spec_proj` head**, and at step 0 the spectrum FiLM is
+  identity so `z_y_occ_spec == z_y_raw` — i.e. it is a mis-specified regression
+  toward the *stable* target that hijacks training.
+- **Gate: NOT MET** — worse on every axis. **Work is halted here** (no loosening).
+- **Next (diagnose first):** (i) normalize `L_cond` (cosine, or scale-matched to
+  the VICReg terms) and/or λ_cond ≪ 1 with a ramp; (ii) break the init degeneracy —
+  the spec target must differ from the stable target at step 0 (non-identity-init
+  spectrum FiLM, or a detached fixed projection); (iii) one corrective 10k arm,
+  checking the gradient share lands in a sane band **before** re-examining gates.
 
 ---
 

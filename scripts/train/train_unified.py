@@ -409,31 +409,37 @@ class RegimeLogger:
         # the achieved masked fraction per requested bucket so reports never
         # conflate requested with achieved.
         self.mask_achieved = {r: [] for r in self.mask_ratios}
-        self._total = 0
+        self._total = 0          # batches (regime_freq denominator)
+        self._mask_total = 0     # samples (mask_freq denominator; Phase 2b)
 
     def _nearest_ratio(self, ratio):
         return min(self.mask_counts, key=lambda r: abs(float(r) - float(ratio)))
 
-    def record(self, ratio, regime, achieved_masked_fraction=None):
-        # Phase 2b: with per-sample ratios the caller passes the batch MEAN,
-        # which need not equal a configured bucket — snap to the nearest.
-        ratio = ratio if ratio in self.mask_counts else self._nearest_ratio(ratio)
-        self.mask_counts[ratio] += 1
+    def record(self, ratios, regime, achieved_masked_fraction=None):
+        # Phase 2b: `ratios` may be a scalar (legacy) or a per-sample list.
+        # Count each SAMPLE toward its nearest bucket, so mask_freq estimates
+        # the per-sample distribution rather than the batch mean's bucket.
+        ratios = list(ratios) if isinstance(ratios, (list, tuple)) else [ratios]
+        for r in ratios:
+            key = r if r in self.mask_counts else self._nearest_ratio(r)
+            self.mask_counts[key] += 1
+            if achieved_masked_fraction is not None:
+                self.mask_achieved.setdefault(key, []).append(
+                    float(achieved_masked_fraction))
+        self._mask_total += len(ratios)
         self.regime_counts[regime] += 1
-        if achieved_masked_fraction is not None:
-            self.mask_achieved.setdefault(ratio, []).append(
-                float(achieved_masked_fraction))
         self._total += 1
 
     def report(self):
-        n = max(1, self._total)
+        nb = max(1, self._total)          # batches
+        ns = max(1, self._mask_total)     # samples
         achieved = {
             r: (sum(v) / len(v) if v else None)
             for r, v in self.mask_achieved.items()
         }
         return {
-            "mask_freq": {r: c / n for r, c in self.mask_counts.items()},
-            "regime_freq": {r: c / n for r, c in self.regime_counts.items()},
+            "mask_freq": {r: c / ns for r, c in self.mask_counts.items()},
+            "regime_freq": {r: c / nb for r, c in self.regime_counts.items()},
             "mask_fraction_achieved_mean": achieved,
         }
 
@@ -550,7 +556,7 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     loss = result["total_loss"]
 
     regime_logger.record(
-        float(sum(ratios) / len(ratios)), regime,
+        ratios, regime,
         achieved_masked_fraction=float((M < 0.5).float().mean().item()))
 
     return result, M, sk

@@ -177,6 +177,7 @@ def main():
     qs = novelty_quartiles(nn_dist.numpy(), oursA.numpy(), nnA.numpy())
     order = np.argsort(nn_dist.numpy())
     q_dist = [float(nn_dist.numpy()[c].mean()) for c in np.array_split(order, 4)]
+    win = oursA < nnA   # headroom: how often ours beats NN, and by how much
 
     report = {
         "split": args.split, "n": int(n), "pool": int(pool_spec.shape[0]),
@@ -184,7 +185,13 @@ def main():
         "scenario_A_baseline": {
             "ours_MAE": float(oursA.mean()),
             "nn_MAE": float(nnA.mean()),
-            "ours_beats_nn_fraction": float((oursA < nnA).double().mean()),
+            "ours_beats_nn_fraction": float(win.double().mean()),
+            # Headroom for a router/refiner between ours and NN: if ours wins on
+            # only a few items, an oracle pick adds ~nothing -> a refiner must
+            # produce designs strictly better than BOTH, not merely select.
+            "oracle_min_MAE": float(torch.minimum(oursA, nnA).mean()),
+            "mean_margin_when_ours_wins":
+                float((nnA - oursA)[win].mean()) if bool(win.any()) else 0.0,
         },
         "novelty_quartiles_MAE": [
             {"quartile": q, "nn_dist_mean": q_dist[q], "ours": qs[q][0], "nn": qs[q][1]}

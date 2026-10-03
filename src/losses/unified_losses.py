@@ -248,6 +248,18 @@ class UnifiedJEPALoss(nn.Module):
                  + self.lambda_phys * L_phys
                  + self.lambda_summary * L_summary)
 
+        # Per-term WEIGHTED losses, exposed so the trainer can attribute the
+        # gradient budget live (Phase 2a of the roadmap — until now the physics
+        # share was only measured post-hoc). Behaviour-neutral: `total` is
+        # unchanged; these tensors are read only by the gradient-share probe.
+        out["term_losses"] = {
+            "L_inv": L_inv_w, "L_var": L_var_w, "L_cov": L_cov_w,
+            "L_scalar": self.lambda_scalar * L_scalar,
+            "L_occ": self.lambda_occ * L_occ,
+            "L_phys": self.lambda_phys * L_phys,
+            "L_summary": self.lambda_summary * L_summary,
+        }
+
         out["loss_components"] = {
             "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
             "L_cov": float(L_cov.detach()),
@@ -265,6 +277,7 @@ class UnifiedJEPALoss(nn.Module):
         return {
             "total_loss": total,
             "components": out["loss_components"],
+            "term_losses": out["term_losses"],
             "out": out,
             "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
             "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full},

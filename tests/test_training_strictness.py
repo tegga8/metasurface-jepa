@@ -596,7 +596,7 @@ def test_optimizer_gradients_reset_each_step():
     src = inspect.getsource(train)
     loop_body = src[src.index("for step in range"):]
     zero_grad_pos = loop_body.index("optimizer.zero_grad(set_to_none=True)")
-    microbatch_pos = loop_body.index("for _ in range(grad_accum):")
+    microbatch_pos = loop_body.index("range(grad_accum):")
     assert zero_grad_pos < microbatch_pos, (
         "train() must zero_grad BEFORE the grad_accum microbatch loop")
 

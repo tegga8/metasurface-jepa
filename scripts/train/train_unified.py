@@ -499,6 +499,41 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     return result, M, sk
 
 
+def per_term_grad_share(result, model, objective, eps=1e-12):
+    """Per-term share of the gradient budget on the CURRENT graph (Phase 2a).
+
+    Differentiates each WEIGHTED term alone over the trainable student +
+    objective parameters (the `protocol_v1/step3_4` approach, now live during
+    training instead of post-hoc) and returns the L2-norm share per term.
+
+    This is a PROBE, not a training step — it never updates weights, and it
+    leaves every parameter's `.grad` cleared, so it is safe to call immediately
+    before the real `loss.backward()` (the graph is traversed with
+    `retain_graph=True`).
+    """
+    params = [p for p in model.parameters() if p.requires_grad] + \
+             [p for p in objective.parameters() if p.requires_grad]
+    terms = result.get("term_losses") or {}
+    norms = {}
+    for name, t in terms.items():
+        for p in params:
+            p.grad = None
+        if t.requires_grad:
+            t.backward(retain_graph=True)
+        sq = 0.0
+        for p in params:
+            if p.grad is not None:
+                g = p.grad.detach()
+                sq += float((g * g).sum().item())
+        norms[name] = sq ** 0.5
+    for p in params:
+        p.grad = None
+    total = sum(norms.values())
+    if total <= eps:
+        return {k: 0.0 for k in norms}
+    return {k: v / total for k, v in norms.items()}
+
+
 def _config_differences(saved, live, prefix=""):
     """Key paths where a checkpoint's recorded config differs from the live one.
 
@@ -1000,6 +1035,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     batch_size = train_cfg.get("batch_size", 2)
     grad_accum = train_cfg.get("grad_accum", 1)
     log_every = train_cfg.get("log_every_steps", 10)
+    grad_share_every = train_cfg.get("log_grad_share_every_steps", 0)
     val_every = train_cfg.get("val_every_steps", 50)
     ckpt_every = train_cfg.get("ckpt_every_steps", 100)
     clip_norm = train_cfg.get("clip_grad_norm", 1.0)
@@ -1021,7 +1057,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         optimizer.zero_grad(set_to_none=True)
 
         micro_losses = []
-        for _ in range(grad_accum):
+        want_share = (grad_share_every > 0 and step % grad_share_every == 0)
+        for micro in range(grad_accum):
             # Get batch (auto-reset on exhaustion)
             try:
                 if use_synthetic or not isinstance(train_data, DataLoader):
@@ -1047,6 +1084,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 masker, rng, regime_logger, surrogate=surrogate,
                 scalar_masker_bank=scalar_masker_bank)
             loss = result["total_loss"]
+            if want_share and micro == 0:
+                shares = per_term_grad_share(result, model, objective)
+                print(f"  [grad-share] step {step}: {json.dumps(shares)}")
             (loss / grad_accum).backward()
             micro_losses.append(float(loss.detach()))
 

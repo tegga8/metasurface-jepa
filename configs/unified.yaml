@@ -163,6 +163,10 @@ train:
   total_steps: 1500
   val_every_steps: 50
   log_every_steps: 10
+  # Phase 2a: every N optimizer steps, log the per-term gradient-budget share
+  # (a probe — see per_term_grad_share; behaviour-neutral). 0 = off; set e.g. 500
+  # on a physics run to watch the physics share live instead of post-hoc.
+  log_grad_share_every_steps: 0
   ckpt_every_steps: 100
   clip_grad_norm: 1.0
   seed: 42

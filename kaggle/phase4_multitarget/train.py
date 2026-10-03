@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 REPO_URL = "https://github.com/tegga8/metasurface-jepa.git"
-REPO_REF = "72195e6bf53d823309b76fbd7b7cc5d66d13ddee"   # Phase 4
+REPO_REF = "904856e3c950165ae8ed8550cb83006e52cc160c"   # Phase 4 (fixed)
 REPO = Path("/kaggle/working/repo")
 OUT = Path("/kaggle/working/phase4")
 CFG = "configs/unified.yaml"

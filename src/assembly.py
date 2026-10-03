@@ -26,7 +26,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from data.mask import apply_mask_to_pixels
 from encoders.occupancy_encoder import OccupancyEncoder
 from encoders.scalar_encoder import ScalarEncoder
 from fusion.fusion_encoder import FusionEncoder
@@ -276,10 +275,14 @@ class UnifiedJEPA(nn.Module):
         # 2. Scalar encoder (live) → FiLM params + scalar summary token
         film_params, scalar_summary = self.scalar_encoder(scalar_mlp_input)
 
-        # 3. Occupancy encoder (student) with mask replacement + FiLM
-        masked_occ = apply_mask_to_pixels(occupancy, mask)
+        # 3. Occupancy encoder (student) with TOKEN-level mask replacement + FiLM.
+        # Phase 3a: the raw pixel mask (apply_mask_to_pixels) was REMOVED — it was
+        # redundant. patch_embed is a non-overlapping stride-4 conv, so zeroing a
+        # 4x4 pixel block changes only that block's token, which the encoder then
+        # overwrites with `mask_token`; the masked pixel values never reached the
+        # output. Masking is now purely token-level (the I-JEPA convention).
         z_x = self.occupancy_encoder(
-            masked_occ, film_params=film_params,
+            occupancy, film_params=film_params,
             mask=mask, mask_token=self.mask_token,
         )  # (B, 256, hidden)
 

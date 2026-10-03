@@ -72,6 +72,10 @@ loss:
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
   scalar_loss_type: l1  # "l1" (default) or "huber" — wired (audit B17)
+  # Phase 3b projector ablation: none | linear | mlp | mlp_bn (default shipped).
+  # MLP+BN is the incumbent; the ablation tests whether the BatchNorm helps or
+  # hurts on the hard stratum.
+  projector_type: mlp_bn
 
 # Mask curriculum (Phase 3 MD §4)
 curriculum:

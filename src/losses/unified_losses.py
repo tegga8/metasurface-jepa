@@ -27,7 +27,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from losses.vicreg import VICRegProjector, vicreg_branch_terms
+from losses.vicreg import VICRegProjector, build_projector, vicreg_branch_terms
 
 
 class ScalarPredictionLoss(nn.Module):
@@ -120,11 +120,12 @@ class UnifiedJEPALoss(nn.Module):
                  lambda_cov=1.0, lambda_scalar=1.0, lambda_phys=0.0,
                  lambda_occ=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
-                 surrogate=None, physics_use_ste=True, lambda_summary=0.0):
+                 surrogate=None, physics_use_ste=True, lambda_summary=0.0,
+                 projector_type="mlp_bn"):
         super().__init__()
-        self.projector = VICRegProjector(
-            input_dim=hidden, hidden_dim=hidden, output_dim=hidden,
-        )
+        # Phase 3b: objective-owned projector, ablable via loss.projector_type
+        # (none | linear | mlp | mlp_bn). Spec §17: there is no model.proj.
+        self.projector = build_projector(projector_type, hidden)
         self.lambda_inv = lambda_inv
         self.lambda_var = lambda_var
         self.lambda_cov = lambda_cov

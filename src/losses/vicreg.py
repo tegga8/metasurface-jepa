@@ -154,3 +154,53 @@ class VICRegProjector(_MLPProjector):
     """Learned projection head owned by the unified JEPA objective
     (`losses/unified_losses.py`; spec §17: objective-owned — there is no
     `model.proj`)."""
+
+
+class LinearProjector(nn.Module):
+    """Phase 3b: a single linear projection (no BatchNorm, no hidden layer)."""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Linear(dim, dim)
+
+    def forward(self, z):
+        s = z.shape
+        return self.net(z.reshape(-1, s[-1])).reshape(*s[:-1], -1)
+
+
+class MLPProjector(nn.Module):
+    """Phase 3b: the shipped MLP shape but WITHOUT BatchNorm.
+
+    BatchNorm in a JEPA projector normalizes over the batch and carries running
+    statistics, which can leak batch structure and mask collapse; this arm tests
+    whether it helps or hurts on the hard stratum.
+    """
+
+    def __init__(self, dim, hidden_dim=None):
+        super().__init__()
+        h = hidden_dim or dim
+        self.net = nn.Sequential(
+            nn.Linear(dim, h, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Linear(h, h, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Linear(h, dim, bias=False),
+        )
+
+    def forward(self, z):
+        s = z.shape
+        return self.net(z.reshape(-1, s[-1])).reshape(*s[:-1], -1)
+
+
+def build_projector(kind, dim):
+    """Phase 3b ablation factory: 'none' | 'linear' | 'mlp' | 'mlp_bn'."""
+    if kind == "none":
+        return nn.Identity()
+    if kind == "linear":
+        return LinearProjector(dim)
+    if kind == "mlp":
+        return MLPProjector(dim)
+    if kind == "mlp_bn":
+        return VICRegProjector(input_dim=dim, hidden_dim=dim, output_dim=dim)
+    raise ValueError(
+        f"unknown projector_type {kind!r}; expected none|linear|mlp|mlp_bn")

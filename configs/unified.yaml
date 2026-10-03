@@ -24,6 +24,10 @@ num_predictor_heads: 6
 scalar_hidden: 128
 n_film_blocks: 6
 spec_dim: 256
+# Step 2 scalar-predictor FiLM: route the LEARNED scalar representation (the
+# scalar-summary token) into the GCLCT predictor via an extra zero-init modulation.
+# false (default) => exactly the current architecture (no extra params).
+scalar_predictor_film: false
 ema_momentum_start: 0.996
 ema_momentum_end: 0.999
 

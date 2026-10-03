@@ -180,12 +180,16 @@ class UnifiedJEPA(nn.Module):
     def __init__(self, hidden=192, num_heads=6, geo_depth=6, predictor_depth=8,
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
                  n_film_blocks=6, spec_dim=256,
-                 momentum_start=0.996, momentum_end=0.999):
+                 momentum_start=0.996, momentum_end=0.999,
+                 scalar_predictor_film=False):
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
         self.goal_tokens = goal_tokens
         self.architecture_id = UNIFIED_ARCHITECTURE_ID
+        # Step 2: route the LEARNED scalar representation into an explicit predict-
+        # or FiLM. Off (default) ⇒ exactly the current architecture.
+        self.scalar_predictor_film = bool(scalar_predictor_film)
 
         # Audit B18: the scalar encoder's FiLM heads must match the occupancy
         # encoder's block count — a mismatch otherwise surfaces as an opaque
@@ -224,7 +228,7 @@ class UnifiedJEPA(nn.Module):
         # Predictor — accepts 384-D c_physics, projects to 192 internally
         self.predictor = GCLCT(
             depth=predictor_depth, hidden=hidden, num_heads=num_predictor_heads,
-            c_physics_dim=384,
+            c_physics_dim=384, scalar_film=scalar_predictor_film,
         )
 
         # Scalar decode heads
@@ -358,8 +362,13 @@ class UnifiedJEPA(nn.Module):
         # 7. Predictor (c_physics 384→192 via c_phys_proj; audit B16: need_attn
         #    returns the per-block cross-attention weights instead of being
         #    silently ignored)
+        # Step 2: the LEARNED scalar representation (summary token) conditions the
+        # predictor via FiLM when enabled — not raw (l,h,r) values.
+        scalar_cond = (scalar_summary.reshape(scalar_summary.shape[0], -1)
+                       if self.scalar_predictor_film else None)
         z_hat_raw, attn_weights = self.predictor(
-            queries, fused, c_physics, need_weights=need_attn)  # (B, 257, hidden)
+            queries, fused, c_physics, need_weights=need_attn,
+            scalar_cond=scalar_cond)  # (B, 257, hidden)
 
         # 8. Split predictions
         occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
@@ -598,6 +607,7 @@ def build_unified_model(cfg, spec_weights, device="cpu",
         scalar_hidden=cfg.get("scalar_hidden", 128),
         n_film_blocks=cfg.get("n_film_blocks", 6),
         spec_dim=cfg.get("spec_dim", 256),
+        scalar_predictor_film=cfg.get("scalar_predictor_film", False),
     )
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),

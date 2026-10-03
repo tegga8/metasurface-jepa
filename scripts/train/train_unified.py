@@ -65,6 +65,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "goal_tokens", "num_predictor_heads", "scalar_hidden", "n_film_blocks",
     "spec_dim", "ema_momentum_start", "ema_momentum_end", "loss", "curriculum",
     "staging", "weights", "data", "eval", "train", "_architecture_id",
+    "scalar_predictor_film",
 })
 
 

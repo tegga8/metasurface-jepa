@@ -1,126 +1,117 @@
 # Unified JEPA — architecture roadmap (measure-first)
 
-Sequenced plan for the 192-D unified JEPA, revised this cycle. **No architecture
-change lands until the current architecture has been measured and recorded.** Every
-phase follows the standard protocol below; each change is one commit with a
-regression test (`AGENTS.md` rule 1). Heavy training runs happen on Kaggle/Colab
-per `CLOUD_TRAINING.md` — the local machine is dev-only.
+Sequenced plan for the 192-D unified JEPA. **No architecture change lands until the
+current architecture is measured and recorded.** Every phase follows the standard
+protocol; each change is one commit with a regression test (`AGENTS.md` rule 1).
+Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is dev-only.
 
-**Decisions locked this cycle**
-- **Multi-target objective** — add target-side conditioning so the spectrum and
-  scalars are *required*, not merely rewarded (see `TARGET_DESIGN.md`).
-- **Include the spectrum in the target side** — via a *spectrum-conditioned geometry
-  target* (the naive "predict the input spectrum's latent" target is shortcut-able;
-  see `TARGET_DESIGN.md` §2).
-- **Keep scalar FiLM on the geometry target.**
+**Decisions locked**
+- Multi-target objective (`TARGET_DESIGN.md`); include the spectrum in the target side
+  via a *spectrum-conditioned geometry target*; keep scalar FiLM on the geometry target.
+- **Removed:** I-JEPA-compliance doc; geometry-only target (superseded by multi-target).
 
-**Removed (was in the previous draft)**
-- ~~Phase 2c — I-JEPA compliance / alignment doc~~ (dropped).
-- ~~Phase 3c — geometry-only JEPA target~~ (dropped; superseded by the multi-target
-  design, which keeps the stable spectrum-free target *and* adds conditioned targets).
+## Status board
 
----
+| item | status |
+|---|---|
+| Phase 0 — benchmarking harness | **DONE** |
+| Phase 1 — current-architecture baseline (Kaggle) | **DONE**, but the NN/AVG1 rows must be **regenerated** (pre-fix driver) |
+| Review P0 hygiene (A1, B1, A2, A4, A5, B2, C1, C2, C6, C3, A3, A6) | **DONE** (suite: 328 passed / 0 failed) |
+| Branch merge (review C4) | **PENDING** — door-(b)/preflight line is not in this clone; C5 + B2-local fixed at merge |
+| Phases 2–7 below | **TODO** |
 
-## Standard phase protocol (applies to EVERY phase below)
+## Standard phase protocol (every phase)
 
-1. **Baseline** — record the current numbers *before* touching code: benchmark
-   table + A/B/C gates + guidance gap + masked-fill + full test suite.
-2. **Change** — one behaviour change + a regression test that **fails before** and
-   **passes after** (`AGENTS.md` rule 1).
-3. **Measure** — re-run the **same** battery, same split / config / seed.
+1. **Baseline** — record current numbers before touching code.
+2. **Change** — one behaviour change + a regression test that fails before / passes after.
+3. **Measure** — same battery, same split / config / seed.
 4. **Record** — append before/after + delta to `RESULTS.md`.
-5. **Gate** — proceed only if the phase gate is met (or no regression). Otherwise
-   **STOP and report** — do not loosen a gate to pass it (`AGENTS.md` §"If
-   something fails").
+5. **Gate** — proceed only if the gate is met (or no regression); else **STOP and report**.
 
-**Canonical battery** (run at every step 1 and step 3):
+**Canonical battery** (run at step 1 and step 3):
 ```
-python -m pytest tests/ -q --tb=line                                  # tests green
+python -m pytest tests/ -q --tb=line
 python scripts/benchmark/benchmark_metadit.py --config configs/unified.yaml \
     --checkpoint checkpoints/unified/latest.pt --split test --scenario A \
-    --samples 0 --candidates 4                                        # MAE/AAE/AAE&K
+    --samples 0 --candidates 4 --nn-samples 512 --nn-pools 512,5000,20000 \
+    --out checkpoints/benchmark/scenarioA.json
 python scripts/eval/eval_scenarios.py --config configs/unified.yaml \
-    --checkpoint checkpoints/unified/latest.pt --scenario all         # A/B/C + gates
+    --checkpoint checkpoints/unified/latest.pt --scenario all --samples 512 \
+    --out checkpoints/benchmark/eval_scenarios.json
 python scripts/diagnostics/masked_fill_check.py --config configs/unified.yaml \
-    --checkpoint checkpoints/unified/latest.pt                        # seam/texture/locality
+    --checkpoint checkpoints/unified/latest.pt --samples 32 \
+    --out checkpoints/benchmark/masked_fill.json
+python scripts/diagnostics/run_guidance_gap_sweep.py --config configs/unified.yaml \
+    --checkpoint checkpoints/unified/latest.pt
 ```
-Reported **separately, never pooled** (easy / hard strata; scenarios A / B / C).
+Reported **separately, never pooled** (easy/hard strata; scenarios A/B/C). Every row
+carries its **n** and provenance. Co-primary with MAE/AAE: occupancy IoU/F1, seam/
+locality, gate win rates — metrics that are **not** the training objective (review A6).
 
 ---
 
-## Phase 0 — Benchmarking harness  ·  status: implemented, run pending
-MetaDiT-comparable MAE/AAE/AAE&K + secondary suite + masked-fill diagnostic.
-Files: `docs/benchmarking/` (this folder), `scripts/benchmark/`,
-`scripts/diagnostics/masked_fill_check.py`, `tests/test_benchmark_metadit_metrics.py`,
-`tests/test_masked_fill_check.py` (all tests pass locally; cloud run pending).
+## Next steps (in order)
 
-## Phase 1 — Current-architecture baseline  ·  **the gate to everything else**
-Goal: answer *"is the current architecture working well?"* with recorded numbers,
-before changing anything. No code change.
+### Step 0 — Merge the two lines (review C4) · small
+Pull the door-(b)/preflight line into `work-192d`; at the merge fix **C5** (the
+`scalar_predictor_film` construction vs its comment) and **B2-local** (the
+`checks[...]`-before-`checks` `NameError` plus the missing empty-sample guard). Re-run
+`--preflight` and the full suite on the merged branch. Everything below assumes one branch.
 
-- Run the canonical battery on the **real checkpoint** (Kaggle; `checkpoints/unified/latest.pt`).
-- Record in `BASELINE.md` (protocol + results table) and open `RESULTS.md`.
-- Known expectations from `checkpoints/unified/REPORT.md` to confirm/replace:
-  A/B/C gates pass; **scalar-dependence gates FAIL (~0.50)**; physics ≈ **66 %** of
-  the gradient budget; guidance gap small; masked-fill seam/locality **unmeasured**.
-- **Gate to proceed:** baseline recorded, and the failing aspects explicitly listed.
-  Every later phase is judged against these numbers.
+### Step 1 — Regenerate the Phase-1 baseline block · cheap cloud run
+Re-run the canonical battery with the **fixed** driver (review A2/A4/A5) and overwrite
+the `RESULTS.md` baseline NN/AVG1 rows, adding the NN pool curve. MAE/AAE/AAE&K and the
+A/B/C gates are unchanged by these fixes. Record in `RESULTS.md`.
 
-## Phase 2 — Representation-first training schedule (issues 5, 6, 7)
-Let the representation form before physics is heavy.
-- **2a — instrument (no behaviour change).** Log per-term gradient share live during
-  training (today the 66 % is post-hoc only). Pattern: `protocol_v1/step3_4_...:175-184`.
-- **2b — mask-ratio curriculum.** Draw the ratio **per sample** (not per batch);
-  config-driven ramp (start low, raise total-masking probability over training);
+### Phase 2 — Representation-first training schedule (issues 5, 6, 7)
+- **2a instrument** (no behaviour change): log per-term gradient share live
+  (`scripts/diagnostics/protocol_v1/step3_4_...:175-184`).
+- **2b mask-ratio curriculum**: draw the ratio **per sample**; config-driven ramp;
   raise P(ratio=1.0) above 0.15. Config: `curriculum.mask_schedule`.
-- **2c — physics ramp.** `staging.lambda_phys_start_step` + longer ramp; re-run the
-  λ sweep (`REPORT.md` §11) targeting a **deliberate** share (~10–25 %).
-- **Gate:** Scenario-A MAE/AAE holds or improves; hard-stratum gate holds; logged
-  gradient share in the target band.
+- **2c physics ramp**: `staging.lambda_phys_start_step` + longer ramp; re-sweep λ
+  targeting ~10–25 % gradient share (not 66 %).
+- **Gate:** Scenario-A MAE/AAE holds/improves; hard-stratum gate holds; share in band.
 
-## Phase 3 — Representation hygiene (issues 2, 8)
-- **3a — remove the redundant pixel mask.** `src/assembly.py:280` masks raw pixels
-  before patch-embed *and* `occupancy_encoder.py:81-83` replaces masked tokens with
-  a learned `mask_token`. Keep the token-level path; drop `apply_mask_to_pixels` on
-  the student forward (predictor-query construction untouched).
-- **3b — projector ablation (issue 8).** Latent loss is on `P(ẑ) vs P(z_y)` with a
-  **BatchNorm** MLP projector (`src/losses/vicreg.py:153`). Ablate
-  {none, linear, MLP, MLP+BN} on the hard-stratum gate; cross-check `validate()`'s
-  raw-space `raw_mse / raw_cos_err`.
+### Phase 3 — Representation hygiene (issues 2, 8)
+- **3a** remove the redundant pixel mask (`assembly.py:280`); keep token masking.
+- **3b** projector ablation {none, linear, MLP, MLP+BN} on the hard stratum.
 - **Gate:** Scenario-A MAE/AAE + hard-stratum gate.
 
-## Phase 4 — Multi-target objective: spectrum + scalar in the target side (issues 4, 11)
-Full design: **`TARGET_DESIGN.md`** (authority).
-- **4a — spectrum-conditioned geometry target** (`z_y_occ_spec`): EMA occupancy
-  encoder conditioned on the TRUE spectrum. Non-shortcut-able, and the only way to
-  match it is to use the goal spectrum.
-- **4b — scalar-latent target** (`z_y_scal`): EMA scalar encoder summary of the true
-  scalars — door (b) after the door-(a) readout (`lambda_summary`).
-- **Keep** the stable, spectrum-free geometry target (`z_y_occ_stable`) for the
-  unentangled real/null/shuffled control; **keep** scalar FiLM on the geometry target.
+### Phase 4 — Multi-target objective — spectrum + scalar in the target side (issues 4, 11)
+`TARGET_DESIGN.md` is the authority. **4a** spectrum-conditioned geometry target
+(`z_y_occ_spec`); **4b** scalar-latent target (`z_y_scal`); **keep** the stable
+spectrum-free target and scalar FiLM on the geometry target.
 - **Gate:** scalar-dependence win rate moves off ~0.5 toward 0.94–0.97; hard-stratum
-  guidance gap rises; **target-dependence (no-shortcut) probe passes**; MAE/AAE no regress.
+  guidance gap rises; **no-shortcut probe passes**; MAE/AAE no regress.
 
-## Phase 5 — Scalar capacity & bounds (issues 3, 9)
-- **5a — bound decoded scalars.** `ScalarDecoder` emits raw unbounded values
-  (`scalar_decoder.py:31-54`); parameterise into verified ranges
-  (l∈[2.5,3.0], h∈[0.5,1.0], r∈[3.5,5.0]; `datapipe.py:60-64`), config-sourced,
-  applied on the decode→assembly path; keep raw values in the loss.
-- **5b — scalar tokens & routing (issue 9).** L_scalar gives **0.0036** gradient to
-  the scalar encoder vs **0.6932** to the decoder (`REPORT.md` §17/§19/§21). Increase
-  scalar **tokens** (per-parameter + summary) and route them through the predictor.
+### Phase 5 — Scalar capacity & bounds (issues 3, 9)
+- **5a** bound decoded scalars to verified ranges (config-sourced).
+- **5b** more scalar tokens + predictor routing (L_scalar gives the encoder 0.0036 vs
+  the decoder 0.6932 — `REPORT.md` §17/§19/§21).
 - **Gate:** scalar-dependence gates; MAE/AAE no regress.
 
-## Phase 6 — Encoder sizing (issue 1)
-- Per-module param/FLOP audit (now 18.9M total / 11.37M trainable; geo depth 6,
-  predictor depth 8, hidden 192 — `ARCHITECTURE_AUDIT_192D.md` §1.1), then a
-  width×depth grid scored on the benchmark + hard stratum. Decide from **measured
-  deltas**, not intuition (`AGENTS.md` rule 2).
+### Phase 6 — Encoder sizing (issue 1)
+Per-module param/FLOP audit + width×depth grid scored on the benchmark and the hard
+stratum; decide from **measured deltas** (`AGENTS.md` rule 2).
+
+### Phase 7 — Evidence & publication-readiness (review P1) · the "is it real?" phase
+- **7a — ≥3 seeds** (cheap at the 10k-step λ-sweep scale) → median/IQR + bootstrap CI;
+  the headline becomes a **paired statement** (win rate + median), not a mean (B3).
+- **7b — ≥2 epochs** with the canonical battery recorded per checkpoint — answers the
+  1-epoch-vs-500 budget question (B5); either the gap holds or it closes.
+- **7c — full-wave / second-surrogate validation** on ~32 stratified designs incl. tail
+  cases (B4), plus an OOD guard for the catastrophic tail.
+- **7d — circularity**: promote a **non-objective** metric (IoU/F1, seam, win rate) to
+  co-primary and state the "physics loss optimises the scorer" asymmetry in the text (A6).
+- **7e — diversity curve**: run the σ/CFG grid [0, 0.01, 0.05, 0.10] so the deterministic
+  vs one-to-many trade-off is shown, not asserted. Guidance-gap stays a diagnostic.
+- **Gate:** beat NN retrieval on the hard stratum; scalar gates pass; results stable
+  across seeds/epochs; at least one non-surrogate check agrees.
 
 ---
 
 ## Phase→verification contract
 - Each fix: regression test that fails before and passes after.
-- End of each phase: full suite green **and** the canonical battery re-run, recorded
-  in `RESULTS.md`, easy/hard separate, never pooled.
+- End of each phase: full suite green **and** the canonical battery re-run, recorded in
+  `RESULTS.md`, easy/hard separate, never pooled, with n and provenance on every row.
 - Data-dependent tests skip loudly with a reason, never pass silently.

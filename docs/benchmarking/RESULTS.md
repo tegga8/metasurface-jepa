@@ -218,6 +218,33 @@ constraints → proceed to Phase 2.
 - **Next:** the mechanism works. λ can be nudged for a stronger scalar effect, but the
   dominant open item remains the NN-retrieval gap.
 
+### NN-scoping probe — framing decision
+
+- Local, no training: `scripts/diagnostics/nn_scoping.py`, Phase-4 std-0.1 checkpoint,
+  n=512 test items, train pool 20k, frozen surrogate, MAE units.
+
+| regime | ours | NN | verdict |
+|---|---|---|---|
+| Scenario A (full S→G), overall | 0.0733 | 0.0303 | **NN wins** (ours beats on 2.9 %) |
+| A, novelty q0 (closest, dist 0.0059) | 0.0318 | 0.0061 | NN 5.2× |
+| A, q1 (0.0173) | 0.0497 | 0.0170 | NN 2.9× |
+| A, q2 (0.0339) | 0.0819 | 0.0335 | NN 2.4× |
+| A, q3 (furthest, dist 0.0657) | 0.1297 | 0.0646 | **NN 2.0×** |
+| Scenario C (retrofit, 25 % mask) | 0.0741 | 0.0751 | **tie** (ours beats on 52 %) |
+
+- **Verdict: "beat NN" is the required path; "scope beyond NN" is NOT supported.** NN
+  wins in **every** novelty quartile — its edge shrinks monotonically (5.2× → 2.0×) as
+  novelty rises but **never flips** — and the partial-observation regime (C) is a
+  **tie**, not a win.
+- **Structural finding:** NN's scored error ≈ its retrieval distance (q3: NN 0.0646 ≈
+  dist 0.0657), i.e. the dataset is dense (median retrieval distance 0.0247) and the
+  surrogate is near-exact — so "retrieve the spectrum-nearest training design" is a very
+  strong baseline, and our model loses ground as novelty rises *faster* than NN does.
+- **Decision:** treat retrieval as **the bar to beat**; Phases 5–7 become
+  retrieval-competitive. Two mildly encouraging data points: the gap narrows with
+  novelty, and C (design mostly given) is already a tie — i.e. the model is competitive
+  in partial-observation regimes, just not better.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

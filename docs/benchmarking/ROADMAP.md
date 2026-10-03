@@ -22,7 +22,7 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
 | Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
 | Phase 4 — multi-target objective | **PASS (partial on scalar)** — first attempt collapsed (`L_cond` 91–99 %); fix (`904856e`) stopped it but left terms inert; **target-separation probe** then showed the conditioning carried almost no spectrum signal (~0.037 cross-spectrum), so the frozen film init was raised 0.02→0.1 (`979f088`) → **MAE 0.0725 (best 10k), guidance gap rose 41→52, A/B/C 0.994/0.947/0.779**. Scalar 0.650/0.596 (improved, < target). See `RESULTS.md` |
-| Phases 5–7 below | **TODO** |
+| Phases 5–7 below | **TODO** — reframed by the NN-scoping probe: **beat NN is the bar** (NN wins all novelty quartiles; Scenario C is a tie). Phase 5–7 become retrieval-competitive |
 
 ## Standard phase protocol (every phase)
 

@@ -296,6 +296,44 @@ constraints → proceed to Phase 2.
   *established* below 0.75). The crossed variance design (3 ckpts × 3 eval seeds) is
   available but would formalise a conclusion the two stds already give.
 
+### Scenario C — crossed seed study (3 training checkpoints × 3 eval seeds)
+
+- Measurement-only (no training). Checkpoints = the 3 CI checkpoints
+  (`ms/seed{0,1,2}.pt`, kernel `metasurface-jepa-multiseed-ci`); eval seeds {3,4,5}
+  via the A1 control. Kaggle `metasurface-jepa-ms-crossed`, commit `3a69527`.
+  Protocol unchanged (val split, n=512, ratio 0.25, random placement, all scalars
+  known, frozen model+surrogate).
+- **All 9 raw gates** (`scenario_C_rns.gap.real_beats_shuffled_fraction`):
+
+| ckpt (train seed) | e3 | e4 | e5 | mean ± std (3 eval seeds) |
+|---|---|---|---|---|
+| seed0 | 0.75195 | 0.74414 | 0.74805 | **0.7480 ± 0.0039** |
+| seed1 | 0.77930 | 0.79102 | 0.78125 | **0.7839 ± 0.0063** |
+| seed2 | 0.75781 | 0.73633 | 0.77734 | **0.7572 ± 0.0205** |
+
+- **Overall (replication unit = checkpoint, n=3 training seeds): 0.7630 ± 0.0186;
+  95 % Student-t CI (df=2) = [0.7168, 0.8093] → straddles 0.75 → UNRESOLVED (Case 3).**
+- Averaging 3 eval seeds per checkpoint **reduced** the training-seed std (0.0186 vs
+  the 0.037 from single-eval-seed per-checkpoint values) — part of what looked like
+  training-seed variance at one eval seed was evaluation noise — but the CI still
+  straddles.
+- **A5 carried through** (per checkpoint, pooled over its 3 eval seeds; 1,536 samples):
+  real median ≈ 0.085–0.090 / mean ≈ 0.115–0.122; shuffled median ≈ 0.165–0.170 /
+  mean ≈ 0.227–0.235; failing fraction 0.748 / 0.784 / 0.757; `fail_diff_mean`
+  ≈ −0.048…−0.051, `win_diff_mean` ≈ +0.154…+0.167; masked IoU ≈ 0.740–0.752;
+  occupancy fraction ≈ 0.443–0.449 (no collapse).
+- **Sample-aligned failure consistency** (512 fixed items; per-item mean paired diff
+  across the 3 eval seeds, counted across checkpoints): fail in **0 / 1 / 2 / 3**
+  checkpoints = **427 / 51 / 16 / 18** items; failing in ≥1 = 0.166, ≥2 = 0.066,
+  **all 3 = 0.035**. → the failure population is **mostly checkpoint-specific**: only
+  **3.5 %** of items fail for all three checkpoints, so the ~16.6 % that fail at all
+  are largely **training-seed-specific failure allocation**, not a common structural
+  set (a small ~3.5 % structural core fails everywhere).
+- **Decision:** Case 3 — **unresolved even after explicitly measuring both training-seed
+  and evaluation-seed variance** → the 0.75 gate sits at the model's performance
+  boundary. Per the plan: do not add seeds; do not call C a pass/fail from any single
+  checkpoint. No targeted C mechanism is justified by this evidence alone.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

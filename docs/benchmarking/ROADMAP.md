@@ -24,6 +24,14 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Phase 4 — multi-target objective | **UNESTABLISHED under CIs** — the single-seed wins (MAE 0.0749/0.0725) did not survive 3 seeds; Scenario C's "pass" was single-seed |
 | Phases 5–7 below | **TODO** — reframed by the NN-scoping probe: **beat NN is the bar** (NN wins all novelty quartiles; Scenario C is a tie). Phase 5–7 become retrieval-competitive |
 
+## Scenario C — crossed seed study (3 training ckpts × 3 eval seeds): UNRESOLVED
+- Checkpoint means (3 eval seeds each): seed0 0.7480±0.0039, seed1 0.7839±0.0063,
+  seed2 0.7572±0.0205. **Overall (replication unit = checkpoint): 0.7630 ± 0.0186
+  (3 training seeds); 95 % t-CI [0.7168, 0.8093] → straddles 0.75.**
+- Failure population mostly checkpoint-specific: only 3.5 % of items fail for all 3
+  checkpoints → the ~16.6 % failing at all is largely training-seed-specific, not a
+  common structural set. See `RESULTS.md`.
+
 ## Multi-seed CI (3 × 10k) — the phase gains did NOT survive
 - MAE **0.0816 ± 0.0025** (seeds 0.0800/0.0803/0.0845) — the single-seed Phase-2 (0.0749)
   and Phase-4 (0.0725) runs were **lucky draws**; the honest 10k MAE is at the control's

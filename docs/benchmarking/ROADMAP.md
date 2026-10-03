@@ -17,10 +17,10 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Phase 0 — benchmarking harness | **DONE** |
 | Phase 1 — current-architecture baseline (Kaggle) | **DONE**, but the NN/AVG1 rows must be **regenerated** (pre-fix driver) |
 | Review P0 hygiene (A1, B1, A2, A4, A5, B2, C1, C2, C6, C3, A3, A6) | **DONE** (suite: 330 passed / 0 failed) |
-| Phase 2a — live per-term gradient-share probe | **DONE** (`3064c70`) |
+| Phase 2 — representation-first training schedule (2a/2b/2c) | **DONE** — gate MET at 10k (Scenario C 0.736→0.779; MAE −5.4 %); see `RESULTS.md` |
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
-| Step 1 baseline regeneration | **QUEUED** for the next cloud session |
-| Phases 2b–7 below | **TODO** |
+| Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
+| Phases 3–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
 
@@ -66,23 +66,22 @@ operator, fix **C5** (the `scalar_predictor_film` construction vs its comment) a
 **B2-local** (the `checks[...]`-before-`checks` `NameError` + the missing empty-sample
 guard) on that branch.
 
-### Step 1 — Regenerate the Phase-1 baseline block · QUEUED (next cloud session)
-Re-run the canonical battery with the **fixed** driver (review A2/A4/A5) and overwrite
-the `RESULTS.md` baseline NN/AVG1 rows, adding the NN pool curve. MAE/AAE/AAE&K and the
-A/B/C gates are unchanged by these fixes. **Not run yet** — deferred so the next GPU
-session does it alongside the first Phase-2 training run instead of re-downloading the
-checkpoint for two baseline rows. Record in `RESULTS.md` when done.
+### Step 1 — Regenerate the baseline NN/AVG1 rows · DONE
+The Phase-2 kernels ran the fixed driver, so the rows are now correct: AVG1 uses the
+train mean; **NN is scored like-for-like** — pool-20000 MAE **0.0296** vs ours 0.0707
+at the same 512 test items (NN beats us ~2.4×; pool curve 512→0.0551, 5000→0.0377,
+20000→0.0296). `RESULTS.md` updated.
 
-### Phase 2 — Representation-first training schedule (issues 5, 6, 7)
-- **2a instrument — DONE** (`3064c70`, behaviour-neutral): the objective exposes the
-  per-term weighted losses and the trainer logs `per_term_grad_share` every
-  `train.log_grad_share_every_steps` steps (0 = off; set e.g. 500 on a real run) — so
-  the physics share is measured live, not post-hoc.
-- **2b mask-ratio curriculum**: draw the ratio **per sample**; config-driven ramp;
-  raise P(ratio=1.0) above 0.15. Config: `curriculum.mask_schedule`.
-- **2c physics ramp**: `staging.lambda_phys_start_step` + longer ramp; re-sweep λ
-  targeting ~10–25 % gradient share (not 66 %).
-- **Gate:** Scenario-A MAE/AAE holds/improves; hard-stratum gate holds; share in band.
+### Phase 2 — Representation-first training schedule (issues 5, 6, 7) · DONE
+- **2a instrument — DONE** (`3064c70`): the objective exposes per-term weighted losses;
+  `per_term_grad_share` logs the budget share every `train.log_grad_share_every_steps`.
+- **2b mask curriculum — DONE** (`ee23a24`): per-sample ratios, a distribution ramp
+  (`curriculum.mask_schedule`), and P(full mask) raised 0.15 → 0.35.
+- **2c physics ramp — DONE** (`ee23a24`): `staging.lambda_phys_start_step = 2000`,
+  ramp 3000.
+- **Gate MET at 10k** (control vs Phase-2, `RESULTS.md`): MAE −5.4 %, Scenario C
+  0.736 → 0.779 (crosses the 0.75 gate), scalar dependence +4–7 pp. Open follow-up: a
+  λ re-sweep to land the gradient share at ~10–25 % — the probe now measures it live.
 
 ### Phase 3 — Representation hygiene (issues 2, 8)
 - **3a** remove the redundant pixel mask (`assembly.py:280`); keep token masking.

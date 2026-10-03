@@ -48,12 +48,35 @@ constraints → proceed to Phase 2.
 
 ---
 
-## Phase 2 — representation-first training schedule
+## Phase 2 — representation-first training schedule  ·  DONE
 
-- date: _TBD_   commit: _TBD_   change: _
-- before: (copy Baseline)
-- after: _
-- delta / gate: _
+- date: 2026-10-02   commit: `ee23a24` (+ `16b3c52` logger fix)
+- change: 2a live per-term gradient-share probe; **2b** per-sample mask ratios + a
+  distribution ramp (start easy → target; P(full mask) 0.15 → 0.35); **2c** physics
+  held at 0 for the first 2000 steps, then ramped over 3000.
+- **Gate:** like-for-like **10k control vs Phase-2** (same length, same battery,
+  Kaggle kernels `…-phase-2-train` / `…-phase-2-control`, T4):
+
+| Scenario-A / gates | control (old) | **Phase-2 (new)** | delta |
+|---|---|---|---|
+| MAE (test, n=17,489) | 0.0792 | **0.0749** | −5.4 % |
+| AAE | 47.675 | **45.116** | −5.4 % |
+| MAE @ n=512 | 0.0967 | **0.0707** | −27 % |
+| normalized-L1 (A) | 0.1378 | **0.1298** | −5.8 % |
+| occupancy IoU / F1 (A, masked) | 0.7025 / 0.8244 | **0.7209 / 0.8372** | up |
+| scalar MAE (unknown) | 0.1106 | **0.1030** | −6.9 % |
+| A / B / C win rate | 0.982 / 0.910 / **0.736 (FAIL)** | **0.996 / 0.941 / 0.779 (PASS)** | **C crosses 0.75** |
+| scalar-dep. one / two known | 0.617 / 0.553 | **0.660 / 0.623** | up (still < 0.75) |
+| AAE&2 / AAE&4 | 48.21 / 48.81 | **45.84 / 46.76** | better |
+| like-for-like NN (pool 20k, n=512) | 0.0296 | 0.0296 | **NN beats us ~2.4×** |
+
+- **Gate MET** — Scenario-A MAE/AAE improves, the hard-stratum gate holds (0.996),
+  and **Scenario C moves from FAIL to PASS**; scalar dependence rises ~+4–7 pp.
+- Both 10k runs are worse than the 70k baseline (MAE 0.0673) — fewer steps, expected.
+- Caveats: single seed; the guidance gap dropped (185 → ~41) but that is the
+  **2-sample synthetic probe** (review A5) — re-measure on real data; **NN retrieval
+  still beats us** on the same items (the honest headline).
+- Next: Phase 3 (representation hygiene).
 
 ---
 

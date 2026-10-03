@@ -16,9 +16,11 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 |---|---|
 | Phase 0 — benchmarking harness | **DONE** |
 | Phase 1 — current-architecture baseline (Kaggle) | **DONE**, but the NN/AVG1 rows must be **regenerated** (pre-fix driver) |
-| Review P0 hygiene (A1, B1, A2, A4, A5, B2, C1, C2, C6, C3, A3, A6) | **DONE** (suite: 328 passed / 0 failed) |
-| Branch merge (review C4) | **PENDING** — door-(b)/preflight line is not in this clone; C5 + B2-local fixed at merge |
-| Phases 2–7 below | **TODO** |
+| Review P0 hygiene (A1, B1, A2, A4, A5, B2, C1, C2, C6, C3, A3, A6) | **DONE** (suite: 330 passed / 0 failed) |
+| Phase 2a — live per-term gradient-share probe | **DONE** (`3064c70`) |
+| Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
+| Step 1 baseline regeneration | **QUEUED** for the next cloud session |
+| Phases 2b–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
 
@@ -52,20 +54,30 @@ locality, gate win rates — metrics that are **not** the training objective (re
 
 ## Next steps (in order)
 
-### Step 0 — Merge the two lines (review C4) · small
-Pull the door-(b)/preflight line into `work-192d`; at the merge fix **C5** (the
-`scalar_predictor_film` construction vs its comment) and **B2-local** (the
-`checks[...]`-before-`checks` `NameError` plus the missing empty-sample guard). Re-run
-`--preflight` and the full suite on the merged branch. Everything below assumes one branch.
+### Step 0 — Branch divergence (review C4) · DECISION: do not merge here
+The door-(b)/preflight line is **not in this clone**, and door (b) is an
+**unvalidated** remedy. door (b) = route the scalar signal through the predictor
+(`scalar_predictor_film`), because door (a) showed the read-out works but the scalar
+gates still sit below the 0.75 bar (`checkpoints/unified/REPORT.md` §21.3). Decision:
+**do not promote it to the mainline by merging.** Adopt the **provenance fallback** —
+every doc and kernel pin states the commit + config that produced each number, and
+door (b) stays an ablation branch. When door (b) is validated and merged by the
+operator, fix **C5** (the `scalar_predictor_film` construction vs its comment) and
+**B2-local** (the `checks[...]`-before-`checks` `NameError` + the missing empty-sample
+guard) on that branch.
 
-### Step 1 — Regenerate the Phase-1 baseline block · cheap cloud run
+### Step 1 — Regenerate the Phase-1 baseline block · QUEUED (next cloud session)
 Re-run the canonical battery with the **fixed** driver (review A2/A4/A5) and overwrite
 the `RESULTS.md` baseline NN/AVG1 rows, adding the NN pool curve. MAE/AAE/AAE&K and the
-A/B/C gates are unchanged by these fixes. Record in `RESULTS.md`.
+A/B/C gates are unchanged by these fixes. **Not run yet** — deferred so the next GPU
+session does it alongside the first Phase-2 training run instead of re-downloading the
+checkpoint for two baseline rows. Record in `RESULTS.md` when done.
 
 ### Phase 2 — Representation-first training schedule (issues 5, 6, 7)
-- **2a instrument** (no behaviour change): log per-term gradient share live
-  (`scripts/diagnostics/protocol_v1/step3_4_...:175-184`).
+- **2a instrument — DONE** (`3064c70`, behaviour-neutral): the objective exposes the
+  per-term weighted losses and the trainer logs `per_term_grad_share` every
+  `train.log_grad_share_every_steps` steps (0 = off; set e.g. 500 on a real run) — so
+  the physics share is measured live, not post-hoc.
 - **2b mask-ratio curriculum**: draw the ratio **per sample**; config-driven ramp;
   raise P(ratio=1.0) above 0.15. Config: `curriculum.mask_schedule`.
 - **2c physics ramp**: `staging.lambda_phys_start_step` + longer ramp; re-sweep λ

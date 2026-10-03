@@ -267,6 +267,57 @@ def sample_mask_ratio(cfg, rng):
     return rs[idx]
 
 
+def _mask_probs_at(cfg, step):
+    """Curriculum mask-ratio distribution at `step`, optionally ramped (Phase 2b).
+
+    Target = train_mask_ratio_probs. If `curriculum.mask_schedule` sets
+    ramp_steps > 0 and start_mask_ratio_probs, the distribution is linearly
+    interpolated from start -> target over ramp_steps, so the representation
+    forms on easier masking before full masking becomes common. Returns
+    (ratios, probs) with 0.0 excluded.
+    """
+    cur = cfg["curriculum"]
+    ratios = cur.get("train_mask_ratios", cur.get("mask_ratios"))
+    target = cur.get("train_mask_ratio_probs", cur.get("mask_ratio_probs"))
+    pairs = [(r, p) for r, p in zip(ratios, target) if r > 0.0]
+    rs, ps = zip(*pairs) if pairs else ((1.0,), (1.0,))
+    ps = torch.tensor(ps, dtype=torch.float32)
+    sched = cur.get("mask_schedule") or {}
+    ramp = int(sched.get("ramp_steps", 0) or 0)
+    start = sched.get("start_mask_ratio_probs")
+    if ramp > 0 and start is not None:
+        sp = torch.tensor([p for r, p in zip(ratios, start) if r > 0.0],
+                          dtype=torch.float32)
+        frac = min(1.0, max(0.0, float(step) / ramp))
+        ps = sp + (ps - sp) * frac
+    ps = ps / ps.sum()
+    return list(rs), ps
+
+
+def sample_mask_ratios(cfg, rng, b, step):
+    """PER-SAMPLE occupancy mask ratios from the (optionally ramped) curriculum
+    (Phase 2b). Returns a list of B floats; 0.0 is excluded."""
+    rs, ps = _mask_probs_at(cfg, step)
+    idx = torch.multinomial(ps, b, replacement=True, generator=rng)
+    return [float(rs[i]) for i in idx.tolist()]
+
+
+def _physics_lambda_at(step, lambda_phys, start_step=0, ramp_steps=0):
+    """lambda_phys at a given optimizer step (Phase 2c).
+
+    0 before `start_step` (so the representation forms before physics is
+    heavy), then a linear ramp to `lambda_phys` over `ramp_steps`. With
+    start_step=0 and ramp_steps=0 this is the constant lambda_phys (previous
+    behaviour).
+    """
+    if step < start_step:
+        return 0.0
+    if ramp_steps <= 0:
+        return float(lambda_phys)
+    frac = min(1.0, (step - start_step + 1) / ramp_steps)
+    return float(lambda_phys) * frac
+
+
 def _build_scalar_masker_bank(cfg, seed=0):
     """Build one persistent ScalarMasker per configured curriculum regime.
 
@@ -360,7 +411,13 @@ class RegimeLogger:
         self.mask_achieved = {r: [] for r in self.mask_ratios}
         self._total = 0
 
+    def _nearest_ratio(self, ratio):
+        return min(self.mask_counts, key=lambda r: abs(float(r) - float(ratio)))
+
     def record(self, ratio, regime, achieved_masked_fraction=None):
+        # Phase 2b: with per-sample ratios the caller passes the batch MEAN,
+        # which need not equal a configured bucket — snap to the nearest.
+        ratio = ratio if ratio in self.mask_counts else self._nearest_ratio(ratio)
         self.mask_counts[ratio] += 1
         self.regime_counts[regime] += 1
         if achieved_masked_fraction is not None:
@@ -464,8 +521,8 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     sk, regime = sample_scalar_known(
         B, cfg, rng, device=device, masker_bank=scalar_masker_bank)
 
-    # Sample occupancy mask ratio from curriculum
-    ratio = sample_mask_ratio(cfg, rng)
+    # Sample PER-SAMPLE occupancy mask ratios from the curriculum (Phase 2b)
+    ratios = sample_mask_ratios(cfg, rng, B, step)
 
     # Generate block mask. For half_sensitivity placement, the frozen
     # surrogate's sensitivity map needs the COMPLETE [B,3,64,64] MetaDiT
@@ -481,9 +538,9 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
             "half_sensitivity masking requires the frozen surrogate")
         geo_true = assemble_metadit_geometry(
             occ, sv[:, 0], sv[:, 1], sv[:, 2])
-        M = masker.sample(geo_true, ratio, surrogate).to(device)
+        M = masker.sample_per_sample(geo_true, ratios, surrogate).to(device)
     else:
-        M = masker.sample(occ, ratio, surrogate).to(device)
+        M = masker.sample_per_sample(occ, ratios, surrogate).to(device)
 
     # Forward + loss
     # Phase 4 MD §3.5.1: goal dropout — replace A_goal with null token ~10%
@@ -493,7 +550,7 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     loss = result["total_loss"]
 
     regime_logger.record(
-        ratio, regime,
+        float(sum(ratios) / len(ratios)), regime,
         achieved_masked_fraction=float((M < 0.5).float().mean().item()))
 
     return result, M, sk
@@ -1043,12 +1100,14 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     data_iter = iter(train_data) if use_synthetic or not isinstance(train_data, DataLoader) \
         else iter(loader)
 
+    phys_start = int(cfg.get("staging", {}).get("lambda_phys_start_step", 0) or 0)
     last_loss = None
     for step in range(start_step, total_steps):
-        # Phase 4 MD §4.1: ramp lambda_phys from 0 to target over ramp steps
-        if ramp_steps > 0:
-            ramp_frac = min(1.0, (step + 1) / ramp_steps)
-            objective.lambda_phys = lambda_phys * ramp_frac
+        # Phase 2c: hold lambda_phys at 0 until phys_start (representation
+        # forms first), then ramp to the target over ramp_steps.
+        if ramp_steps > 0 or phys_start > 0:
+            objective.lambda_phys = _physics_lambda_at(
+                step, lambda_phys, phys_start, ramp_steps)
 
         # Explicitly reset gradients at the START of each optimizer step
         # (Fix 1, spec §3): gradients must accumulate only across the

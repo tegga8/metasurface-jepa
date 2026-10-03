@@ -85,6 +85,38 @@ def random_masks(rng, batch_size, ratio, grid=DEFAULT_GRID, min_side=DEFAULT_MIN
     return best
 
 
+def _calibrated_single(rng, ratio, grid, min_side, k_range, tolerance, max_attempts):
+    """One calibrated block mask for a single sample -> (grid, grid), 1 = visible."""
+    if ratio <= 0.0:
+        return torch.ones(grid, grid, dtype=torch.float32)
+    if ratio >= 0.999:
+        return torch.zeros(grid, grid, dtype=torch.float32)
+    best, best_err = None, None
+    for _ in range(max_attempts):
+        m = _draw_random_mask(rng, 1, ratio, grid, min_side, k_range)[0]
+        achieved = float((m < 0.5).float().mean().item())
+        err = abs(achieved - ratio)
+        if best is None or err < best_err:
+            best, best_err = m, err
+        if err <= tolerance:
+            return m
+    return best
+
+
+def random_masks_per_sample(rng, ratios, grid=DEFAULT_GRID, min_side=DEFAULT_MIN_SIDE,
+                            k_range=DEFAULT_K_RANGE, tolerance=0.02, max_attempts=50):
+    """Per-sample block masks with per-sample ratios (Phase 2b).
+
+    Same calibration discipline as `random_masks`, applied per sample so a batch
+    can mix easy and hard masking within one step. `ratios`: iterable of B floats.
+    Returns M (B, grid, grid), 1 = visible.
+    """
+    masks = [_calibrated_single(rng, float(r), grid, min_side, k_range,
+                                tolerance, max_attempts)
+             for r in ratios]
+    return torch.stack(masks, dim=0)
+
+
 def sensitivity_masks(rng, geometry, ratio, surrogate, grid=DEFAULT_GRID,
                       min_side=DEFAULT_MIN_SIDE, k_range=DEFAULT_K_RANGE):
     """Place mask blocks over the most resonance-relevant regions per structure.
@@ -153,6 +185,20 @@ class BlockMasker:
             return sensitivity_masks(self.rng, geometry, ratio, surrogate, self.grid,
                                      self.min_side, self.k_range)
         return random_masks(self.rng, b, ratio, self.grid, self.min_side, self.k_range)
+
+    def sample_per_sample(self, geometry, ratios, surrogate=None):
+        """Block masks with a PER-SAMPLE ratio (Phase 2b).
+
+        random placement: one calibrated mask per sample. half_sensitivity:
+        per-sample sensitivity placement is not implemented, so it falls back to
+        the batch-MEAN ratio (keeps a mixed batch well-defined); the shipped
+        config uses random.
+        """
+        if self.placement != "random":
+            mean_ratio = sum(float(r) for r in ratios) / max(1, len(list(ratios)))
+            return self.sample(geometry, mean_ratio, surrogate)
+        return random_masks_per_sample(self.rng, ratios, self.grid,
+                                       self.min_side, self.k_range)
 
     def get_rng_state(self) -> bytes:
         """Get the internal torch.Generator state for checkpointing."""

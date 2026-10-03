@@ -80,7 +80,13 @@ curriculum:
   # covariance require N>=2 valid samples). This exclusion is now explicit
   # in the config (cleanup item 3), not a silent runtime filter.
   train_mask_ratios: [0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
-  train_mask_ratio_probs: [0.25, 0.35, 0.25, 0.15]
+  # Phase 2b: raise P(full mask) above the old 0.15 (the hardest, most
+  # informative case was rare) and RAMP the distribution — start easy so the
+  # representation forms, then shift mass toward full masking over ramp_steps.
+  train_mask_ratio_probs: [0.10, 0.25, 0.30, 0.35]
+  mask_schedule:
+    ramp_steps: 3000
+    start_mask_ratio_probs: [0.55, 0.30, 0.10, 0.05]
   # EVALUATION mask ratios: 0.0 IS included here as the genuinely unmasked
   # reference condition. Consumed by scripts/diagnostics/run_guidance_gap_sweep.py
   # (the trainer's validation uses the easy/hard strata below, audit B6/B17).
@@ -108,7 +114,12 @@ staging:
                        # at batch 2). The gates now pass with a properly-powered
                        # evaluation (§11), but a single full epoch is a controlled
                        # run, not "scale" — E is reserved.
-  lambda_phys_ramp_steps: 500  # ramp lambda_phys 0 -> 3.32 over the first 500 steps
+  # Phase 2c: hold physics at 0 for `lambda_phys_start_step` steps so the
+  # representation forms first, then ramp to the target over a longer window.
+  # Target ~10–25 % of the gradient budget (not 66 %) — watch the [grad-share]
+  # log (train.log_grad_share_every_steps).
+  lambda_phys_start_step: 2000
+  lambda_phys_ramp_steps: 3000  # ramp lambda_phys 0 -> 3.32 over steps 2000..5000
                        # (03_training_and_objective.md §5: "Ramp lambda_phys from
                        # zero. Do not immediately turn on a large physics loss.")
   physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:
@@ -160,13 +171,15 @@ train:
   lr: 3.0e-4
   wd: 1.0e-4
   warmup_steps: 100
-  total_steps: 1500
+  # Phase 2 schedule (10k steps). The schedule (physics start/ramp, mask ramp)
+  # is expressed in absolute steps for THIS run length; a different length is a
+  # deliberate retune, not a silent default.
+  total_steps: 10000
   val_every_steps: 50
   log_every_steps: 10
   # Phase 2a: every N optimizer steps, log the per-term gradient-budget share
-  # (a probe — see per_term_grad_share; behaviour-neutral). 0 = off; set e.g. 500
-  # on a physics run to watch the physics share live instead of post-hoc.
-  log_grad_share_every_steps: 0
+  # (a probe — see per_term_grad_share; behaviour-neutral). 0 = off.
+  log_grad_share_every_steps: 500
   ckpt_every_steps: 100
   clip_grad_norm: 1.0
   seed: 42

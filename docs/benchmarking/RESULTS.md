@@ -189,6 +189,35 @@ constraints → proceed to Phase 2.
 - **Next (Task 3):** one 10k arm with std 0.1 (ramp 1000→3000), re-check the hard-stratum
   guidance gap and A/B/C gates. λ retuned only as a secondary adjustment.
 
+### Phase 4 — Task 3: film init std 0.1 (the fix) — PASS (partial on scalar)
+
+- Change: raise the frozen `SpectrumFilm` init `std` 0.02 → 0.1 (cosine / ramp / frozen
+  unchanged). `[grad-share]` stays sane: `L_cond` ~0.2–0.5 %, `L_scal_t` ~0.1–0.3 %.
+- 10k arm vs the Phase-2 control and the std-0.02 attempt:
+
+| metric | Phase-2 control | std 0.02 | **std 0.1** |
+|---|---|---|---|
+| MAE (test, n=17,489) | 0.0792 | 0.0789 | **0.0725** |
+| AAE | 47.68 | 47.48 | **43.62** |
+| normalized-L1 (A) | 0.1378 | 0.1369 | **0.1263** |
+| occupancy IoU / F1 (A) | 0.7025 / 0.8244 | 0.708 / 0.8284 | **0.7099 / 0.8297** |
+| A / B / C gate | 0.982 / 0.910 / 0.736 | 0.988 / 0.934 / 0.771 | **0.994 / 0.947 / 0.779** |
+| scalar-dep. one / two | 0.617 / 0.553 | 0.641 / 0.615 | **0.650 / 0.596** |
+| guidance gap (hard stratum) | ~41 | ~27 | **~52** |
+
+- **Gate: PASS on the key conditions.** MAE/AAE **improve** (0.0725 / 43.62 — the best
+  10k result), the hard-stratum **guidance gap rises** (41 → 52; the recorded failure of
+  the std-0.02 attempt is fixed), and all A/B/C gates pass and rise. **Scalar
+  dependence improves** (one-known 0.617 → 0.650) but stays **short of the 0.94–0.97
+  target** → partial on that one condition.
+- **Root cause resolved:** the target-information hypothesis was **correct** — the
+  spectrum-conditioned target was near-redundant at the shipped init, and strengthening
+  the conditioning (not the loss weight) was the fix.
+- Caveats: single seed; `L_cond` share is still modest (~0.2–0.5 %); **NN retrieval
+  (0.0296) untouched**; still 10k (70k baseline 0.0673).
+- **Next:** the mechanism works. λ can be nudged for a stronger scalar effect, but the
+  dominant open item remains the NN-retrieval gap.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

@@ -21,7 +21,7 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
 | Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
-| Phase 4 — multi-target objective | **PARTIAL** — first attempt collapsed (`L_cond` 91–99 % share); fixed (`904856e`: cosine + ramp + frozen conditioning) → no regression, C gate 0.736→0.771, scalar +2–6 pp, **but** terms now ~0.1 % share (inert) and the guidance gap fell → gate not met. See `PHASE4_DIAGNOSIS.md` |
+| Phase 4 — multi-target objective | **PASS (partial on scalar)** — first attempt collapsed (`L_cond` 91–99 %); fix (`904856e`) stopped it but left terms inert; **target-separation probe** then showed the conditioning carried almost no spectrum signal (~0.037 cross-spectrum), so the frozen film init was raised 0.02→0.1 (`979f088`) → **MAE 0.0725 (best 10k), guidance gap rose 41→52, A/B/C 0.994/0.947/0.779**. Scalar 0.650/0.596 (improved, < target). See `RESULTS.md` |
 | Phases 5–7 below | **TODO** |
 
 ## Standard phase protocol (every phase)
@@ -112,9 +112,13 @@ gradient and its zero-init keeps the target spectrum-free forever.
   dependence +2–6 pp) — **but** the multi-target terms are now only **~0.1 %** of the
   gradient (inert; over-corrected) and the hard-stratum guidance gap **fell**
   (~41→27), so the forcing is **not demonstrated**. Status: **PARTIAL**.
-- **Next:** raise `λ_cond`/`λ_scal_t` toward a sane band (~2–5 % share, comparable to
-  `L_occ`/`L_summary`) and/or strengthen the film init; re-run one 10k arm, checking
-  the share band with the `[grad-share]` probe before re-examining gates.
+- **Resolved** (`979f088`): before retuning the weights, the target-separation probe
+  (`scripts/diagnostics/spectrum_film_separation.py`) showed the conditioning was
+  near-redundant (~0.037 cross-spectrum cosine distance at the shipped init), so the
+  film init was strengthened **0.02 → 0.1** (not the loss weight) → **MAE 0.0725 (best
+  10k), guidance gap rose 41→52, A/B/C 0.994/0.947/0.779** — the mechanism works.
+  Scalar dependence improves (0.650/0.596) but is still short of 0.94–0.97 → partial.
+  See `RESULTS.md`.
 
 ### Phase 5 — Scalar capacity & bounds (issues 3, 9)
 - **5a** bound decoded scalars to verified ranges (config-sourced).

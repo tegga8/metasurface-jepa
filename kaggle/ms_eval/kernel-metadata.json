@@ -1,0 +1,19 @@
+{
+  "id": "tejaspbiradar/metasurface-jepa-ms-eval",
+  "title": "metasurface-jepa ms eval",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["metasurface", "jepa", "evalseed"],
+  "dataset_sources": [
+    "tejaspbiradar/metadit-aaai2026",
+    "tejaspbiradar/metasurface-jepa-ms-seed0-ckpt"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

@@ -245,6 +245,35 @@ constraints → proceed to Phase 2.
   novelty, and C (design mostly given) is already a tie — i.e. the model is competitive
   in partial-observation regimes, just not better.
 
+### Multi-seed CI (3 × 10k, current best config)
+
+- Kaggle `metasurface-jepa-multiseed-ci`; seeds 0/1/2; benchmark (n=17,489 test) +
+  scenario battery per seed.
+
+| metric | seed0 | seed1 | seed2 | **mean ± std** |
+|---|---|---|---|---|
+| MAE (test, n=17,489) | 0.0800 | 0.0803 | 0.0845 | **0.0816 ± 0.0025** |
+| AAE | 48.16 | 48.35 | 50.85 | 49.12 ± 1.50 |
+| Scenario A gate | 0.9941 | 0.9902 | 0.9844 | **0.990 ± 0.005** |
+| Scenario B gate | 0.9355 | 0.9316 | 0.9121 | **0.926 ± 0.012** |
+| Scenario C gate | 0.7520 | 0.7832 | 0.7090 | **0.748 ± 0.037 (< 0.75)** |
+| scalar-dep. one / two | 0.598 / 0.514 | 0.631 / 0.586 | 0.613 / 0.572 | 0.614 / 0.557 |
+
+- **The single-seed phase gains were seed noise.** The 3-seed MAE mean (0.0816)
+  sits **above** both the Phase-2 single run (0.0749) and the Phase-4 std-0.1 run
+  (0.0725) — those were lucky draws. The honest 10k MAE for the current config is
+  **0.0816 ± 0.0025, i.e. at the Phase-2 *control*'s level (0.0792)** →
+  **no established improvement from Phases 2/3/4.**
+- **Scenario C does not reliably pass:** mean 0.748 < 0.75 and one seed (0.709)
+  **fails**. The earlier "C crosses the gate" was a single-seed artifact.
+- Scenario A/B pass robustly (0.990 / 0.926); scalar dependence still fails
+  (0.614 / 0.557).
+- Seed std ≈ **2.5 %** of the mean — the same order as the effects that were being
+  chased, which is exactly why single-seed comparisons were misleading.
+- **Decision:** the earlier Phase-2/Phase-4 "improvements" are **retracted** as
+  unestablished; the only results that survive the CIs are the robust gates (A/B),
+  the NN loss, and the scalar failure.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

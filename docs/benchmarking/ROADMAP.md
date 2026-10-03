@@ -21,8 +21,18 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Branch divergence (review C4 / door (b)) | **DECISION: do not merge here** — see Step 0 |
 | Step 1 baseline regeneration | **DONE** with the Phase-2 kernel (NN/AVG1 rows regenerated: NN pool 20k = 0.0296) |
 | Phase 3 — representation hygiene (3a/3b) | **DONE** — 3a behaviour-neutral; 3b projector ablation keeps `mlp_bn` (best MAE/gate); see `RESULTS.md` |
-| Phase 4 — multi-target objective | **PASS (partial on scalar)** — first attempt collapsed (`L_cond` 91–99 %); fix (`904856e`) stopped it but left terms inert; **target-separation probe** then showed the conditioning carried almost no spectrum signal (~0.037 cross-spectrum), so the frozen film init was raised 0.02→0.1 (`979f088`) → **MAE 0.0725 (best 10k), guidance gap rose 41→52, A/B/C 0.994/0.947/0.779**. Scalar 0.650/0.596 (improved, < target). See `RESULTS.md` |
+| Phase 4 — multi-target objective | **UNESTABLISHED under CIs** — the single-seed wins (MAE 0.0749/0.0725) did not survive 3 seeds; Scenario C's "pass" was single-seed |
 | Phases 5–7 below | **TODO** — reframed by the NN-scoping probe: **beat NN is the bar** (NN wins all novelty quartiles; Scenario C is a tie). Phase 5–7 become retrieval-competitive |
+
+## Multi-seed CI (3 × 10k) — the phase gains did NOT survive
+- MAE **0.0816 ± 0.0025** (seeds 0.0800/0.0803/0.0845) — the single-seed Phase-2 (0.0749)
+  and Phase-4 (0.0725) runs were **lucky draws**; the honest 10k MAE is at the control's
+  level (0.0792) → **no established improvement from Phases 2/3/4**.
+- Scenario A/B robust (0.990 / 0.926); **Scenario C NOT robust** (0.748 ± 0.037 < 0.75,
+  one seed fails); scalar dependence still fails (0.614 / 0.557).
+- Seed std ≈ 2.5 % of the mean — the same order as the effects being chased.
+- **Retraction:** Phase-2/4 gains are unestablished; the robust results are A/B gates,
+  the NN loss, and the scalar failure.
 
 ## Standard phase protocol (every phase)
 

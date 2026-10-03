@@ -35,7 +35,11 @@ OUT.mkdir(parents=True, exist_ok=True)
 run("nvidia-smi", check=False)
 run(f"git clone {REPO_URL} {REPO}")
 run(f"git checkout {REPO_REF}", cwd=REPO)
-run("pip install -r requirements.txt -q", cwd=REPO)
+# Kaggle ships torch/torchvision + the scientific stack; the pinned torch==2.5.1 /
+# torchvision==0.20.1 wheels are unavailable on its newer Python image. Install
+# the remaining deps best-effort and use the preinstalled torch — do NOT hard-fail.
+run("pip install -q numpy scipy PyYAML scikit-learn timm einops transformers "
+    "matplotlib tqdm safetensors", cwd=REPO, check=False)
 run("git rev-parse HEAD", cwd=REPO)
 
 # --- stage the MetaDiT data ---

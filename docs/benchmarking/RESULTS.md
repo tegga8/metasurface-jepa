@@ -165,6 +165,30 @@ constraints → proceed to Phase 2.
   `L_occ`/`L_summary`) and/or strengthen the film's init, then one 10k arm — the
   `[grad-share]` probe says when the weight is right, before gates are re-examined.
 
+### Phase 4 — target-separation probe (Task 1 of the target-information check)
+
+- Local, no training: `scripts/diagnostics/spectrum_film_separation.py` probes the
+  frozen film's init (`--film-std` overrides it). Cross-spectrum = cosine distance of
+  `z_y_occ_spec` for the SAME occupancy under 4 real spectra (the batch's own + 3
+  derangements via `make_shuffled_spectrum`), token-averaged like `L_cond`.
+
+| film init std | cross-spectrum cos-dist (mean / med) | spec-vs-raw | noise floor |
+|---|---|---|---|
+| **0.02 (was)** | **0.037 / 0.044** | 0.020 | ~1e-8 |
+| 0.1 | **0.491 / 0.484** | 0.336 | ~1e-8 |
+| 0.2 | 0.805 / 0.892 | 0.673 | ~1e-8 |
+
+- **Verdict: hypothesis CONFIRMED.** At the shipped init the target is ~96 % identical
+  across spectra (cos-dist 0.037) — `L_cond` carries almost no spectrum-specific signal,
+  so raising λ alone would amplify a near-redundant direction. The root cause is one
+  level deeper than loss weighting.
+- **Action (Task 2):** raise the frozen film's init `std` **0.02 → 0.1** (13× separation;
+  0.2 rejected as "arbitrary transform dominates"). Cosine + ramp + frozen **unchanged**.
+- **Sane-band check:** with std 0.1 and the term fully on (ramp=0 smoke), `[grad-share]`
+  is **`L_cond` 1.1 %, `L_scal_t` 1.6 %** — in band, not inert, not dominant.
+- **Next (Task 3):** one 10k arm with std 0.1 (ramp 1000→3000), re-check the hard-stratum
+  guidance gap and A/B/C gates. λ retuned only as a secondary adjustment.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

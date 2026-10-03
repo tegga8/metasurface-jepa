@@ -130,7 +130,12 @@ class SpectrumFilm(nn.Module):
         self.heads = nn.ModuleList(
             [nn.Linear(c_dim, 2 * hidden) for _ in range(n_blocks)])
         for head in self.heads:
-            nn.init.normal_(head.weight, std=0.02)
+            # std 0.02 gave only ~0.04 cross-spectrum cosine distance at init (the
+            # target was ~96 % identical across spectra -> L_cond near-redundant;
+            # measured by scripts/diagnostics/spectrum_film_separation.py). 0.1
+            # raises it to ~0.49 while staying below the regime where an arbitrary
+            # transform dominates the target.
+            nn.init.normal_(head.weight, std=0.1)
             nn.init.zeros_(head.bias)
             with torch.no_grad():
                 head.bias[:hidden].fill_(1.0)   # gamma ≈ 1 at init

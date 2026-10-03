@@ -334,6 +334,31 @@ constraints → proceed to Phase 2.
   boundary. Per the plan: do not add seeds; do not call C a pass/fail from any single
   checkpoint. No targeted C mechanism is justified by this evidence alone.
 
+### Full-epoch (70k) baseline — CURRENT config, 3 training seeds  ·  DONE
+
+- Kaggle `metasurface-jepa-fe-current`, commit `c35196f`; **current config unchanged
+  except `train.seed ∈ {0,1,2}`**; `--max-steps 70000` (≈1 epoch, batch 2). Existing
+  benchmark protocol. Replication unit = **training seed**. All stage exit codes 0.
+
+| metric | seed0 | seed1 | seed2 | **mean ± std (3 training seeds)** | 95 % t-CI |
+|---|---|---|---|---|---|
+| MAE (test, n=17,489) | 0.0500 | 0.0494 | 0.0476 | **0.0490 ± 0.0013** | [0.0459, 0.0521] |
+| AAE | 30.09 | 29.76 | 28.68 | **29.51 ± 0.74** | [27.68, 31.34] |
+| AAE&2 / AAE&4 | 30.83 / 31.55 | 30.42 / 31.14 | 29.17 / 29.68 | 30.14 / 30.79 | — |
+| Scenario A | 0.9961 | 0.9961 | 0.9980 | **0.9967 ± 0.0011** | [0.9940, 0.9994] |
+| Scenario B | 0.9805 | 0.9727 | 0.9785 | **0.9772 ± 0.0040** | [0.9673, 0.9871] |
+| Scenario C | 0.9375 | 0.9355 | 0.9180 | **0.9303 ± 0.0110** | [0.9030, 0.9576] |
+| scalar one / two | 0.508 / 0.564 | 0.529 / 0.535 | 0.477 / 0.486 | **0.505 / 0.529** | straddles ~0.5 |
+
+- **Verdict: 70k MATERIALLY improves the 10k 3-seed baseline on fidelity + gates.**
+  MAE 0.0816 → **0.0490** (−40 %), AAE 49.1 → 29.5, A 0.990 → 0.9967, B 0.926 → 0.9772,
+  and **Scenario C 0.748 → 0.930 — now robustly ABOVE the 0.75 gate (CI [0.903, 0.958])**.
+  This also beats the earlier *old-config* single-seed 70k (MAE 0.0673) and MetaDiT-S
+  (0.0801). (NN retrieval, 0.0296, still leads — now ~1.65×.)
+- **But the scalar path is unchanged: still ~chance (0.505 / 0.529)** — more training
+  did **not** fix scalar conditioning. This is the surviving, established weakness.
+- **Per the plan: STOP here** — no scalar intervention in this pass.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

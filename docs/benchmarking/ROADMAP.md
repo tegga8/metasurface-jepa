@@ -24,6 +24,13 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 | Phase 4 — multi-target objective | **UNESTABLISHED under CIs** — the single-seed wins (MAE 0.0749/0.0725) did not survive 3 seeds; Scenario C's "pass" was single-seed |
 | Phases 5–7 below | **TODO** — reframed by the NN-scoping probe: **beat NN is the bar** (NN wins all novelty quartiles; Scenario C is a tie). Phase 5–7 become retrieval-competitive |
 
+## Full-epoch (70k) baseline — CURRENT config, 3 training seeds  ·  DONE
+- MAE **0.0490 ± 0.0013** (3 training seeds) [CI 0.0459–0.0521]; AAE 29.51; gates
+  A **0.9967**, B **0.9772**, **C 0.9303** (CI 0.903–0.958 — robustly above 0.75).
+- **70k materially beats the 10k 3-seed baseline** (MAE 0.0816→0.0490; C 0.748→0.930).
+- **Scalar dependence unchanged (~0.505 / 0.529)** — the surviving weakness.
+- Kernel `metasurface-jepa-fe-current`, commit `c35196f`. See `RESULTS.md`.
+
 ## Scenario C — crossed seed study (3 training ckpts × 3 eval seeds): UNRESOLVED
 - Checkpoint means (3 eval seeds each): seed0 0.7480±0.0039, seed1 0.7839±0.0063,
   seed2 0.7572±0.0205. **Overall (replication unit = checkpoint): 0.7630 ± 0.0186

@@ -37,6 +37,17 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
   (still ~chance). **STOP the scalar architecture line** per the plan's stop condition;
   reassess the task/objective rather than stacking modules. See `RESULTS.md`.
 
+## Research state (2026-10-03)
+- **70k JEPA baseline: established** — MAE 0.0490 ± 0.0013, A/B/C 0.9967/0.9772/0.9303
+  (3 training seeds).
+- **MetaDiT benchmark audit: completed** — `EXTERNAL_BENCHMARK_COMPARISON.md`.
+- **Scalar-conditioning architecture line: STOPPED** (two negative interventions).
+- **Next: JEPA-vs-conventional objective ablation** — running; kernel
+  `metasurface-jepa-objective-ablation` (commit `953f09e`), `objective=conventional`,
+  70k × seeds {0,1,2}.
+- **Full-wave validation: BLOCKED** — no EM solver in-repo; needs external tooling.
+- **Then:** freeze the architecture and write up results.
+
 ## Scenario C — crossed seed study (3 training ckpts × 3 eval seeds): UNRESOLVED
 - Checkpoint means (3 eval seeds each): seed0 0.7480±0.0039, seed1 0.7839±0.0063,
   seed2 0.7572±0.0205. **Overall (replication unit = checkpoint): 0.7630 ± 0.0186

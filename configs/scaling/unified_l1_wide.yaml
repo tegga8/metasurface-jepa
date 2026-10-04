@@ -1,0 +1,216 @@
+# Unified JEPA model + training — architecture_v5.md §3-§5, unified_jepa/Phase 3
+# Phase 4 MD: guidance + physics loop integration
+# architecture_id: unified_occ_param_spectrum_jepa_v1
+#
+# L1 "wide" — Phase 6 model-size scaling study (operator decision 2026-10-04).
+# Mutations vs configs/unified.yaml (everything else identical):
+#   hidden 192->256, num_heads 6->8, num_predictor_heads 6->8,
+#   scalar_hidden 128->192. Runtime guard: split the 3-seed kernel if the
+#   measured step cost implies > 8 h for 3 seeds.
+
+# Scalar convention (Phase 1 MD §3: store the verified convention in config/
+# checkpoint metadata — do not re-derive or normalize scalars twice).
+# Network input stays RAW/unscaled — operator decision 2026-09-13 (AUDIT_REPORT_192D §4).
+# Controlled ablation (Step 2): "jepa" (default, unchanged baseline) or
+# "conventional" (direct supervised occupancy + scalar + frozen-surrogate physics;
+# all JEPA-specific latent machinery OFF). Architecture is identical.
+objective: jepa
+
+scalar_convention:
+  parameter_order: ["l_lattice", "h_atom", "r_atom"]
+  parameter_index_in_dataset: [0, 1, 2]
+  broadcast_channel:
+    l_lattice: {channel: 2, divisor: 3.0, dense: true}
+    h_atom: {channel: 1, divisor: 1.0, dense: false}
+    r_atom: {channel: 0, divisor: 5.0, dense: false}
+  factorized_scalar_representation: raw physical values (not rescaled)
+
+# (no `variant` key: the unified architecture is the only live path, audit B17)
+hidden: 256
+num_heads: 8
+geo_depth: 6
+predictor_depth: 8
+goal_tokens: 16
+num_predictor_heads: 8
+scalar_hidden: 192
+n_film_blocks: 6
+spec_dim: 256
+# Step 2 scalar-predictor FiLM: route the LEARNED scalar representation (the
+# scalar-summary token) into the GCLCT predictor via an extra zero-init modulation.
+# false (default) => exactly the current architecture (no extra params).
+scalar_predictor_film: false
+ema_momentum_start: 0.996
+ema_momentum_end: 0.999
+
+# Loss weights per Phase 3 MD §3 (Phase 4 MD §4 extends with L_S/L_A)
+loss:
+  lambda_inv: 25.0      # JEPA invariance (MSE on masked tokens)
+  lambda_var: 25.0      # VICReg variance penalty
+  lambda_cov: 1.0       # VICReg covariance penalty
+  lambda_scalar: 1.0    # scalar L1 on unknown positions
+  lambda_occ: 1.0       # occupancy BCEWithLogits on masked pixels (§4.1,
+                        # operator decision 2026-09-13: the decoder must be
+                        # supervised even while lambda_phys = 0)
+  lambda_summary: 1.0   # DOOR (a) OF THE SCALAR INVESTIGATION (operator decision
+                        # 2026-09-13: "first a then b"). Weight of the read-out that
+                        # reconstructs the KNOWN scalars from the scalar encoder's
+                        # summary token. That token had no objective of its own, so
+                        # nothing pushed it to carry the conditioning — measured
+                        # (REPORT.md §17/§19/§20): it varies ~11% with the scalars,
+                        # the predictor attends it 93.6x uniform, yet scalar_pred
+                        # moves 0.000145 against 0.246 for a spectrum perturbation,
+                        # and L_scalar delivers 0.0036 of gradient to the scalar
+                        # encoder against 0.6932 to the decoder. Scaling the token
+                        # 100x did NOT fix it, which ruled out magnitude. This term
+                        # adds a gradient path to the encoder that does not run
+                        # through the predictor.
+                        # PRE-REGISTERED SUCCESS TEST (fixed before the run): the
+                        # encoder's gradient share rises materially AND the scalar
+                        # win rates move off ~0.5 (one-known measured 0.5004 over
+                        # 17,488 samples) toward the scenario gates' 0.94-0.97. If
+                        # the gradient rises but the gates do not, door (b) is
+                        # warranted — the read-out is not the bottleneck.
+  lambda_phys: 3.32     # physics loss WEIGHT, set from the calibrated sweep of
+                        # 2026-09-13 (checkpoints/unified/REPORT.md §11). Five arms
+                        # at 10k steps each, scored by the 32-sample gate:
+                        #   lam=0      real 0.2901   (control)
+                        #   lam=0.0335 real 0.4390   SIGNIFICANTLY WORSE than no physics (t=+3.46)
+                        #   lam=0.1    real 0.3995   SIGNIFICANTLY WORSE than no physics (t=+2.57)
+                        #   lam=0.369  real 0.2235   better (t=-2.27)
+                        #   lam=3.3201 real 0.1679   best; beats every arm (t<=-2.48)
+                        # The value is the 50% gradient-share point from the
+                        # calibration (median across modules); the curve was still
+                        # IMPROVING at the top of the swept range, so this is a
+                        # LOWER BOUND on the optimum, not a located maximum — a
+                        # further sweep upward is the recorded next step, not a
+                        # silent further increase here.
+  gamma: 1.0            # VICReg variance hinge threshold
+  eps: 1.0e-4           # VICReg numerical epsilon
+  scalar_loss_type: l1  # "l1" (default) or "huber" — wired (audit B17)
+  # Phase 3b projector ablation: none | linear | mlp | mlp_bn (default shipped).
+  # MLP+BN is the incumbent; the ablation tests whether the BatchNorm helps or
+  # hurts on the hard stratum.
+  projector_type: mlp_bn
+  # Phase 4 multi-target weights (ramped in via staging.multi_target_*). Cosine
+  # (scale-free) losses; kept modest so they cannot hijack the gradient budget.
+  lambda_cond: 0.5      # spectrum-conditioned geometry target (forces spectrum use)
+  lambda_scal_t: 0.5    # scalar-latent target (forces the scalar path)
+
+# Mask curriculum (Phase 3 MD §4)
+curriculum:
+  # TRAINING mask ratios: 0.0 is deliberately EXCLUDED — with zero masked
+  # tokens the masked-token VICReg/JEPA objective is undefined (variance/
+  # covariance require N>=2 valid samples). This exclusion is now explicit
+  # in the config (cleanup item 3), not a silent runtime filter.
+  train_mask_ratios: [0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
+  # Phase 2b: raise P(full mask) above the old 0.15 (the hardest, most
+  # informative case was rare) and RAMP the distribution — start easy so the
+  # representation forms, then shift mass toward full masking over ramp_steps.
+  train_mask_ratio_probs: [0.10, 0.25, 0.30, 0.35]
+  mask_schedule:
+    ramp_steps: 3000
+    start_mask_ratio_probs: [0.55, 0.30, 0.10, 0.05]
+  # EVALUATION mask ratios: 0.0 IS included here as the genuinely unmasked
+  # reference condition. Consumed by scripts/diagnostics/run_guidance_gap_sweep.py
+  # (the trainer's validation uses the easy/hard strata below, audit B6/B17).
+  eval_mask_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]
+  mask_placement: random      # "random" or "half_sensitivity" (architecture_v5.md §2)
+  scalar_regimes: ["all_known", "all_unknown", "mixed"]
+  scalar_regime_probs: [0.34, 0.33, 0.33]
+  # Phase 3 MD §4 / architecture_v5.md §8.3: validation strata, reported
+  # separately and never pooled (audit B6).
+  # easy: low occupancy mask + all scalars known.
+  # hard: full occupancy mask + all scalars unknown (pure inverse design) —
+  #       the stratum the real-vs-shuffled / scalar-dependence gates apply to.
+  # NOTE: a 0.0 mask ratio is NOT a valid loss stratum — with zero masked
+  # tokens the masked-token VICReg/JEPA objective is undefined (variance/
+  # covariance require N>=2 valid samples). An unmasked reference, if wanted,
+  # belongs to a dedicated diagnostic, not to validation losses.
+  easy_mask_ratio: 0.25
+  hard_mask_ratio: 1.0
+
+# Physics loss staging (Phase 3 MD §5, extended Phase 4 MD §4.1)
+staging:
+  phase: D             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
+                       # Operator decision 2026-09-13: C -> D for the full-epoch
+                       # run on the complete training split (70k steps ~= 1 epoch
+                       # at batch 2). The gates now pass with a properly-powered
+                       # evaluation (§11), but a single full epoch is a controlled
+                       # run, not "scale" — E is reserved.
+  # Phase 2c: hold physics at 0 for `lambda_phys_start_step` steps so the
+  # representation forms first, then ramp to the target over a longer window.
+  # Target ~10–25 % of the gradient budget (not 66 %) — watch the [grad-share]
+  # log (train.log_grad_share_every_steps).
+  lambda_phys_start_step: 2000
+  lambda_phys_ramp_steps: 3000  # ramp lambda_phys 0 -> 3.32 over steps 2000..5000
+  # Phase 4: ramp the multi-target weights in from step 1000, after the
+  # representation has formed on the proven objective.
+  multi_target_start_step: 1000
+  multi_target_ramp_steps: 2000
+                       # (03_training_and_objective.md §5: "Ramp lambda_phys from
+                       # zero. Do not immediately turn on a large physics loss.")
+  physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:
+                             # the soft path is a silent dead end (0 student params
+                             # with gradient, L_phys 18.58 healthy-looking, soft
+                             # field 96% out of distribution). Verified by
+                             # soft_hard_occupancy_test against the real surrogate.
+
+weights:
+  spectrum: data/metadit/weights/spec_encoder.pth
+  surrogate: data/metadit/weights/surrogate_model.bin  # released forward EM surrogate (frozen, §1.6)
+
+data:
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
+  max_train_samples: 0
+  num_workers: 0         # passed to the DataLoaders (audit B17: was ignored)
+  # Synthetic mode is CLI-only (--use-synthetic-smoke); there is deliberately
+  # no config key for it (audit B17).
+
+# Evaluation — scripts/eval/eval_scenarios.py, overridable with --samples.
+# Audit B27: the evaluation batch IS the gate's sample size. It used to be
+# train.batch_size (2), so every real/null/shuffled comparison, the shuffled
+# control (a 2-item derangement = one swap), the scalar-dependence checks and the
+# whole guidance sweep were decided by TWO samples. A training batch size is an
+# optimisation choice and must not set the evaluation's statistical power.
+eval:
+  n_samples: 32
+  # PRIMARY gate statistic (operator decision 2026-09-13): the paired per-sample
+  # win rate `real < shuffled`, not the batch means. Measured over the full 17,488
+  # sample validation split the error distribution has a heavy tail - 27 samples
+  # (0.15%) score 1-30 while the median is 0.075 - so one catastrophic sample can
+  # flip a mean-based verdict on a small batch and did exactly that (the 32-sample
+  # gate read real 0.8779 against a full-split mean of 0.1196). The win rate counts
+  # samples rather than magnitudes and cannot be decided by one outlier.
+  # The mean criterion is still computed and reported as `gate_mean_criterion`.
+  # Threshold 0.75 (operator decision 2026-09-13): "measurably better", not merely
+  # "more often than not". At 0.5 a model right 51% of the time would pass, and the
+  # scalar gates were doing exactly that - two_known reads 0.5938 on the 32-sample
+  # batch and 0.5106 over the full split, with a mean-error difference of 0.0001, so
+  # a majority bar let a null result through. At 0.75 BOTH scalar strata fail, which
+  # is the honest reading and the thing to fix.
+  gate_beats_fraction_min: 0.75
+
+train:
+  batch_size: 2
+  grad_accum: 1
+  # (no `epochs` key: the loop is step-based, audit B17)
+  lr: 3.0e-4
+  wd: 1.0e-4
+  warmup_steps: 100
+  # Phase 2 schedule (10k steps). The schedule (physics start/ramp, mask ramp)
+  # is expressed in absolute steps for THIS run length; a different length is a
+  # deliberate retune, not a silent default.
+  total_steps: 10000
+  val_every_steps: 50
+  log_every_steps: 10
+  # Phase 2a: every N optimizer steps, log the per-term gradient-budget share
+  # (a probe — see per_term_grad_share; behaviour-neutral). 0 = off.
+  log_grad_share_every_steps: 500
+  ckpt_every_steps: 100
+  clip_grad_norm: 1.0
+  seed: 42
+  val_batches: 1
+  device: cpu
+  # Phase 4 MD §3.5.1: classifier-free goal guidance
+  guidance_dropout: 0.1   # probability of null-goal replacement during training

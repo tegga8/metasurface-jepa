@@ -1,5 +1,5 @@
 {
-  "id": "tejaspbiradar/metasurface-jepa-split-50-25-25",
+  "id": "anosvol/metasurface-jepa-split-50-25-25",
   "title": "metasurface-jepa split 50 25 25",
   "code_file": "run.py",
   "language": "python",
@@ -9,7 +9,7 @@
   "enable_tpu": false,
   "enable_internet": true,
   "keywords": ["metasurface", "jepa", "split-ratio"],
-  "dataset_sources": ["tejaspbiradar/metadit-aaai2026"],
+  "dataset_sources": ["anosvol/metadit-aaai2026-staging"],
   "kernel_sources": [],
   "competition_sources": [],
   "model_sources": []

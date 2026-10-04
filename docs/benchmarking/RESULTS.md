@@ -383,6 +383,39 @@ constraints → proceed to Phase 2.
 - **Per the plan's stop condition → STOP the scalar architecture line** and reassess
   the underlying task/objective; do not stack more losses/modules.
 
+### Controlled ablation — JEPA vs conventional objective (70k × 3 seeds)  ·  Outcome A
+
+- The **only** change vs the established baseline is `objective=conventional`
+  (full-occupancy BCE + scalar + frozen-surrogate physics under the same ramp; no
+  VICReg / EMA-target / masked-token / latent terms). All three train logs confirm
+  `OBJECTIVE MODE: CONVENTIONAL`. Kernel `metasurface-jepa-objective-ablation` v2,
+  commit `2218d70`. Replication unit = **training seed**.
+
+| metric | JEPA baseline | Conventional | direction |
+|---|---|---|---|
+| MAE (test, n=17,489) | **0.0490 ± 0.0013** | **0.0922 ± 0.0195** | JEPA ~1.9× better |
+| AAE | 29.51 ± 0.74 | 55.49 ± 11.78 | JEPA better |
+| Scenario A | **0.9967 ± 0.0011** | 0.9792 | JEPA better |
+| Scenario B | **0.9772 ± 0.0040** | 0.9460 | JEPA better |
+| Scenario C | **0.9303 ± 0.0110** | 0.8288 | JEPA better |
+| scalar one / two | 0.505 / 0.529 | 0.4955 / 0.5013 | ~chance in both |
+| occupancy IoU (masked) | ~0.75 | ~0.64 | JEPA better |
+
+- Per-seed conventional: MAE **0.0914 / 0.0730 / 0.1121** (A 0.9668 / 0.9844 / 0.9863;
+  B 0.9082 / 0.9688 / 0.9609; C 0.7676 / 0.8672 / 0.8516; scalar one 0.5098 / 0.4883 /
+  0.4883; two 0.5195 / 0.4512 / 0.5332).
+- **Outcome A — the JEPA objective is materially better.** **Every** conventional seed
+  (MAE 0.0730–0.1121) is worse than **every** JEPA seed (0.0476–0.0500): complete
+  per-seed separation, ~1.9× worse on the mean; the fidelty gates and occupancy IoU are
+  materially lower too. Scalar dependence is ~chance in both arms (the ablation does not
+  fix it).
+- Caveat (honest): the conventional MAE 95 % t-CI (df=2) is wide — **[0.0437, 0.1406]** —
+  and technically overlaps the JEPA CI **[0.0459, 0.0521]** because of the conventional
+  arm's high variance. The 3-vs-3 per-seed separation and the large mean gap carry the
+  conclusion; do not over-read the CI overlap.
+- **Claim:** the JEPA latent objective contributes materially beyond conventional
+  supervised training of the same architecture on this benchmark.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

@@ -48,6 +48,14 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 - **Full-wave validation: BLOCKED** — no EM solver in-repo; needs external tooling.
 - **Then:** freeze the architecture and write up results.
 
+## JEPA vs conventional objective ablation (70k × 3 seeds)  ·  Outcome A
+- `objective=conventional` (no VICReg/EMA-target/latent) vs JEPA baseline: MAE
+  **0.0490 → 0.0922** (every conventional seed worse than every JEPA seed), A/B/C
+  0.9967/0.9772/0.9303 → **0.9792/0.9460/0.8288**, occupancy IoU ~0.75 → ~0.64;
+  scalar ~chance in both. **The JEPA objective contributes materially** — supports the
+  core methodological claim. Kernel `metasurface-jepa-objective-ablation` @ `2218d70`.
+  See `RESULTS.md`.
+
 ## Scenario C — crossed seed study (3 training ckpts × 3 eval seeds): UNRESOLVED
 - Checkpoint means (3 eval seeds each): seed0 0.7480±0.0039, seed1 0.7839±0.0063,
   seed2 0.7572±0.0205. **Overall (replication unit = checkpoint): 0.7630 ± 0.0186

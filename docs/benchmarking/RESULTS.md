@@ -359,6 +359,30 @@ constraints → proceed to Phase 2.
   did **not** fix scalar conditioning. This is the surviving, established weakness.
 - **Per the plan: STOP here** — no scalar intervention in this pass.
 
+### Step 3 — scalar-predictor FiLM at 70k × 3 seeds  ·  NEGATIVE (stop the scalar line)
+
+- Intervention arm only (baseline = `fe_current`). `scalar_predictor_film = true`;
+  70k × seeds {0,1,2}. Training kernel `metasurface-jepa-scalar-film`; battery re-run
+  by `metasurface-jepa-sf-eval` (the first battery used the flag-off config against
+  film-enabled checkpoints → strict-load failure; corrected run shown).
+- Replication unit = **training seed**; per `ACCEPTANCE_PROTOCOL.md`.
+
+| metric | baseline (`fe_current`) | **intervention** |
+|---|---|---|
+| MAE (test, n=17,489) | 0.0490 ± 0.0013 | **0.0506 ± 0.0028** (0.0477 / 0.0533 / 0.0507) |
+| AAE | 29.51 ± 0.74 | **30.44** (28.72 / 32.08 / 30.52) |
+| Scenario A | 0.9967 ± 0.0011 | **0.9941** (0.9961 / 0.9883 / 0.9980) |
+| Scenario B | 0.9772 ± 0.0040 | **0.9746** (0.9766 / 0.9707 / 0.9766) |
+| Scenario C | 0.9303 ± 0.0110 | **0.9362** (0.9277 / 0.9375 / 0.9434) |
+| **scalar one / two** | 0.505 / 0.529 | **0.525 / 0.555** |
+
+- **Verdict: NEGATIVE.** Scalar dependence does **not** move materially off chance —
+  one-known ~0.52 (CI straddles 0.5), two-known ~0.55 — and MAE/A/B/C are within noise
+  of the baseline (MAE slightly worse, not better). The predictor-FiLM route does not
+  fix scalar conditioning.
+- **Per the plan's stop condition → STOP the scalar architecture line** and reassess
+  the underlying task/objective; do not stack more losses/modules.
+
 ---
 
 ## Phase 5 — scalar capacity & bounds

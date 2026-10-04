@@ -31,6 +31,12 @@ Heavy training runs happen on Kaggle/Colab per `CLOUD_TRAINING.md` — local is 
 - **Scalar dependence unchanged (~0.505 / 0.529)** — the surviving weakness.
 - Kernel `metasurface-jepa-fe-current`, commit `c35196f`. See `RESULTS.md`.
 
+## Scalar conditioning — predictor-FiLM intervention at 70k × 3 seeds  ·  NEGATIVE
+- `scalar_predictor_film=true` vs baseline: MAE 0.0490 → **0.0506** (slightly worse,
+  within noise), A/B/C ~unchanged, **scalar one/two 0.505/0.529 → 0.525/0.555**
+  (still ~chance). **STOP the scalar architecture line** per the plan's stop condition;
+  reassess the task/objective rather than stacking modules. See `RESULTS.md`.
+
 ## Scenario C — crossed seed study (3 training ckpts × 3 eval seeds): UNRESOLVED
 - Checkpoint means (3 eval seeds each): seed0 0.7480±0.0039, seed1 0.7839±0.0063,
   seed2 0.7572±0.0205. **Overall (replication unit = checkpoint): 0.7630 ± 0.0186

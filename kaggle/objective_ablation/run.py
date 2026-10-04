@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 REPO_URL = "https://github.com/tegga8/metasurface-jepa.git"
-REPO_REF = "953f09e"          # Step 2-8 conventional ablation mode
+REPO_REF = "2218d70"          # Step 2-8 + validate() conventional fix
 REPO = Path("/kaggle/working/repo")
 OUT = Path("/kaggle/working/cv")
 SEEDS = (0, 1, 2)

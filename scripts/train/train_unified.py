@@ -735,36 +735,38 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
                     result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
                     out_m = result["out"]
                     mask_bool = out_m["mask"]
-                    z_hat, z_y = out_m["z_hat"], out_m["z_y_raw"]
+                    z_y = out_m.get("z_y_raw")
+                    # JEPA/VICReg latent diagnostics are N/A in the conventional
+                    # arm (no EMA target): skip them instead of crashing.
+                    if z_y is not None:
+                        z_hat = out_m["z_hat"]
+                        # --- RAW latent space diagnostics (masked tokens only) ---
+                        z_hat_m = z_hat[mask_bool]
+                        z_y_m = z_y[mask_bool]
+                        raw_mse = torch.nn.functional.mse_loss(z_hat_m, z_y_m)
+                        raw_cos = (1 - torch.nn.functional.cosine_similarity(
+                            z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()
+                        metrics["raw_mse"].append(float(raw_mse))
+                        metrics["raw_cos_err"].append(float(raw_cos))
+                        metrics["raw_z_hat_norm"].append(
+                            float(z_hat_m.norm(dim=-1).mean()))
+                        metrics["raw_z_y_norm"].append(
+                            float(z_y_m.norm(dim=-1).mean()))
 
-                    # --- RAW latent space diagnostics (masked tokens only) ---
-                    z_hat_m = z_hat[mask_bool]
-                    z_y_m = z_y[mask_bool]
-                    raw_mse = torch.nn.functional.mse_loss(z_hat_m, z_y_m)
-                    raw_cos = (1 - torch.nn.functional.cosine_similarity(
-                        z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()
-                    metrics["raw_mse"].append(float(raw_mse))
-                    metrics["raw_cos_err"].append(float(raw_cos))
-                    metrics["raw_z_hat_norm"].append(
-                        float(z_hat_m.norm(dim=-1).mean()))
-                    metrics["raw_z_y_norm"].append(
-                        float(z_y_m.norm(dim=-1).mean()))
-
-                    # --- PROJECTED latent space diagnostics (same tokens) ---
-                    # p_hat/p_y are exactly the tensors L_inv uses.
-                    p_hat_full = result["projector_outputs"]["p_hat"]
-                    p_y_full = result["projector_outputs"]["p_y"]
-                    p_hat_m = p_hat_full[mask_bool]
-                    p_y_m = p_y_full[mask_bool]
-                    proj_mse = torch.nn.functional.mse_loss(p_hat_m, p_y_m)
-                    proj_cos = (1 - torch.nn.functional.cosine_similarity(
-                        p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()
-                    metrics["proj_mse"].append(float(proj_mse))
-                    metrics["proj_cos_err"].append(float(proj_cos))
-                    metrics["proj_p_hat_norm"].append(
-                        float(p_hat_m.norm(dim=-1).mean()))
-                    metrics["proj_p_y_norm"].append(
-                        float(p_y_m.norm(dim=-1).mean()))
+                        # --- PROJECTED latent space diagnostics (same tokens) ---
+                        p_hat_full = result["projector_outputs"]["p_hat"]
+                        p_y_full = result["projector_outputs"]["p_y"]
+                        p_hat_m = p_hat_full[mask_bool]
+                        p_y_m = p_y_full[mask_bool]
+                        proj_mse = torch.nn.functional.mse_loss(p_hat_m, p_y_m)
+                        proj_cos = (1 - torch.nn.functional.cosine_similarity(
+                            p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()
+                        metrics["proj_mse"].append(float(proj_mse))
+                        metrics["proj_cos_err"].append(float(proj_cos))
+                        metrics["proj_p_hat_norm"].append(
+                            float(p_hat_m.norm(dim=-1).mean()))
+                        metrics["proj_p_y_norm"].append(
+                            float(p_y_m.norm(dim=-1).mean()))
 
                     # --- Loss components (composition is explicit) ---
                     c = result["components"]

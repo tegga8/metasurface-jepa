@@ -147,6 +147,20 @@ def test_scalar_and_spectrum_shuffles_are_strict_derangements():
         derange_batch_tensor(torch.zeros(1, 3), seed=0)
 
 
+def test_conventional_out_has_no_jepa_target():
+    """The conventional forward must NOT expose z_y_raw — validate() and the
+    JEPA-only diagnostics guard on its absence (regression for the ablation-run
+    crash: validate() read out['z_y_raw'] unconditionally)."""
+    m = _model()
+    obj = _objective("conventional", _StubSurrogate())
+    occ, sv, sk, spec, mask = _batch()
+    res = obj(m, occ, sv, sk, spec, mask)
+    assert "z_y_raw" not in res["out"]
+    jm = _model()
+    jres = _objective("jepa", _StubSurrogate())(jm, occ, sv, sk, spec, mask)
+    assert "z_y_raw" in jres["out"]
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

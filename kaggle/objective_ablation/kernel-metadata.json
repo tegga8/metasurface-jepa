@@ -1,0 +1,16 @@
+{
+  "id": "tejaspbiradar/metasurface-jepa-objective-ablation",
+  "title": "metasurface-jepa objective ablation",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["metasurface", "jepa", "ablation"],
+  "dataset_sources": ["tejaspbiradar/metadit-aaai2026"],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

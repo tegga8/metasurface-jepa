@@ -85,6 +85,20 @@ remains:
 - **2026-09-13 — decode-time FiLM takes explicit known/unknown flags.** The occupancy decoder's
   scalar conditioning uses the same 6-dim `[value, known-flag]` convention as the scalar encoder
   (`architecture_v5.md` §3.2), so a known value and a predicted value are distinguishable.
+- **2026-10-04 — Phase 6 capacity study: width/depth re-opened (scoped exception).** Operator
+  directive: "check if there are any other models or dataset which we can work on — shrink the
+  model size or increasing". `architecture_v5.md` §11 ("occupancy latent dimension and depth …
+  not reopened as a general hyperparameter search") is scoped to **this controlled study only**:
+  three variants — S1 small (`hidden 128 / geo 4 / pred 6`), S2 slim (`pred 4`), L1 wide
+  (`hidden 256`) — each scored by the canonical battery at 70k × 3 seeds against the existing
+  full-fidelity baseline. Not a general search; no variant ships without its recorded gate result.
+- **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
+  directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
+  40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;
+  the re-splits are a separate ladder (`scripts/data/make_split_ratio.py`; one permutation,
+  nested prefixes, a shared 20 % test slice) whose numbers are **not MetaDiT-comparable**. Arms
+  are driven by per-run configs only (absolute `data.*_split` paths, `data.test_split` honored by
+  the benchmark); the shipped `configs/unified.yaml` paths are unchanged.
 
 ## Repo layout
 
@@ -92,7 +106,8 @@ remains:
 repo/
   AGENTS.md                     # this file
   CLOUD_TRAINING.md             # canonical Kaggle/Colab runbook (setup, sync, resume)
-  configs/unified.yaml          # the only training config (architecture_id: unified_oc_…_v1)
+  configs/unified.yaml          # the shipped training config (architecture_id: unified_oc_…_v1)
+  configs/scaling/              # Phase-6 model-size variants (S1 small / S2 slim / L1 wide)
   docs/
     design_doc.md               # historical (v2, 384-D era) — superseded
     implementation/unified_jepa/ # architecture_v5.md + 00-05 MDs + reports (authority)
@@ -102,6 +117,7 @@ repo/
   scripts/
     train/train_unified.py      # standalone CLI trainer (--config/--resume/--device/…)
     eval/eval_scenarios.py      # per-scenario evaluation (A/B/C reported separately)
+    data/make_split_ratio.py    # Phase-6 split-ratio re-splits (nested prefixes, one permutation)
     run_scenarios.py            # smoke-only scenario runner (synthetic data)
     diagnostics/protocol_v1/    # protocol-v1 diagnostic steps (unified path)
     diagnostics/run_guidance_gap_sweep.py

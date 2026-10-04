@@ -65,7 +65,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "goal_tokens", "num_predictor_heads", "scalar_hidden", "n_film_blocks",
     "spec_dim", "ema_momentum_start", "ema_momentum_end", "loss", "curriculum",
     "staging", "weights", "data", "eval", "train", "_architecture_id",
-    "scalar_predictor_film",
+    "scalar_predictor_film", "objective",
 })
 
 
@@ -933,9 +933,29 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         projector_type=loss_cfg.get("projector_type", "mlp_bn"),
         lambda_cond=loss_cfg.get("lambda_cond", 0.0),
         lambda_scal_t=loss_cfg.get("lambda_scal_t", 0.0),
+        objective=cfg.get("objective", "jepa"),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)
+
+    # Objective audit banner (Step 6): unambiguous, so a wrong objective can never
+    # be silently trained (the Step-3 scalar experiment exposed that failure mode).
+    _obj = cfg.get("objective", "jepa")
+    if _obj == "conventional":
+        print("=" * 64, flush=True)
+        print("OBJECTIVE MODE: CONVENTIONAL", flush=True)
+        print("  JEPA latent loss (L_inv/L_var/L_cov): OFF", flush=True)
+        print("  VICReg: OFF", flush=True)
+        print("  EMA target objective: OFF", flush=True)
+        print("  Masked-token prediction: OFF", flush=True)
+        print("  Occupancy BCE (FULL target): ON", flush=True)
+        print("  Scalar supervision: ON", flush=True)
+        print("  Frozen-surrogate spectrum supervision: ON", flush=True)
+        print("  Physics ramp / mask curriculum / architecture: SAME AS BASELINE",
+              flush=True)
+        print("=" * 64, flush=True)
+    else:
+        print("OBJECTIVE MODE: JEPA (unchanged baseline)", flush=True)
 
     # --- optimizer + scheduler ---
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -1389,6 +1409,7 @@ def preflight(cfg, device=None):
         projector_type=cfg.get("loss", {}).get("projector_type", "mlp_bn"),
         lambda_cond=cfg.get("loss", {}).get("lambda_cond", 0.0),
         lambda_scal_t=cfg.get("loss", {}).get("lambda_scal_t", 0.0),
+        objective=cfg.get("objective", "jepa"),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)

@@ -132,7 +132,8 @@ class UnifiedJEPALoss(nn.Module):
                  lambda_occ=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
                  surrogate=None, physics_use_ste=True, lambda_summary=0.0,
-                 projector_type="mlp_bn", lambda_cond=0.0, lambda_scal_t=0.0):
+                 projector_type="mlp_bn", lambda_cond=0.0, lambda_scal_t=0.0,
+                 objective="jepa"):
         super().__init__()
         # Phase 3b: objective-owned projector, ablable via loss.projector_type
         # (none | linear | mlp | mlp_bn). Spec §17: there is no model.proj.
@@ -159,6 +160,11 @@ class UnifiedJEPALoss(nn.Module):
         # and scalar-latent target.
         self.lambda_cond = lambda_cond
         self.lambda_scal_t = lambda_scal_t
+        # Controlled ablation: "jepa" (default — unchanged) or "conventional"
+        # (direct supervised occupancy + scalar + frozen-surrogate physics; ALL
+        # JEPA-specific latent machinery OFF). Architecture is identical.
+        assert objective in ("jepa", "conventional"), objective
+        self.objective = objective
 
         # Fix 6 (spec §8): self.occupancy_loss removed — it was constructed
         # but never called; forward() computes the projected JEPA/VICReg
@@ -169,27 +175,33 @@ class UnifiedJEPALoss(nn.Module):
 
     def forward(self, model, occupancy, scalar_values, scalar_known,
                 spectrum, mask, goal_mode="real"):
+        conventional = (self.objective == "conventional")
         out = model(
             occupancy, scalar_values, scalar_known, spectrum,
-            mask, goal_mode=goal_mode,
+            mask, goal_mode=goal_mode, with_target=not conventional,
         )
         mask_bool = out["mask"]
         z_hat = out["z_hat"]
-        z_y = out["z_y_raw"]
 
-        # Projected space (shared projector, single forward per branch)
-        p_hat_full = self.projector(z_hat)
-        p_y_full = self.projector(z_y)
-        p_hat = p_hat_full[mask_bool]
-        p_y = p_y_full[mask_bool]
-
-        # JEPA (invariance) + VICReg (var + cov) on masked tokens
-        L_inv, L_var, L_cov = vicreg_branch_terms(
-            p_hat, p_y, gamma=self.gamma, eps=self.eps)
-
-        L_inv_w = self.lambda_inv * L_inv
-        L_var_w = self.lambda_var * L_var
-        L_cov_w = self.lambda_cov * L_cov
+        if conventional:
+            # JEPA/VICReg latent machinery OFF: no EMA target, no projector.
+            z_y = None
+            p_hat_full = p_y_full = None
+            L_inv = L_var = L_cov = torch.zeros((), device=z_hat.device)
+            L_inv_w = L_var_w = L_cov_w = torch.zeros((), device=z_hat.device)
+        else:
+            z_y = out["z_y_raw"]
+            # Projected space (shared projector, single forward per branch)
+            p_hat_full = self.projector(z_hat)
+            p_y_full = self.projector(z_y)
+            p_hat = p_hat_full[mask_bool]
+            p_y = p_y_full[mask_bool]
+            # JEPA (invariance) + VICReg (var + cov) on masked tokens
+            L_inv, L_var, L_cov = vicreg_branch_terms(
+                p_hat, p_y, gamma=self.gamma, eps=self.eps)
+            L_inv_w = self.lambda_inv * L_inv
+            L_var_w = self.lambda_var * L_var
+            L_cov_w = self.lambda_cov * L_cov
 
         # Scalar L1 on unknown positions
         L_scalar = self.scalar_loss(
@@ -239,7 +251,12 @@ class UnifiedJEPALoss(nn.Module):
             b = occ_logits.shape[0]
             masked_px = out["mask"].view(b, 1, 16, 16).repeat_interleave(
                 4, 2).repeat_interleave(4, 3) > 0.5          # (B,1,64,64)
-            if masked_px.any():
+            if conventional:
+                # Conventional arm: direct supervision of the FULL target
+                # occupancy (the input mask curriculum is unchanged; only the
+                # reconstruction domain differs from the masked-only baseline).
+                L_occ = F.binary_cross_entropy_with_logits(occ_logits, occupancy)
+            elif masked_px.any():
                 L_occ = F.binary_cross_entropy_with_logits(
                     occ_logits[masked_px], occupancy[masked_px])
             else:
@@ -251,7 +268,7 @@ class UnifiedJEPALoss(nn.Module):
         # scalar encoder is trained to make that token carry the conditioning.
         # Scored on known positions only: unknown values were zeroed before the
         # encoder saw them, so there is nothing to recover there.
-        if self.lambda_summary > 0 and scalar_known.any():
+        if not conventional and self.lambda_summary > 0 and scalar_known.any():
             readout = self.summary_readout(out["scalar_summary"])
             summary_err = (readout - scalar_values).abs() * scalar_known.float()
             L_summary = summary_err.sum() / scalar_known.sum().clamp(min=1)
@@ -259,23 +276,30 @@ class UnifiedJEPALoss(nn.Module):
             L_summary = torch.zeros((), device=z_hat.device)
 
         # Phase 4 multi-target terms (scale-free cosine).
-        if self.lambda_cond > 0 and "z_y_occ_spec" in out:
+        if not conventional and self.lambda_cond > 0 and "z_y_occ_spec" in out:
             L_cond = _masked_cosine(out["z_hat_occ_spec"], out["z_y_occ_spec"], mask_bool)
         else:
             L_cond = torch.zeros((), device=z_hat.device)
-        if self.lambda_scal_t > 0 and "z_y_scal" in out:
+        if not conventional and self.lambda_scal_t > 0 and "z_y_scal" in out:
             L_scal_t = 1.0 - F.cosine_similarity(
                 out["z_hat_scal"], out["z_y_scal"], dim=-1).mean()
         else:
             L_scal_t = torch.zeros((), device=z_hat.device)
 
-        total = (L_inv_w + L_var_w + L_cov_w
-                 + self.lambda_scalar * L_scalar
-                 + self.lambda_occ * L_occ
-                 + self.lambda_phys * L_phys
-                 + self.lambda_summary * L_summary
-                 + self.lambda_cond * L_cond
-                 + self.lambda_scal_t * L_scal_t)
+        if conventional:
+            # ONLY direct supervision: full-occupancy BCE + scalar + frozen-
+            # surrogate physics (same ramp). No JEPA-specific term.
+            total = (self.lambda_scalar * L_scalar
+                     + self.lambda_occ * L_occ
+                     + self.lambda_phys * L_phys)
+        else:
+            total = (L_inv_w + L_var_w + L_cov_w
+                     + self.lambda_scalar * L_scalar
+                     + self.lambda_occ * L_occ
+                     + self.lambda_phys * L_phys
+                     + self.lambda_summary * L_summary
+                     + self.lambda_cond * L_cond
+                     + self.lambda_scal_t * L_scal_t)
 
         # Per-term WEIGHTED losses, exposed so the trainer can attribute the
         # gradient budget live (Phase 2a of the roadmap — until now the physics
@@ -338,7 +362,11 @@ class UnifiedJEPALoss(nn.Module):
         return self
 
     def on_optimizer_step(self, model, step):
-        """Update the EMA targets after an optimizer step (Phase 2 §6; Phase 4
-        adds the spectrum-FiLM EMA)."""
+        """Update the EMA targets after an optimizer step (Phase 2 §6).
+
+        Conventional arm has no EMA target objective -> no EMA update (the EMA
+        modules stay instantiated but are never advanced)."""
+        if self.objective == "conventional":
+            return
         model.ema.update(model.occupancy_encoder, step)
         model.scalar_mlp_ema.update(model.scalar_encoder, step)

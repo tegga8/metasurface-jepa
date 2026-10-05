@@ -269,7 +269,8 @@ def main():
 
     npz_path = os.path.join(args.out, "symbol_designs.npz")
     np.savez(npz_path, patterns=np.stack(patterns),
-             scalars=np.array(SCALARS))
+             scalars=np.array(SCALARS),
+             names=np.array([n for n, _ in SYMBOLS]))
     print("saved", npz_path, flush=True)
 
     import matplotlib

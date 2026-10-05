@@ -92,6 +92,11 @@ remains:
   three variants — S1 small (`hidden 128 / geo 4 / pred 6`), S2 slim (`pred 4`), L1 wide
   (`hidden 256`) — each scored by the canonical battery at 70k × 3 seeds against the existing
   full-fidelity baseline. Not a general search; no variant ships without its recorded gate result.
+- **2026-10-05 — Phase 6 capacity study: S0 "tiny" added (~20 % of base trainable).** Operator
+  directive: "okay 20 percent it is of the original model make it as a part of the runs as
+  well". Fourth size rung `configs/scaling/unified_s0_tiny.yaml` (`hidden 96 / geo 4 / pred 4 /
+  scalar 64`; audited live **2,193,284 trainable = 19.2 %** of the base's 11,402,628; 0.46× step
+  cost), same protocol as the other rungs (70k × 3 seeds, canonical battery).
 - **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
   directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
   40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;

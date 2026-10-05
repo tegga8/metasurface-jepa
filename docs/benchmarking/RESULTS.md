@@ -429,3 +429,50 @@ constraints → proceed to Phase 2.
 
 - date: _TBD_   commit: _TBD_   change: _
 - before / after / delta / gate: _
+
+---
+
+### Phase 6 — split-ratio re-splits (60:20:20 / 50:25:25 / 40:40:20) · DONE
+
+- date: 2026-10-05   kernels: `anosvol/metasurface-jepa-split-{60-20-20,50-25-25,40-40-20}`
+  (Kaggle T4; run account `anosvol`, read-only pulls)   pin: `fda7236`
+- change: **data-allocation study** (operator override 2026-10-04, `AGENTS.md`) — the released
+  pool (174,883) re-split at three ratios with **one permutation** (perm seed 42, nested
+  prefixes; `scripts/data/make_split_ratio.py`). Total data unchanged; only the allocation
+  moves. 1 epoch per arm (`steps = train // 2` @ batch 2), seeds {0,1,2}. **All stage exit
+  codes 0 on every rung × seed** (train / scenario-A / common-slice / eval battery).
+- evaluation: MetaDiT-parity scenario-A benchmark (4 candidates) on the **shared 20 % test
+  slice (n=34,976)** for cross-arm comparability; A/B/C gate battery (n=512) on each arm's
+  own val split. **Not MetaDiT-protocol comparable** (allocation shifted by design).
+- reference row (unchanged, from `fe_current` above): 80:10:10 · 139,906 train / 70k steps ·
+  MAE 0.0490 ± 0.0013 · A/B/C 0.9967 / 0.9772 / 0.9303.
+
+| arm | train / steps | **MAE** (mean ± std, 3 seeds) | per-seed | A / B / C gate (mean) |
+|---|---|---|---|---|
+| **80:10:10** (reference) | 139,906 / 70,000 | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| **60:20:20** | 104,931 / 52,465 | **0.0544 ± 0.0013** | 0.0539 / 0.0536 / 0.0559 | 0.994 / 0.973 / 0.915 |
+| **50:25:25** | 87,443 / 43,721 | **0.0552 ± 0.0018** | 0.0532 / 0.0559 / 0.0566 | 0.991 / 0.973 / 0.898 |
+| **40:40:20** | 69,954 / 34,977 | **0.0619 ± 0.0006** | 0.0617 / 0.0615 / 0.0626 | 0.992 / 0.965 / 0.884 |
+
+- 50:25:25 note: this arm's own test split is the 25 % slice (superset of the common 20 %);
+  it was scored on the common slice as well — own-slice MAE **0.0551 ± 0.0018** vs common
+  0.0552 → no slice artifact.
+
+| arm | AAE | AAE&2 / AAE&4 | IoU / F1 (masked) | pred occ frac (true) | scalar MAE (unknown) | scalar 1 / 2 known | floor |
+|---|---|---|---|---|---|---|---|
+| 60:20:20 | 32.78 | 33.44 / 34.14 | 0.744 / 0.853 | 0.424 (0.415) | 0.089 | 0.509 / 0.538 | 0.00709 |
+| 50:25:25 | 33.25 | 33.87 / 34.57 | 0.741 / 0.850 | 0.424 (0.415) | 0.091 | 0.531 / 0.542 | 0.00701 |
+| 40:40:20 | 37.29 | 37.87 / 38.54 | 0.739 / 0.849 | 0.425 (0.422) | 0.096 | 0.592 / 0.574 | 0.00709 |
+
+- **Reading:** the data axis is monotone but gentle above ~60 % train — MAE +11 % (60 %),
+  +13 % (50 %), +26 % (40 %) vs the 80:10:10 reference; the 60→50 step is within noise of
+  each other (0.0544 vs 0.0552, overlapping seed spread).
+- **Gate C degrades smoothly with less data (0.930 → 0.915 → 0.898 → 0.884) but passes
+  comfortably (≥ 0.75) at every rung and every seed.** A/B pass at every rung.
+- **Scalar dependence stays ~chance on every rung (0.51–0.59)** — the known open weakness,
+  unchanged by data allocation.
+- No occupancy collapse on any rung (pred occ fraction ≈ true; all-empty / all-occupied both
+  False). Every rung still beats MetaDiT-S (0.0801) and vanilla DiT (0.1677) on the common
+  slice (reference context; not protocol-matched).
+- artifacts: per-seed JSONs, logs, and checkpoints in the kernel outputs
+  (`kaggle kernels output anosvol/metasurface-jepa-split-<arm>`).

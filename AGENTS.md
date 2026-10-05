@@ -97,6 +97,17 @@ remains:
   well". Fourth size rung `configs/scaling/unified_s0_tiny.yaml` (`hidden 96 / geo 4 / pred 4 /
   scalar 64`; audited live **2,193,284 trainable = 19.2 %** of the base's 11,402,628; 0.46× step
   cost), same protocol as the other rungs (70k × 3 seeds, canonical battery).
+- **2026-10-05 — length-proportional staging: `*_frac` keys supersede the 10k-era absolutes.**
+  Operator directive: "physics ramp is bad — review this and fix a better schedule". Review finding:
+  the physics/mask/multi-target windows were tuned at 10k steps (physics off 20 % / ramp 30 %) but
+  shipped as ABSOLUTE steps — in the 70k runs they compressed to off 2.9 % / ramp 4.3 % (physics
+  fully on from step ~5k for 93 % of training). Fix: `resolve_staging_steps()` — when a `*_frac`
+  key is present it overrides the absolute step with `round(total_steps × frac)`; shipped fractions
+  reproduce the 10k schedule bit-identically and give 70k runs off 14k / ramp 21k (full at 35k = the
+  designed 50 % mark). All runs completed before this commit used the v1 (compressed) schedule and
+  remain comparable among themselves; runs after it are the v2 schedule and are judged by their own
+  controlled arm (`kaggle/sched_fix`, gate: no regression vs the base 0.0490 ± 0.0013 /
+  0.9967-0.9772-0.9303).
 - **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
   directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
   40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;

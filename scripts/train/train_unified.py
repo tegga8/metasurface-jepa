@@ -329,6 +329,34 @@ def _ramp_frac(step, start_step=0, ramp_steps=0):
     return min(1.0, (step - start_step + 1) / ramp_steps)
 
 
+def resolve_staging_steps(cfg, total_steps):
+    """Length-proportional staging (operator retune 2026-10-05).
+
+    The Phase-2/3/4 schedule was tuned at 10k steps and shipped as ABSOLUTE
+    steps (physics off 2000 / ramp 3000; mask ramp 3000; multi-target
+    1000+2000). Reused unchanged in a 70k run those windows [accidentally]
+    compress to the first ~7 % of training. When a ``*_frac`` key is present
+    it OVERRIDES the absolute key with ``round(total_steps * frac)``; absent
+    fractions preserve the old absolute behaviour exactly (at 10k the shipped
+    fractions reproduce it bit-identically: 0.20->2000, 0.30->3000, 0.10->1000,
+    0.20->2000).
+    """
+    staging = cfg.setdefault("staging", {})
+    sched = cfg.setdefault("curriculum", {}).setdefault("mask_schedule", {})
+
+    def _res(container, frac_key, step_key):
+        frac = container.get(frac_key)
+        if frac is not None:
+            container[step_key] = max(1, int(round(total_steps * float(frac))))
+
+    _res(staging, "lambda_phys_start_frac", "lambda_phys_start_step")
+    _res(staging, "lambda_phys_ramp_frac", "lambda_phys_ramp_steps")
+    _res(staging, "multi_target_start_frac", "multi_target_start_step")
+    _res(staging, "multi_target_ramp_frac", "multi_target_ramp_steps")
+    _res(sched, "ramp_frac", "ramp_steps")
+    return cfg
+
+
 def _build_scalar_masker_bank(cfg, seed=0):
     """Build one persistent ScalarMasker per configured curriculum regime.
 
@@ -843,6 +871,10 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     total_steps = cfg["train"].get("total_steps", 1500)
     if max_steps is not None:
         total_steps = max(1, int(max_steps))
+    # Length-proportional staging (operator retune 2026-10-05): *_frac keys
+    # override the 10k-era absolute steps so a 70k run keeps the designed
+    # proportions (off 20 % / ramp 30 %), not a 7 %-of-run accident.
+    resolve_staging_steps(cfg, total_steps)
 
     # --- data mode banner (Fix 16) ---
     def _resolved(path):

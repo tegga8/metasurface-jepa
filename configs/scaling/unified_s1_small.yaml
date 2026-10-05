@@ -109,6 +109,7 @@ curriculum:
   train_mask_ratio_probs: [0.10, 0.25, 0.30, 0.35]
   mask_schedule:
     ramp_steps: 3000
+    ramp_frac: 0.30
     start_mask_ratio_probs: [0.55, 0.30, 0.10, 0.05]
   # EVALUATION mask ratios: 0.0 IS included here as the genuinely unmasked
   # reference condition. Consumed by scripts/diagnostics/run_guidance_gap_sweep.py
@@ -143,10 +144,17 @@ staging:
   # log (train.log_grad_share_every_steps).
   lambda_phys_start_step: 2000
   lambda_phys_ramp_steps: 3000  # ramp lambda_phys 0 -> 3.32 over steps 2000..5000
+  # 2026-10-05 retune (length-proportional staging): the *_frac keys SUPERSEDE
+  # the absolute steps above; a 70k run keeps the designed 20 %/30 % windows
+  # instead of compressing them to ~7 % of the run.
+  lambda_phys_start_frac: 0.20
+  lambda_phys_ramp_frac: 0.30
   # Phase 4: ramp the multi-target weights in from step 1000, after the
   # representation has formed on the proven objective.
   multi_target_start_step: 1000
   multi_target_ramp_steps: 2000
+  multi_target_start_frac: 0.10
+  multi_target_ramp_frac: 0.20
                        # (03_training_and_objective.md §5: "Ramp lambda_phys from
                        # zero. Do not immediately turn on a large physics loss.")
   physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:

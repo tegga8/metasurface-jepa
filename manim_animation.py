@@ -1,10 +1,13 @@
-"""A story-driven visual tour of the unified 192-D metasurface JEPA.
+"""An implementation-faithful visual walkthrough of the unified 192-D JEPA.
 
-Preview quickly:
+Fast preview:
     python -m manim -pql manim_animation.py JEPAFullPresentation
 
-Render the final film:
+Final render:
     python -m manim -pqh manim_animation.py JEPAFullPresentation
+
+This film intentionally follows the active code path in ``src/assembly.py``
+and ``scripts/train/train_unified.py`` rather than an abstract JEPA sketch.
 """
 
 from manim import *
@@ -12,569 +15,747 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Visual language
+# Palette and typography
 # ---------------------------------------------------------------------------
 
-BG = "#0B1020"
-INK = "#F5F7FF"
-MUTED = "#AAB4D4"
-GRID = "#25304E"
-BLUE = "#58A6FF"       # occupancy / geometry
-CYAN = "#55DFFC"       # spectrum / physical goal
-GREEN = "#65E59B"      # prediction / successful flow
-YELLOW = "#FFD166"     # scalar conditioning
-PURPLE = "#B28DFF"     # latent space / target
-RED = "#FF7B89"        # loss signal
-PINK = "#FF9EE8"
+BG = "#09101F"
+PANEL = "#101B32"
+PANEL_2 = "#14223F"
+INK = "#F3F7FF"
+MUTED = "#A9B6D4"
+FAINT = "#35435F"
+BLUE = "#5CA8FF"       # occupancy geometry
+CYAN = "#55E0F7"       # spectrum / frozen physics
+YELLOW = "#FFD166"     # scalar path / FiLM
+PURPLE = "#B497FF"     # latent / target
+GREEN = "#68E29A"      # trainable prediction
+RED = "#FF7F91"        # loss / masking
+ORANGE = "#FFAA70"
 
 FONT = "Segoe UI"
 MATH_FONT = "Cambria Math"
 config.background_color = BG
 
 
-def text(label, size=28, color=INK, weight=NORMAL):
-    return Text(label, font=FONT, font_size=size, color=color, weight=weight)
+def txt(value, size=24, color=INK, weight=NORMAL):
+    return Text(value, font=FONT, font_size=size, color=color, weight=weight)
 
 
-def math_text(label, size=28, color=INK):
-    """Formula-like text that renders without requiring a LaTeX install."""
-    return Text(label, font=MATH_FONT, font_size=size, color=color)
+def formula(value, size=24, color=INK):
+    return Text(value, font=MATH_FONT, font_size=size, color=color)
 
 
-def title(label, eyebrow=None):
-    group = VGroup()
+def heading(title_text, eyebrow=None):
+    items = []
     if eyebrow:
-        e = text(eyebrow.upper(), 16, CYAN, BOLD)
-        group.add(e)
-    h = text(label, 42, INK, BOLD)
-    group.add(h)
-    group.arrange(DOWN, aligned_edge=LEFT, buff=0.12)
-    group.to_edge(UP, buff=0.38)
+        items.append(txt(eyebrow.upper(), 15, CYAN, BOLD))
+    items.append(txt(title_text, 38, INK, BOLD))
+    group = VGroup(*items).arrange(DOWN, aligned_edge=LEFT, buff=0.08)
+    group.to_edge(UP, buff=0.30)
     return group
 
 
-def rounded_panel(label, detail, color, width=2.25, height=1.1):
-    """A compact architecture block with a title and one explanatory line."""
-    body = RoundedRectangle(
+def caption(value, color=MUTED, size=18):
+    label = txt(value, size, color)
+    label.to_edge(DOWN, buff=0.26)
+    return label
+
+
+def panel(width, height, color=FAINT, fill=PANEL, stroke_width=2.0):
+    return RoundedRectangle(
         width=width,
         height=height,
-        corner_radius=0.16,
+        corner_radius=0.12,
         stroke_color=color,
-        stroke_width=2.4,
-        fill_color="#101A31",
-        fill_opacity=0.94,
+        stroke_width=stroke_width,
+        fill_color=fill,
+        fill_opacity=0.97,
     )
-    head = text(label, 18, INK, BOLD)
-    sub = text(detail, 12, MUTED)
-    words = VGroup(head, sub).arrange(DOWN, buff=0.08)
-    words.move_to(body)
-    return VGroup(body, words)
 
 
-def connector(start, end, color=MUTED, width=2.2):
+def label_panel(name, detail, color, width=2.2, height=0.86):
+    box = panel(width, height, color)
+    title = txt(name, 17, INK, BOLD)
+    sub = txt(detail, 11, MUTED)
+    words = VGroup(title, sub).arrange(DOWN, buff=0.06).move_to(box)
+    return VGroup(box, words)
+
+
+def arrow_between(a, b, color=MUTED, width=2.2, buff=0.08):
     return Arrow(
-        start,
-        end,
-        buff=0.10,
-        color=color,
-        stroke_width=width,
-        max_tip_length_to_length_ratio=0.13,
+        a, b, buff=buff, color=color, stroke_width=width,
+        max_tip_length_to_length_ratio=0.15,
     )
 
 
-def glow_dot(point, color, radius=0.10):
-    halo = Dot(point, radius=radius * 2.4, color=color, fill_opacity=0.16)
-    core = Dot(point, radius=radius, color=color)
-    return VGroup(halo, core)
+def pulse(scene, point, color, radius=0.08, run_time=0.55):
+    dot = Dot(point, radius=radius, color=color)
+    halo = Dot(point, radius=radius * 2.4, color=color, fill_opacity=0.18)
+    token = VGroup(halo, dot)
+    scene.play(FadeIn(token, scale=0.4), Flash(point, color=color, flash_radius=0.26), run_time=run_time)
+    scene.play(FadeOut(token, scale=1.7), run_time=0.18)
 
 
-def occupancy_grid(rows=12, cols=12, cell=0.15, seed=7, masked=False):
-    """A deterministic, readable stand-in for a 64 x 64 binary occupancy map."""
+def travel(scene, start, end, color=GREEN, run_time=0.65):
+    halo = Dot(start, radius=0.18, color=color, fill_opacity=0.17)
+    dot = Dot(start, radius=0.07, color=color)
+    token = VGroup(halo, dot)
+    scene.add(token)
+    scene.play(MoveAlongPath(token, Line(start, end)), run_time=run_time, rate_func=linear)
+    scene.play(Flash(end, color=color, flash_radius=0.22, line_length=0.10), run_time=0.22)
+    scene.remove(token)
+
+
+def fade_scene(scene, duration=0.45):
+    if scene.mobjects:
+        scene.play(*[FadeOut(mob) for mob in scene.mobjects], run_time=duration)
+
+
+# ---------------------------------------------------------------------------
+# Real-world data visualisations
+# ---------------------------------------------------------------------------
+
+
+def occupancy_map(rows=12, cols=12, side=0.15, seed=7, hidden=False):
+    """Readable proxy for M[64,64]; a red patch marks masked 4x4-token regions."""
     rng = np.random.default_rng(seed)
-    occupied = rng.random((rows, cols)) > 0.57
-    squares = VGroup()
-    for row in range(rows):
-        for col in range(cols):
-            is_hidden = masked and 3 <= row <= 8 and 4 <= col <= 9
-            fill = "#19223A" if is_hidden else (BLUE if occupied[row, col] else "#121A2D")
+    active = rng.random((rows, cols)) > 0.57
+    cells = VGroup()
+    for r in range(rows):
+        for c in range(cols):
+            in_mask = hidden and 3 <= r <= 8 and 4 <= c <= 9
             square = Square(
-                side_length=cell,
-                stroke_color="#33415F",
+                side_length=side,
+                stroke_color="#405276",
                 stroke_width=0.45,
-                fill_color=fill,
-                fill_opacity=0.98,
+                fill_color=("#20233E" if in_mask else (BLUE if active[r, c] else "#11192B")),
+                fill_opacity=1,
             )
-            square.move_to(
-                [
-                    (col - (cols - 1) / 2) * cell,
-                    ((rows - 1) / 2 - row) * cell,
-                    0,
-                ]
-            )
-            squares.add(square)
-    if not masked:
-        return squares
-
-    cover = RoundedRectangle(
-        width=cell * 6.1,
-        height=cell * 6.1,
-        corner_radius=0.05,
-        stroke_color=RED,
-        stroke_width=1.8,
-        fill_color="#15172D",
-        fill_opacity=0.80,
+            square.move_to(((c - (cols - 1) / 2) * side, ((rows - 1) / 2 - r) * side, 0))
+            cells.add(square)
+    if not hidden:
+        return cells
+    mask = RoundedRectangle(
+        width=6.05 * side, height=6.05 * side, corner_radius=0.04,
+        stroke_color=RED, stroke_width=2.0, fill_color="#171A30", fill_opacity=0.82,
     )
-    cover.move_to(squares.get_center() + RIGHT * cell * 1.5 - DOWN * cell * 0.5)
-    question = text("?", 38, RED, BOLD).move_to(cover)
-    return VGroup(squares, cover, question)
+    mask.move_to(cells.get_center() + RIGHT * 1.5 * side + DOWN * 0.5 * side)
+    q = txt("?", 33, RED, BOLD).move_to(mask)
+    return VGroup(cells, mask, q)
 
 
-def spectrum_plot(width=2.5, height=1.1, seed=4, color=CYAN):
+def token_grid(rows=4, cols=8, color=PURPLE, side=0.13, missing=False):
+    cells = VGroup()
+    for r in range(rows):
+        for c in range(cols):
+            is_missing = missing and (r + 2 * c) % 5 == 0
+            cell = RoundedRectangle(
+                width=side * 1.28, height=side * 1.28, corner_radius=0.025,
+                stroke_color=(RED if is_missing else color), stroke_width=0.6,
+                fill_color=("#281A2E" if is_missing else color),
+                fill_opacity=(0.45 if is_missing else 0.88),
+            )
+            cell.move_to(((c - (cols - 1) / 2) * side * 1.47, ((rows - 1) / 2 - r) * side * 1.47, 0))
+            cells.add(cell)
+    return cells
+
+
+def spectrum(width=2.4, height=0.9, color=CYAN, seed=2):
     rng = np.random.default_rng(seed)
     axes = Axes(
-        x_range=[0, 1, 0.25],
-        y_range=[0, 1, 0.5],
-        x_length=width,
-        y_length=height,
-        axis_config={"stroke_color": GRID, "stroke_width": 1.2},
-        tips=False,
+        x_range=[0, 1, 0.2], y_range=[0, 1, 0.5], x_length=width, y_length=height,
+        axis_config={"stroke_color": FAINT, "stroke_width": 1}, tips=False,
     )
     x = np.linspace(0, 1, 100)
-    y = 0.26 + 0.08 * np.sin(13 * x) + 0.06 * np.cos(29 * x)
-    for center, strength in [(0.19, 0.38), (0.49, 0.30), (0.76, 0.42)]:
-        y += strength * np.exp(-((x - center) ** 2) / 0.0024)
-    y += rng.normal(0, 0.008, len(x))
+    y = 0.18 + 0.10 * np.sin(13 * x) + 0.06 * np.cos(29 * x)
+    for center, amp in [(0.18, 0.33), (0.46, 0.28), (0.74, 0.42)]:
+        y += amp * np.exp(-((x - center) ** 2) / 0.0026)
+    y += rng.normal(0.0, 0.007, x.shape[0])
     y = (y - y.min()) / (y.max() - y.min())
-    curve = VMobject(color=color, stroke_width=3.2)
-    curve.set_points_smoothly([axes.c2p(xi, yi) for xi, yi in zip(x, y)])
+    curve = VMobject(stroke_color=color, stroke_width=2.8)
+    curve.set_points_smoothly([axes.c2p(a, b) for a, b in zip(x, y)])
     return VGroup(axes, curve)
 
 
-def token_row(count=11, color=PURPLE, radius=0.075):
-    dots = VGroup(*[Dot(radius=radius, color=color) for _ in range(count)])
-    dots.arrange(RIGHT, buff=radius * 0.65)
-    return dots
+def scalar_vector(values=("2.75", "0.75", "4.25"), flags=(1, 0, 1), compact=False):
+    names = ("l", "h", "r")
+    cards = VGroup()
+    for name, value, flag in zip(names, values, flags):
+        box = panel(0.78 if compact else 0.98, 0.48, YELLOW, "#262433", 1.4)
+        value_label = txt(value, 14 if compact else 16, YELLOW, BOLD)
+        marker = txt("known" if flag else "unknown", 8 if compact else 9, GREEN if flag else RED)
+        name_label = txt(name, 12 if compact else 13, MUTED)
+        trio = VGroup(name_label, value_label, marker).arrange(RIGHT, buff=0.05)
+        trio.move_to(box)
+        cards.add(VGroup(box, trio))
+    cards.arrange(DOWN if not compact else RIGHT, buff=0.10)
+    return cards
 
 
-def scalar_chips(values=("l", "h", "r"), unknown=False):
-    chips = VGroup()
-    for value in values:
-        shown = "?" if unknown else value
-        chip = RoundedRectangle(
-            width=0.53,
-            height=0.36,
-            corner_radius=0.08,
-            stroke_color=YELLOW,
-            stroke_width=1.5,
-            fill_color="#2A2630",
-            fill_opacity=0.9,
+def scalar_six_vector():
+    values = [("l", "2.75", "1"), ("h", "0", "0"), ("r", "4.25", "1")]
+    cells = VGroup()
+    for name, value, flag in values:
+        name_tag = txt(name, 12, MUTED)
+        val = label_panel(value, "value", YELLOW, 0.60, 0.42)
+        known = label_panel(flag, "flag", GREEN if flag == "1" else RED, 0.56, 0.42)
+        row = VGroup(name_tag, val, known).arrange(RIGHT, buff=0.08)
+        cells.add(row)
+    cells.arrange(DOWN, aligned_edge=LEFT, buff=0.10)
+    outer = panel(cells.width + 0.30, cells.height + 0.28, YELLOW, PANEL_2, 1.5)
+    cells.move_to(outer)
+    return VGroup(outer, cells)
+
+
+# ---------------------------------------------------------------------------
+# Neural-network visual primitives
+# ---------------------------------------------------------------------------
+
+
+def neuron_layer(count, color, height=1.0, radius=0.055):
+    nodes = VGroup(*[
+        Circle(radius=radius, stroke_color=color, stroke_width=1.2,
+               fill_color=color, fill_opacity=0.75)
+        for _ in range(count)
+    ])
+    nodes.arrange(DOWN, buff=max(0.04, (height - 2 * radius * count) / max(1, count - 1)))
+    return nodes
+
+
+def dense_network(width=2.0, height=1.25, layers=(5, 7, 5), color=YELLOW, title_text=None):
+    node_layers = VGroup(*[neuron_layer(n, color, height=height) for n in layers])
+    node_layers.arrange(RIGHT, buff=width / max(1, len(layers) - 1) - 0.11)
+    lines = VGroup()
+    for left, right in zip(node_layers[:-1], node_layers[1:]):
+        for a in left:
+            for b in right:
+                lines.add(Line(a.get_right(), b.get_left(), stroke_color=color, stroke_width=0.45, stroke_opacity=0.36))
+    group = VGroup(lines, node_layers)
+    if title_text:
+        title_label = txt(title_text, 13, color, BOLD).next_to(group, UP, buff=0.12)
+        group.add(title_label)
+    return group
+
+
+def mini_transformer(depth, color, label, width=1.55, height=1.3):
+    """A block stack: each layer visibly contains attention and MLP sublayers."""
+    layers = VGroup()
+    for index in range(depth):
+        shell = RoundedRectangle(
+            width=width, height=height / depth - 0.035, corner_radius=0.05,
+            stroke_color=color, stroke_width=1.2, fill_color=PANEL_2, fill_opacity=0.95,
         )
-        label = text(shown, 16, YELLOW, BOLD).move_to(chip)
-        chips.add(VGroup(chip, label))
-    chips.arrange(RIGHT, buff=0.10)
-    return chips
+        words = txt("attention  →  MLP", 9, MUTED).move_to(shell)
+        layers.add(VGroup(shell, words))
+    layers.arrange(DOWN, buff=0.035)
+    tag = txt(label, 12, color, BOLD).next_to(layers, UP, buff=0.10)
+    return VGroup(layers, tag)
 
 
-def travel(scene, start, end, color=GREEN, run_time=0.75):
-    """Move one bright sample-token through an already drawn architecture edge."""
-    particle = glow_dot(start, color)
-    scene.add(particle)
-    scene.play(MoveAlongPath(particle, Line(start, end)), run_time=run_time, rate_func=linear)
-    scene.play(Flash(end, color=color, flash_radius=0.25, line_length=0.11), run_time=0.25)
-    scene.remove(particle)
+def convolution_stack(color=BLUE, label="Conv patch-4", width=1.5, height=1.2):
+    filters = VGroup()
+    for i in range(4):
+        slab = RoundedRectangle(
+            width=width, height=0.18, corner_radius=0.035,
+            stroke_color=color, stroke_width=1.0, fill_color=color, fill_opacity=0.32 + i * 0.12,
+        )
+        filters.add(slab)
+    filters.arrange(DOWN, buff=0.06)
+    tag = txt(label, 12, color, BOLD).next_to(filters, UP, buff=0.10)
+    return VGroup(filters, tag)
 
 
-def fade_everything(scene, run_time=0.55):
-    if scene.mobjects:
-        scene.play(*[FadeOut(mob) for mob in scene.mobjects], run_time=run_time)
+def film_cards(n=6, small=False):
+    cards = VGroup()
+    for i in range(n):
+        card = panel(0.56 if small else 0.70, 0.38, YELLOW, "#282432", 1.0)
+        label = txt(f"γ{i + 1}, β{i + 1}", 8 if small else 9, YELLOW, BOLD).move_to(card)
+        cards.add(VGroup(card, label))
+    cards.arrange(RIGHT, buff=0.05)
+    return cards
 
 
-def architecture_map():
-    """The live unified 192-D architecture; returns a map and named landmarks."""
-    occ_input = rounded_panel("Masked occupancy", "1 × 64 × 64", BLUE)
-    scalar_input = rounded_panel("Scalar values + flags", "[value, known] × 3", YELLOW)
-    spectrum_input = rounded_panel("Target spectrum", "4 × 301 complex response", CYAN)
-    occ_encoder = rounded_panel("Occupancy CNN", "192-D patch tokens", BLUE)
-    scalar_mlp = rounded_panel("Scalar MLP", "FiLM: γ and β", YELLOW)
-    spectrum_encoder = rounded_panel("Frozen SpectrumPath", "goal tokens + cphysics", CYAN)
-    fusion = rounded_panel("Fusion transformer", "occupancy + goal tokens", PURPLE, 2.35)
-    predictor = rounded_panel("Masked-token predictor", "192-D latent completion", GREEN, 2.45)
-    occ_decoder = rounded_panel("Occupancy decoder", "64 × 64 logits", BLUE)
-    scalar_decoder = rounded_panel("Scalar heads", "l̂, ĥ, r̂", YELLOW)
-    physics = rounded_panel("Frozen EM surrogate", "physics consistency", CYAN, 2.25)
-    ema = rounded_panel("EMA target encoder", "full sample; stop-grad", PURPLE, 2.25)
-    losses = rounded_panel("Learning signals", "latent + scalar + physics", RED, 2.30)
+def query_tokens(count=8):
+    group = VGroup()
+    for i in range(count):
+        missing = i in (2, 5, 6)
+        cell = RoundedRectangle(
+            width=0.20, height=0.20, corner_radius=0.035,
+            stroke_color=(RED if missing else GREEN), stroke_width=1.0,
+            fill_color=("#2A1C31" if missing else GREEN), fill_opacity=0.72,
+        )
+        mark = txt("?" if missing else "•", 13, RED if missing else PANEL).move_to(cell)
+        group.add(VGroup(cell, mark))
+    scalar = RoundedRectangle(width=0.22, height=0.22, corner_radius=0.04, stroke_color=YELLOW,
+                              stroke_width=1.2, fill_color=YELLOW, fill_opacity=0.75)
+    group.add(VGroup(scalar, txt("s", 11, PANEL, BOLD).move_to(scalar)))
+    group.arrange(RIGHT, buff=0.05)
+    return group
 
-    occ_input.move_to([-5.7, 1.75, 0])
-    scalar_input.move_to([-5.7, 0.20, 0])
-    spectrum_input.move_to([-5.7, -1.50, 0])
-    occ_encoder.move_to([-3.05, 1.75, 0])
-    scalar_mlp.move_to([-3.05, 0.20, 0])
-    spectrum_encoder.move_to([-3.05, -1.50, 0])
-    fusion.move_to([-0.15, 0.95, 0])
-    predictor.move_to([2.65, 0.95, 0])
-    occ_decoder.move_to([5.60, 1.75, 0])
-    scalar_decoder.move_to([5.60, 0.20, 0])
-    physics.move_to([5.60, -1.50, 0])
-    ema.move_to([0.15, -2.55, 0])
-    losses.move_to([3.15, -2.55, 0])
 
-    edges = VGroup(
-        connector(occ_input.get_right(), occ_encoder.get_left(), BLUE),
-        connector(scalar_input.get_right(), scalar_mlp.get_left(), YELLOW),
-        connector(spectrum_input.get_right(), spectrum_encoder.get_left(), CYAN),
-        connector(occ_encoder.get_right(), fusion.get_left(), BLUE),
-        connector(scalar_mlp.get_right(), occ_encoder.get_bottom(), YELLOW),
-        connector(spectrum_encoder.get_right(), fusion.get_bottom(), CYAN),
-        connector(fusion.get_right(), predictor.get_left(), PURPLE),
-        connector(predictor.get_right(), occ_decoder.get_left(), BLUE),
-        connector(predictor.get_right(), scalar_decoder.get_left(), YELLOW),
-        connector(occ_decoder.get_bottom(), physics.get_top(), BLUE),
-        connector(scalar_decoder.get_bottom(), physics.get_top(), YELLOW),
-        connector(occ_encoder.get_bottom(), ema.get_left(), PURPLE),
-        connector(ema.get_right(), losses.get_left(), PURPLE),
-        connector(predictor.get_bottom(), losses.get_top(), GREEN),
-        connector(physics.get_bottom(), losses.get_right(), CYAN),
+def gclct_stack():
+    """Eight exact predictor blocks, each drawn as LN/FiLM → self → cross → MLP."""
+    rows = VGroup()
+    for i in range(8):
+        row = panel(2.65, 0.28, GREEN, PANEL_2, 1.0)
+        labels = VGroup(
+            txt("LN + FiLM", 8, YELLOW), txt("self-attn", 8, GREEN),
+            txt("cross-attn", 8, CYAN), txt("MLP", 8, PURPLE),
+        ).arrange(RIGHT, buff=0.13).move_to(row)
+        index = txt(str(i + 1), 8, MUTED).next_to(row, LEFT, buff=0.05)
+        rows.add(VGroup(row, labels, index))
+    rows.arrange(DOWN, buff=0.025)
+    label = txt("GCLCT predictor · 8 blocks", 14, GREEN, BOLD).next_to(rows, UP, buff=0.10)
+    return VGroup(rows, label)
+
+
+def loss_chip(name, detail, color, width=1.45):
+    box = panel(width, 0.58, color, PANEL, 1.5)
+    top = txt(name, 13, color, BOLD)
+    sub = txt(detail, 8, MUTED)
+    words = VGroup(top, sub).arrange(DOWN, buff=0.03).move_to(box)
+    return VGroup(box, words)
+
+
+# ---------------------------------------------------------------------------
+# Reusable implementation-accurate module figures
+# ---------------------------------------------------------------------------
+
+
+def occupancy_encoder_figure():
+    image = occupancy_map(side=0.10, hidden=True).scale(0.72)
+    image_label = txt("M  [1, 64, 64]", 12, BLUE, BOLD).next_to(image, DOWN, buff=0.10)
+    patch = convolution_stack(BLUE, "Conv2d 1→192 · k=4 s=4", 1.25, 0.92)
+    patch_grid = token_grid(4, 4, BLUE, 0.13, missing=True)
+    grid_label = txt("16 × 16 = 256 tokens", 11, BLUE).next_to(patch_grid, DOWN, buff=0.10)
+    stack = mini_transformer(6, BLUE, "6 TransformerBlocks", 1.55, 1.38)
+    film = film_cards(6, small=True)
+    film_label = txt("scalar FiLM after every block", 10, YELLOW).next_to(film, DOWN, buff=0.08)
+    items = VGroup(VGroup(image, image_label), patch, VGroup(patch_grid, grid_label), stack)
+    items.arrange(RIGHT, buff=0.32)
+    arrow1 = arrow_between(image.get_right(), patch.get_left(), BLUE)
+    arrow2 = arrow_between(patch.get_right(), patch_grid.get_left(), BLUE)
+    arrow3 = arrow_between(patch_grid.get_right(), stack.get_left(), BLUE)
+    film.next_to(stack, DOWN, buff=0.25)
+    film_label.next_to(film, DOWN, buff=0.06)
+    full = VGroup(items, arrow1, arrow2, arrow3, film, film_label)
+    return full, {"image": image, "patch": patch, "grid": patch_grid, "stack": stack, "film": film}
+
+
+def scalar_encoder_figure():
+    inputs = scalar_six_vector().scale(0.88)
+    network = dense_network(width=1.60, height=1.35, layers=(6, 7, 6), color=YELLOW, title_text="6 → 128 → GELU → 128")
+    film = film_cards(6)
+    summary = RoundedRectangle(width=1.15, height=0.42, corner_radius=0.07, stroke_color=PURPLE,
+                               stroke_width=1.5, fill_color=PURPLE, fill_opacity=0.25)
+    summary_label = txt("scalar summary\n[1, 192]", 10, PURPLE, BOLD).move_to(summary)
+    outputs = VGroup(
+        VGroup(film, txt("six (γ, β) pairs", 10, YELLOW).next_to(film, DOWN, buff=0.06)),
+        VGroup(summary, summary_label),
+    ).arrange(DOWN, buff=0.30, aligned_edge=LEFT)
+    line = arrow_between(inputs.get_right(), network.get_left(), YELLOW)
+    split1 = arrow_between(network.get_right(), film.get_left(), YELLOW)
+    split2 = arrow_between(network.get_right(), summary.get_left(), PURPLE)
+    group = VGroup(inputs, network, outputs, line, split1, split2)
+    inputs.move_to(LEFT * 2.7)
+    network.move_to(ORIGIN)
+    outputs.move_to(RIGHT * 2.75)
+    line.put_start_and_end_on(inputs.get_right(), network.get_left())
+    split1.put_start_and_end_on(network.get_right(), film.get_left())
+    split2.put_start_and_end_on(network.get_right(), summary.get_left())
+    return group, {"inputs": inputs, "network": network, "film": film, "summary": summary}
+
+
+def spectrum_path_figure():
+    s = spectrum(2.0, 0.72, CYAN, 12)
+    s_label = txt("S [2, 301]", 12, CYAN, BOLD).next_to(s, DOWN, buff=0.10)
+    feature = convolution_stack(CYAN, "released encoder · frozen", 1.35, 0.92)
+    local = token_grid(3, 10, CYAN, 0.10)
+    local_label = txt("A_local [301, 256]", 10, CYAN).next_to(local, DOWN, buff=0.10)
+    pool = label_panel("mean pool", "301 → 1", CYAN, 0.82, 0.50)
+    cphys = label_panel("c_physics", "[384]", PURPLE, 0.88, 0.50)
+    queries = dense_network(width=0.95, height=0.85, layers=(4, 5, 4), color=CYAN, title_text="16 learned queries")
+    goal = token_grid(2, 8, PURPLE, 0.10)
+    goal_label = txt("a_goal [16, 384]", 10, PURPLE).next_to(goal, DOWN, buff=0.08)
+    left = VGroup(s, s_label)
+    local_group = VGroup(local, local_label)
+    top = VGroup(pool, cphys).arrange(RIGHT, buff=0.18)
+    lower = VGroup(queries, VGroup(goal, goal_label)).arrange(RIGHT, buff=0.20)
+    result = VGroup(top, lower).arrange(DOWN, buff=0.28, aligned_edge=LEFT)
+    groups = VGroup(left, feature, local_group, result).arrange(RIGHT, buff=0.35)
+    arrows = VGroup(
+        arrow_between(s.get_right(), feature.get_left(), CYAN),
+        arrow_between(feature.get_right(), local.get_left(), CYAN),
+        arrow_between(local.get_right(), pool.get_left(), CYAN),
+        arrow_between(pool.get_right(), cphys.get_left(), PURPLE),
+        arrow_between(local.get_right(), queries.get_left(), CYAN),
+        arrow_between(queries.get_right(), goal.get_left(), PURPLE),
     )
-
-    landmark = {
-        "occ_input": occ_input,
-        "scalar_input": scalar_input,
-        "spectrum_input": spectrum_input,
-        "occ_encoder": occ_encoder,
-        "scalar_mlp": scalar_mlp,
-        "spectrum_encoder": spectrum_encoder,
-        "fusion": fusion,
-        "predictor": predictor,
-        "occ_decoder": occ_decoder,
-        "scalar_decoder": scalar_decoder,
-        "physics": physics,
-        "ema": ema,
-        "losses": losses,
-    }
-    return VGroup(edges, *landmark.values()), landmark
+    return VGroup(groups, arrows), {"spectrum": s, "feature": feature, "local": local, "cphys": cphys, "goal": goal}
 
 
 # ---------------------------------------------------------------------------
-# Scene 1: architecture flight and one training sample
+# 1. Input contract and masking
 # ---------------------------------------------------------------------------
 
-class ArchitectureFlightScene(MovingCameraScene):
+
+class DataAndMaskScene(Scene):
     def construct(self):
-        self.camera.frame.set(width=config.frame_width).move_to(ORIGIN)
-        self.camera.frame.save_state()
-        heading = title("A single sample learns to become a design", "Unified 192-D JEPA")
-        self.play(Write(heading), run_time=1.2)
+        h = heading("A training sample is factorized before it is masked", "Step 1 of the real loop")
+        self.play(Write(h))
 
-        diagram, nodes = architecture_map()
-        diagram.shift(DOWN * 0.35)
-        self.play(FadeIn(diagram, shift=UP * 0.2), run_time=1.5)
-        overview = text("one conditional model · one physical target · one stable answer key", 18, MUTED)
-        overview.next_to(heading, DOWN, buff=0.20)
-        self.play(FadeIn(overview))
-        self.wait(0.5)
+        occ = occupancy_map(side=0.15, hidden=False).shift(LEFT * 4.6 + UP * 0.15)
+        occ_label = txt("occupancy M", 20, BLUE, BOLD).next_to(occ, DOWN, buff=0.18)
+        occ_shape = txt("binary [1, 64, 64]", 13, MUTED).next_to(occ_label, DOWN, buff=0.07)
+        scalars = scalar_vector(("2.75", "0.75", "4.25"), (1, 1, 1)).shift(LEFT * 0.35 + UP * 0.10)
+        scalar_label = txt("three global physical scalars", 18, YELLOW, BOLD).next_to(scalars, DOWN, buff=0.18)
+        spectrum_view = spectrum(3.1, 1.2, CYAN, 8).shift(RIGHT * 4.25 + UP * 0.15)
+        spectrum_label = txt("target spectrum S", 20, CYAN, BOLD).next_to(spectrum_view, DOWN, buff=0.18)
+        spectrum_shape = txt("real + imaginary response [2, 301]", 13, MUTED).next_to(spectrum_label, DOWN, buff=0.07)
+        self.play(FadeIn(occ), Write(occ_label), FadeIn(occ_shape))
+        self.play(FadeIn(scalars), Write(scalar_label))
+        self.play(Create(spectrum_view), Write(spectrum_label), FadeIn(spectrum_shape))
 
-        # The sample first appears in the independent, maskable input streams.
-        self.play(self.camera.frame.animate.move_to(LEFT * 4.35 + UP * 0.30).scale(0.66), run_time=1.2)
-        sample_tag = text("ONE TRAINING SAMPLE", 16, INK, BOLD)
-        sample_tag.next_to(nodes["occ_input"], UP, buff=0.5)
-        grid = occupancy_grid(masked=True).scale(0.82).next_to(nodes["occ_input"], LEFT, buff=0.65)
-        scalars = scalar_chips(("0.73", "?", "0.28"), unknown=False).scale(0.82)
-        scalars.next_to(nodes["scalar_input"], LEFT, buff=0.55)
-        unknown_ring = SurroundingRectangle(scalars[1], color=RED, buff=0.06, stroke_width=2)
-        spectrum = spectrum_plot(width=2.15, height=0.86).next_to(nodes["spectrum_input"], LEFT, buff=0.55)
-        self.play(FadeIn(sample_tag), DrawBorderThenFill(grid), FadeIn(scalars), Create(spectrum))
-        self.play(Create(unknown_ring), Indicate(grid[1], color=RED), run_time=0.8)
-        mask_note = text("Mask space and scalar knowledge independently", 17, YELLOW)
-        mask_note.next_to(spectrum, DOWN, buff=0.30)
-        self.play(Write(mask_note))
+        statement = txt("Spatial uncertainty and parameter uncertainty are different questions.", 22, INK, BOLD)
+        statement.to_edge(DOWN, buff=0.33)
+        self.play(Write(statement))
         self.wait(0.6)
 
-        # Occupancy and scalar encoders meet as FiLM-conditioned tokens.
-        self.play(FadeOut(mask_note), FadeOut(unknown_ring), run_time=0.35)
-        travel(self, nodes["occ_input"].get_right(), nodes["occ_encoder"].get_left(), BLUE)
-        travel(self, nodes["scalar_input"].get_right(), nodes["scalar_mlp"].get_left(), YELLOW)
-        self.play(self.camera.frame.animate.move_to(LEFT * 2.55 + UP * 0.85).scale(0.80), run_time=0.9)
-        film = math_text("γ(s) ⊙ features + β(s)", 23, YELLOW)
-        film.next_to(nodes["scalar_mlp"], DOWN, buff=0.38)
-        feature_tokens = token_row(10, BLUE).next_to(nodes["occ_encoder"], UP, buff=0.32)
-        self.play(Indicate(nodes["scalar_mlp"], color=YELLOW), Write(film), FadeIn(feature_tokens, shift=RIGHT * 0.2))
-        self.play(ApplyWave(feature_tokens, direction=RIGHT), run_time=0.8)
-        conditioning = text("the same three physical parameters steer every occupancy block", 15, MUTED)
-        conditioning.next_to(film, DOWN, buff=0.18)
-        self.play(FadeIn(conditioning))
-        self.wait(0.5)
-
-        # The goal carries the desired physics and is frozen.
-        self.play(FadeOut(film), FadeOut(conditioning), FadeOut(feature_tokens), run_time=0.35)
-        self.play(self.camera.frame.animate.move_to(LEFT * 2.85 + DOWN * 1.15).scale(0.86), run_time=0.8)
-        travel(self, nodes["spectrum_input"].get_right(), nodes["spectrum_encoder"].get_left(), CYAN)
-        goal_tokens = token_row(8, CYAN).next_to(nodes["spectrum_encoder"], DOWN, buff=0.34)
-        lock = text("❄ frozen physical representation", 17, CYAN, BOLD)
-        lock.next_to(goal_tokens, DOWN, buff=0.20)
-        self.play(FadeIn(goal_tokens, shift=RIGHT * 0.2), Write(lock), Indicate(nodes["spectrum_encoder"], color=CYAN))
-        self.wait(0.5)
-        self.play(FadeOut(goal_tokens), FadeOut(lock), run_time=0.3)
-
-        # Zoom to fusion and predictor: the core JEPA completion question.
-        self.play(self.camera.frame.animate.move_to(RIGHT * 1.25 + UP * 0.95).scale(0.72), run_time=1.0)
-        travel(self, nodes["occ_encoder"].get_right(), nodes["fusion"].get_left(), BLUE)
-        travel(self, nodes["spectrum_encoder"].get_right(), nodes["fusion"].get_bottom(), CYAN)
-        fusion_tokens = VGroup(token_row(7, BLUE), token_row(5, CYAN)).arrange(DOWN, buff=0.12)
-        fusion_tokens.next_to(nodes["fusion"], UP, buff=0.32)
-        self.play(FadeIn(fusion_tokens, shift=UP * 0.15), Indicate(nodes["fusion"], color=PURPLE))
-        self.play(ApplyWave(fusion_tokens, direction=RIGHT), run_time=0.8)
-        travel(self, nodes["fusion"].get_right(), nodes["predictor"].get_left(), PURPLE)
-        queries = VGroup(*[text("?", 20, GREEN, BOLD) for _ in range(5)]).arrange(RIGHT, buff=0.18)
-        queries.next_to(nodes["predictor"], UP, buff=0.33)
-        answer = token_row(5, GREEN)
-        answer.move_to(queries)
-        prompt = text("masked positions ask the context for latent answers", 16, GREEN)
-        prompt.next_to(queries, UP, buff=0.20)
-        self.play(FadeIn(queries, shift=DOWN * 0.1), Write(prompt))
-        self.play(Transform(queries, answer), Flash(nodes["predictor"].get_center(), color=GREEN), run_time=1.0)
-        self.wait(0.5)
-
-        # The target branch is shown as an answer key, not another trainable path.
-        self.play(FadeOut(queries), FadeOut(prompt), FadeOut(fusion_tokens), run_time=0.35)
-        self.play(self.camera.frame.animate.move_to(RIGHT * 0.65 + DOWN * 1.65).scale(0.78), run_time=0.9)
-        full_grid = occupancy_grid(seed=7).scale(0.58).next_to(nodes["ema"], LEFT, buff=0.48)
-        stable = text("full, unmasked sample", 15, PURPLE)
-        stable.next_to(full_grid, DOWN, buff=0.15)
-        self.play(FadeIn(full_grid), Write(stable), Indicate(nodes["ema"], color=PURPLE))
-        travel(self, nodes["occ_encoder"].get_bottom(), nodes["ema"].get_left(), PURPLE, 0.55)
-        target_tokens = token_row(5, PURPLE).next_to(nodes["ema"], UP, buff=0.32)
-        predicted_tokens = token_row(5, GREEN).next_to(nodes["predictor"], DOWN, buff=0.31)
-        self.play(FadeIn(target_tokens), FadeIn(predicted_tokens))
-        self.play(Indicate(nodes["losses"], color=RED), run_time=0.7)
-        comparison = text("compare predicted and stable latent structure", 17, RED, BOLD)
-        comparison.next_to(nodes["losses"], DOWN, buff=0.28)
-        self.play(Write(comparison))
-        self.wait(0.5)
-
-        # Physics loss gives the completion an electromagnetic reality check.
-        self.play(
-            FadeOut(full_grid), FadeOut(stable), FadeOut(target_tokens),
-            FadeOut(predicted_tokens), FadeOut(comparison), run_time=0.35,
-        )
-        self.play(self.camera.frame.animate.move_to(RIGHT * 4.75 + DOWN * 0.10).scale(0.70), run_time=0.9)
-        travel(self, nodes["predictor"].get_right(), nodes["occ_decoder"].get_left(), BLUE)
-        travel(self, nodes["predictor"].get_right(), nodes["scalar_decoder"].get_left(), YELLOW)
-        decoded_grid = occupancy_grid(seed=19).scale(0.52).next_to(nodes["occ_decoder"], UP, buff=0.32)
-        decoded_scalars = scalar_chips(("l̂", "ĥ", "r̂")).scale(0.75).next_to(nodes["scalar_decoder"], UP, buff=0.32)
-        decoded_spectrum = spectrum_plot(width=2.0, height=0.75, seed=11, color=GREEN)
-        decoded_spectrum.next_to(nodes["physics"], DOWN, buff=0.33)
-        self.play(FadeIn(decoded_grid), FadeIn(decoded_scalars), Create(decoded_spectrum))
-        travel(self, nodes["occ_decoder"].get_bottom(), nodes["physics"].get_top(), BLUE, 0.45)
-        physics_note = text("Does this design reproduce the requested response?", 16, CYAN, BOLD)
-        physics_note.next_to(decoded_spectrum, DOWN, buff=0.22)
-        self.play(Write(physics_note), Flash(nodes["physics"].get_center(), color=CYAN))
+        mask_grid = token_grid(4, 4, BLUE, 0.15, missing=True).move_to(occ.get_center())
+        mask_frame = SurroundingRectangle(mask_grid, color=RED, buff=0.13, stroke_width=1.8)
+        mask_title = txt("BlockMasker M [16, 16]", 15, RED, BOLD).next_to(mask_frame, UP, buff=0.15)
+        masked_scalars = scalar_vector(("2.75", "0", "4.25"), (1, 0, 1)).move_to(scalars)
+        flags = txt("unknown: value → 0, flag → 0", 13, RED).next_to(masked_scalars, UP, buff=0.22)
+        self.play(FadeOut(occ), FadeIn(mask_grid), Create(mask_frame), Write(mask_title))
+        self.play(Transform(scalars, masked_scalars), Write(flags))
+        self.play(Indicate(mask_grid, color=RED), Indicate(scalars[1], color=RED))
         self.wait(0.8)
 
-        # The camera finally pulls back: it was one coherent training step.
-        self.play(
-            FadeOut(decoded_grid), FadeOut(decoded_scalars), FadeOut(decoded_spectrum), FadeOut(physics_note),
-            FadeOut(grid), FadeOut(scalars), FadeOut(spectrum), FadeOut(sample_tag),
-            run_time=0.45,
-        )
-        self.play(Restore(self.camera.frame), run_time=1.3)
-        self.play(Indicate(diagram, color=GREEN, scale_factor=1.015), run_time=1.0)
-        closing = text("One sample.  Three views of correctness.  A single update.", 23, GREEN, BOLD)
-        closing.to_edge(DOWN, buff=0.35)
-        self.play(Write(closing))
-        self.wait(1.3)
-
 
 # ---------------------------------------------------------------------------
-# Scene 2: what actually changes during training
+# 2. Student inputs: actual neural-network components
 # ---------------------------------------------------------------------------
 
-class WeightUpdateScene(Scene):
+
+class EncodersScene(Scene):
     def construct(self):
-        heading = title("The instant learning happens", "Training dynamics")
-        self.play(Write(heading))
+        h = heading("Three inputs enter three different neural computations", "Student forward · steps 2–4")
+        self.play(Write(h))
 
-        loss = rounded_panel("Combined loss", "latent + scalar + physics", RED, 2.55, 1.15)
-        student = rounded_panel("Student network", "CNN · MLP · fusion · predictor", GREEN, 3.25, 1.25)
-        ema = rounded_panel("EMA target", "a slowly moving answer key", PURPLE, 2.65, 1.15)
-        frozen = rounded_panel("Frozen physics", "SpectrumPath + EM surrogate", CYAN, 2.75, 1.15)
-        loss.move_to(LEFT * 4.8 + UP * 0.45)
-        student.move_to(ORIGIN + UP * 0.45)
-        ema.move_to(RIGHT * 4.25 + UP * 1.55)
-        frozen.move_to(RIGHT * 4.25 + DOWN * 1.25)
+        occ_fig, occ_nodes = occupancy_encoder_figure()
+        occ_fig.scale(0.78).move_to(UP * 1.15)
+        occ_title = txt("1  Occupancy encoder", 19, BLUE, BOLD).next_to(occ_fig, UP, buff=0.15)
+        self.play(FadeIn(occ_title), FadeIn(occ_fig, shift=RIGHT * 0.15))
+        travel(self, occ_nodes["image"].get_right(), occ_nodes["patch"].get_left(), BLUE)
+        travel(self, occ_nodes["patch"].get_right(), occ_nodes["grid"].get_left(), BLUE)
+        self.play(Indicate(occ_nodes["film"], color=YELLOW), ApplyWave(occ_nodes["stack"][0], direction=DOWN), run_time=0.9)
+        occ_note = txt("Masked patch embeddings are replaced by one learned mask token, then receive position embeddings.", 14, MUTED)
+        occ_note.next_to(occ_fig, DOWN, buff=0.18)
+        self.play(Write(occ_note))
+        self.wait(0.5)
+        self.play(FadeOut(occ_fig), FadeOut(occ_title), FadeOut(occ_note), run_time=0.35)
 
-        backward = connector(loss.get_right(), student.get_left(), RED, 3.0)
-        ema_link = connector(student.get_right(), ema.get_left(), PURPLE, 2.5)
-        self.play(FadeIn(loss), FadeIn(student), FadeIn(ema), FadeIn(frozen), GrowArrow(backward), GrowArrow(ema_link))
-        self.play(Write(text("backpropagation", 17, RED, BOLD).next_to(backward, UP, buff=0.14)))
+        scalar_fig, scalar_nodes = scalar_encoder_figure()
+        scalar_fig.scale(0.86).move_to(UP * 0.35)
+        scalar_title = txt("2  Scalar encoder", 19, YELLOW, BOLD).next_to(scalar_fig, UP, buff=0.22)
+        self.play(FadeIn(scalar_title), FadeIn(scalar_fig, shift=UP * 0.15))
+        travel(self, scalar_nodes["inputs"].get_right(), scalar_nodes["network"].get_left(), YELLOW)
+        travel(self, scalar_nodes["network"].get_right(), scalar_nodes["film"].get_left(), YELLOW)
+        pulse(self, scalar_nodes["summary"].get_center(), PURPLE)
+        scalar_note = txt("The live MLP emits six identity-initialized FiLM pairs and one 192-D scalar-summary token.", 14, MUTED)
+        scalar_note.next_to(scalar_fig, DOWN, buff=0.25)
+        self.play(Write(scalar_note))
+        self.wait(0.5)
+        self.play(FadeOut(scalar_fig), FadeOut(scalar_title), FadeOut(scalar_note), run_time=0.35)
 
-        # Weight knobs make the otherwise invisible update tangible.
-        sliders = VGroup()
-        tracker_specs = [
-            ("occupancy filters", BLUE, 0.22, 0.73),
-            ("FiLM conditioning", YELLOW, 0.70, 0.38),
-            ("attention weights", PURPLE, 0.31, 0.82),
-            ("decoder weights", GREEN, 0.65, 0.45),
-        ]
-        trackers = []
-        for index, (label, color, start, end) in enumerate(tracker_specs):
-            y = 1.55 - index * 0.75
-            name = text(label, 16, MUTED).move_to(LEFT * 4.8 + RIGHT * 0.10 + UP * y)
-            rail = Line(LEFT * 2.55 + UP * y, LEFT * 0.55 + UP * y, color=GRID, stroke_width=5)
-            progress = Line(rail.get_start(), rail.get_start(), color=color, stroke_width=5)
-            value = ValueTracker(start)
-            knob = always_redraw(lambda rail=rail, value=value, color=color: glow_dot(rail.point_from_proportion(value.get_value()), color, 0.07))
-            fill = always_redraw(
-                lambda rail=rail, value=value, color=color: Line(
-                    rail.get_start(), rail.point_from_proportion(value.get_value()), color=color, stroke_width=5
-                )
-            )
-            sliders.add(name, rail, fill, knob)
-            trackers.append((value, end))
-        sliders.shift(DOWN * 1.1)
-        self.play(FadeIn(sliders, shift=RIGHT * 0.2))
+        spec_fig, spec_nodes = spectrum_path_figure()
+        spec_fig.scale(0.76).move_to(UP * 0.35)
+        spec_title = txt("3  Frozen SpectrumPath", 19, CYAN, BOLD).next_to(spec_fig, UP, buff=0.22)
+        self.play(FadeIn(spec_title), FadeIn(spec_fig, shift=UP * 0.15))
+        travel(self, spec_nodes["spectrum"].get_right(), spec_nodes["feature"].get_left(), CYAN)
+        travel(self, spec_nodes["feature"].get_right(), spec_nodes["local"].get_left(), CYAN)
+        pulse(self, spec_nodes["cphys"].get_center(), PURPLE)
+        pulse(self, spec_nodes["goal"].get_center(), PURPLE)
+        spec_note = txt("Released spectrum encoder is frozen: it yields c_physics [384] and 16 structured goal tokens [16, 384].", 14, MUTED)
+        spec_note.next_to(spec_fig, DOWN, buff=0.22)
+        self.play(Write(spec_note))
+        self.wait(0.9)
 
-        signal = text("error signal", 16, RED, BOLD).next_to(loss, DOWN, buff=0.35)
-        self.play(FadeIn(signal), Indicate(loss, color=RED), run_time=0.7)
-        travel(self, loss.get_right(), student.get_left(), RED, 0.8)
-        self.play(*[tracker.animate.set_value(end) for tracker, end in trackers], run_time=1.7, rate_func=there_and_back_with_pause)
-        update = text("small, coordinated parameter changes", 20, GREEN, BOLD)
-        update.next_to(sliders, DOWN, buff=0.36)
-        self.play(Write(update), Indicate(student, color=GREEN))
 
-        # EMA is intentionally a lagging copy, never a gradient destination.
-        student_pulse = glow_dot(student.get_right(), GREEN)
-        self.add(student_pulse)
-        self.play(MoveAlongPath(student_pulse, Line(student.get_right(), ema.get_left())), run_time=1.0, rate_func=linear)
-        self.remove(student_pulse)
-        slow = text("τ · old target + (1 − τ) · student", 17, PURPLE)
-        slow.next_to(ema, UP, buff=0.28)
-        stop = text("no gradient", 15, PURPLE, BOLD).next_to(ema, DOWN, buff=0.18)
-        lock = text("no gradient", 15, CYAN, BOLD).next_to(frozen, DOWN, buff=0.18)
-        self.play(Write(slow), FadeIn(stop), FadeIn(lock), Indicate(ema, color=PURPLE), Indicate(frozen, color=CYAN))
+# ---------------------------------------------------------------------------
+# 3. Fusion and the exact GCLCT completion mechanism
+# ---------------------------------------------------------------------------
+
+
+class FusionPredictorScene(Scene):
+    def construct(self):
+        h = heading("The predictor fills latent holes, not pixels", "Student forward · steps 5–7")
+        self.play(Write(h))
+
+        occ_tokens = token_grid(4, 8, BLUE, 0.12, missing=True)
+        goal_tokens = token_grid(2, 8, CYAN, 0.12)
+        scalar_token = RoundedRectangle(width=0.35, height=0.35, corner_radius=0.06, stroke_color=YELLOW,
+                                        stroke_width=1.5, fill_color=YELLOW, fill_opacity=0.7)
+        scalar_token.add(txt("s", 15, PANEL, BOLD).move_to(scalar_token))
+        left = VGroup(
+            VGroup(occ_tokens, txt("256 occupancy tokens · 192-D", 12, BLUE).next_to(occ_tokens, DOWN, buff=0.10)),
+            VGroup(goal_tokens, txt("16 goal tokens · 384-D", 12, CYAN).next_to(goal_tokens, DOWN, buff=0.10)),
+            VGroup(scalar_token, txt("1 summary", 11, YELLOW).next_to(scalar_token, DOWN, buff=0.08)),
+        ).arrange(DOWN, buff=0.34, aligned_edge=LEFT).move_to(LEFT * 4.8 + DOWN * 0.3)
+        self.play(FadeIn(left, shift=RIGHT * 0.12))
+
+        projection = label_panel("goal projection", "384 → 192", PURPLE, 1.35, 0.65).move_to(LEFT * 2.65 + DOWN * 0.15)
+        fusion = mini_transformer(2, PURPLE, "Fusion transformer · 2 layers", 2.20, 1.20).move_to(ORIGIN + UP * 0.55)
+        fused = token_grid(3, 12, PURPLE, 0.095).next_to(fusion, DOWN, buff=0.25)
+        fused_label = txt("273 context tokens = 256 + 16 + 1", 12, PURPLE, BOLD).next_to(fused, DOWN, buff=0.08)
+        arrows = VGroup(
+            arrow_between(occ_tokens.get_right(), fusion.get_left(), BLUE),
+            arrow_between(goal_tokens.get_right(), projection.get_left(), CYAN),
+            arrow_between(projection.get_right(), fusion.get_left(), PURPLE),
+            arrow_between(scalar_token.get_right(), fusion.get_left(), YELLOW),
+        )
+        self.play(FadeIn(projection), GrowArrow(arrows[1]), GrowArrow(arrows[0]), GrowArrow(arrows[2]), GrowArrow(arrows[3]))
+        travel(self, goal_tokens.get_right(), projection.get_left(), CYAN)
+        self.play(FadeIn(fusion), FadeIn(fused), Write(fused_label), Indicate(fusion, color=PURPLE))
+        self.wait(0.5)
+
+        queries = query_tokens(8).move_to(RIGHT * 2.7 + UP * 1.55)
+        query_label = txt("257 queries: 256 positions + 1 scalar query", 12, GREEN, BOLD).next_to(queries, UP, buff=0.12)
+        key_values = token_grid(3, 12, PURPLE, 0.075).move_to(RIGHT * 2.7 + DOWN * 1.75)
+        kv_label = txt("key/value = all 273 fused tokens", 11, PURPLE).next_to(key_values, DOWN, buff=0.10)
+        cphys = label_panel("c_physics", "384 → 192 FiLM", CYAN, 1.55, 0.60).move_to(RIGHT * 5.25 + UP * 0.75)
+        predictor = gclct_stack().scale(0.88).move_to(RIGHT * 2.7 + DOWN * 0.12)
+        self.play(FadeIn(queries), Write(query_label), FadeIn(key_values), Write(kv_label), FadeIn(cphys), FadeIn(predictor))
+        self.play(GrowArrow(arrow_between(fused.get_right(), queries.get_left(), GREEN)))
+        travel(self, fused.get_right(), queries.get_left(), GREEN)
+        conditioning = arrow_between(cphys.get_left(), predictor.get_right(), CYAN)
+        self.play(GrowArrow(conditioning), Indicate(cphys, color=CYAN), ApplyWave(predictor[0], direction=DOWN), run_time=0.9)
+
+        output = VGroup(token_grid(2, 8, GREEN, 0.10), RoundedRectangle(width=0.34, height=0.34, corner_radius=0.06,
+                      stroke_color=YELLOW, stroke_width=1.4, fill_color=YELLOW, fill_opacity=0.75))
+        output.arrange(RIGHT, buff=0.18).next_to(predictor, RIGHT, buff=0.24)
+        output_label = txt("z_hat\n256 occupancy + 1 scalar", 10, GREEN).next_to(output, DOWN, buff=0.08)
+        self.play(FadeIn(output, shift=RIGHT * 0.12), Write(output_label))
+        final = txt("Every masked location must infer its latent from visible geometry, the scalar context, and the spectrum goal.", 17, INK, BOLD)
+        final.to_edge(DOWN, buff=0.28)
+        self.play(Write(final))
         self.wait(1.0)
 
-        takeaway = text("Learnable parts adapt.  Targets stabilize.  Physics stays fixed.", 25, INK, BOLD)
-        takeaway.to_edge(DOWN, buff=0.35)
-        self.play(Write(takeaway))
-        self.wait(1.2)
-
 
 # ---------------------------------------------------------------------------
-# Scene 3: inference is a direct, spectrum-conditioned design journey
+# 4. EMA teacher, decoders, MetaDiT assembly, and all loss routes
 # ---------------------------------------------------------------------------
 
-class InferenceJourneyScene(MovingCameraScene):
+
+class TargetDecodeLossScene(Scene):
     def construct(self):
-        self.camera.frame.set(width=config.frame_width).move_to(ORIGIN)
-        heading = title("Now reverse the question", "Inference")
-        self.play(Write(heading))
-        subtitle = text("Desired electromagnetic response in → manufacturable design out", 20, MUTED)
-        subtitle.next_to(heading, DOWN, buff=0.20)
-        self.play(FadeIn(subtitle))
+        h = heading("One forward step creates several honest learning signals", "Target, decoding, and physics")
+        self.play(Write(h))
 
-        desired = spectrum_plot(width=3.4, height=1.55, seed=23, color=CYAN)
-        desired.move_to(LEFT * 5.0 + UP * 0.45)
-        desired_label = text("desired spectrum", 22, CYAN, BOLD).next_to(desired, DOWN, buff=0.28)
-        unknown_geometry = occupancy_grid(masked=True).scale(0.8).move_to(LEFT * 5.0 + DOWN * 2.05)
-        unknown_label = text("occupancy unknown", 17, MUTED).next_to(unknown_geometry, DOWN, buff=0.20)
-        unknown_scalars = scalar_chips(("l", "h", "r"), unknown=True).move_to(LEFT * 5.0 + DOWN * 3.05)
-        self.play(Create(desired), Write(desired_label), FadeIn(unknown_geometry), Write(unknown_label), FadeIn(unknown_scalars))
+        # Teacher path (top) is separate and frozen from gradient.
+        full_occ = occupancy_map(side=0.095, seed=15, hidden=False).move_to(LEFT * 5.45 + UP * 1.55)
+        true_scalars = scalar_vector(("2.75", "0.75", "4.25"), (1, 1, 1), compact=True).next_to(full_occ, RIGHT, buff=0.30)
+        teacher_scalar = dense_network(1.10, 0.75, (4, 5, 4), PURPLE, "scalar_mlp_ema")
+        teacher_scalar.scale(0.65).move_to(LEFT * 1.95 + UP * 1.55)
+        teacher_encoder = mini_transformer(6, PURPLE, "EMA occupancy encoder · 6 blocks", 1.85, 1.40).move_to(LEFT * 0.05 + UP * 1.55)
+        cphysics = token_grid(1, 6, CYAN, 0.075).move_to(LEFT * 1.80 + UP * 0.50)
+        cphysics_label = txt("c_physics from frozen SpectrumPath", 9, CYAN).next_to(cphysics, DOWN, buff=0.06)
+        spectrum_film = label_panel("frozen SpectrumFiLM", "γ, β for target", PINK, 1.35, 0.50).move_to(LEFT * 0.05 + UP * 0.50)
+        scalar_target = token_grid(1, 5, PURPLE, 0.075).move_to(LEFT * 1.95 + UP * 0.72)
+        scalar_target_label = txt("z_y_scal", 9, PURPLE).next_to(scalar_target, UP, buff=0.05)
+        raw_target = token_grid(2, 8, PURPLE, 0.09).move_to(RIGHT * 2.05 + UP * 1.95)
+        spec_target = token_grid(2, 8, PINK, 0.09).move_to(RIGHT * 2.05 + UP * 0.93)
+        teacher_title = txt("STOP-GRAD EMA TARGET PATH", 14, PURPLE, BOLD).next_to(full_occ, UP, buff=0.16)
+        self.play(
+            FadeIn(full_occ), FadeIn(true_scalars), FadeIn(teacher_scalar),
+            FadeIn(teacher_encoder), FadeIn(cphysics), Write(cphysics_label),
+            FadeIn(spectrum_film), FadeIn(scalar_target), Write(scalar_target_label),
+            Write(teacher_title),
+        )
+        self.play(GrowArrow(arrow_between(full_occ.get_right(), teacher_encoder.get_left(), PURPLE)),
+                  GrowArrow(arrow_between(true_scalars.get_right(), teacher_scalar.get_left(), PURPLE)))
+        self.play(
+            GrowArrow(arrow_between(teacher_scalar.get_right(), teacher_encoder.get_left(), PURPLE)),
+            GrowArrow(arrow_between(cphysics.get_right(), spectrum_film.get_left(), PINK)),
+            GrowArrow(arrow_between(spectrum_film.get_top(), teacher_encoder.get_bottom(), PINK)),
+        )
+        self.play(FadeIn(raw_target), FadeIn(spec_target))
+        raw_label = txt("z_y_raw\nspectrum-free", 10, PURPLE).next_to(raw_target, RIGHT, buff=0.10)
+        spec_label = txt("z_y_occ_spec\nfrozen SpectrumFiLM", 10, PINK).next_to(spec_target, RIGHT, buff=0.10)
+        self.play(Write(raw_label), Write(spec_label))
 
-        # A compact inference-only path, deliberately without loss or EMA branches.
-        spectrum_encoder = rounded_panel("Frozen SpectrumPath", "encode the goal", CYAN, 2.65, 1.15)
-        fusion_predictor = rounded_panel("Fusion + predictor", "complete masked 192-D tokens", PURPLE, 3.0, 1.15)
-        decode = rounded_panel("Decoders", "occupancy + l̂, ĥ, r̂", GREEN, 2.65, 1.15)
-        verify = rounded_panel("Frozen EM surrogate", "check the response", CYAN, 2.75, 1.15)
-        spectrum_encoder.move_to(LEFT * 2.0 + UP * 0.45)
-        fusion_predictor.move_to(RIGHT * 1.25 + UP * 0.45)
-        decode.move_to(RIGHT * 4.55 + UP * 0.45)
-        verify.move_to(RIGHT * 4.55 + DOWN * 2.20)
+        # Student outputs then enter two decoders.
+        predicted = token_grid(2, 8, GREEN, 0.10).move_to(LEFT * 5.2 + DOWN * 1.15)
+        scalar_q = RoundedRectangle(width=0.36, height=0.36, corner_radius=0.06, stroke_color=YELLOW,
+                                    stroke_width=1.5, fill_color=YELLOW, fill_opacity=0.7).next_to(predicted, RIGHT, buff=0.18)
+        scalar_q.add(txt("s", 15, PANEL, BOLD).move_to(scalar_q))
+        pred_label = txt("z_hat", 14, GREEN, BOLD).next_to(predicted, UP, buff=0.10)
+        occ_decoder = VGroup(
+            token_grid(4, 4, GREEN, 0.085), convolution_stack(BLUE, "reshape 16×16 → upsample", 1.10, 0.80),
+            occupancy_map(side=0.07, seed=29, hidden=False),
+        ).arrange(RIGHT, buff=0.20).move_to(LEFT * 1.65 + DOWN * 1.10)
+        scalar_heads = dense_network(1.25, 0.80, (3, 5, 3), YELLOW, "three scalar heads")
+        scalar_heads.scale(0.85).move_to(RIGHT * 3.20 + DOWN * 0.90)
+        scalars_hat = scalar_vector(("l̂", "ĥ", "r̂"), (0, 0, 0), compact=True).move_to(RIGHT * 4.75 + DOWN * 0.90)
+        self.play(FadeIn(predicted), FadeIn(scalar_q), Write(pred_label), FadeIn(occ_decoder), FadeIn(scalar_heads), FadeIn(scalars_hat))
+        self.play(GrowArrow(arrow_between(predicted.get_right(), occ_decoder.get_left(), GREEN)),
+                  GrowArrow(arrow_between(scalar_q.get_right(), scalar_heads.get_left(), YELLOW)),
+                  GrowArrow(arrow_between(scalar_heads.get_right(), scalars_hat.get_left(), YELLOW)))
+
+        # Geometry is only broadcast here, at the frozen surrogate boundary.
+        assembly = label_panel("assemble geometry", "[3, 64, 64] only here", ORANGE, 1.65, 0.70).move_to(RIGHT * 1.55 + DOWN * 2.45)
+        surrogate = convolution_stack(CYAN, "frozen MetaDiT EM surrogate", 1.70, 1.00).move_to(RIGHT * 4.15 + DOWN * 2.45)
+        s_hat = spectrum(1.85, 0.58, GREEN, 22).next_to(surrogate, RIGHT, buff=0.25)
+        self.play(FadeIn(assembly), FadeIn(surrogate), Create(s_hat))
+        self.play(GrowArrow(arrow_between(occ_decoder.get_bottom(), assembly.get_top(), BLUE)),
+                  GrowArrow(arrow_between(scalars_hat.get_bottom(), assembly.get_top(), YELLOW)),
+                  GrowArrow(arrow_between(assembly.get_right(), surrogate.get_left(), ORANGE)),
+                  GrowArrow(arrow_between(surrogate.get_right(), s_hat.get_left(), CYAN)))
+
+        # Objective chips make every supervised comparison visible.
+        chips = VGroup(
+            loss_chip("L_inv + L_var + L_cov", "masked z_hat ↔ z_y_raw", RED, 1.75),
+            loss_chip("L_cond", "spectrum-conditioned target", PINK, 1.35),
+            loss_chip("L_scal_t", "scalar summary ↔ EMA summary", PURPLE, 1.48),
+            loss_chip("L_scalar", "unknown l, h, r only", YELLOW, 1.30),
+            loss_chip("L_occ", "masked-pixel BCE", BLUE, 1.25),
+            loss_chip("L_phys", "SmoothL1(S_hat, S)", CYAN, 1.35),
+            loss_chip("L_summary", "known scalar readout", ORANGE, 1.45),
+        ).arrange(RIGHT, buff=0.08).scale(0.72)
+        chips.to_edge(DOWN, buff=0.16)
+        self.play(FadeIn(chips, shift=UP * 0.12))
+        self.play(Indicate(chips[0], color=RED), Indicate(chips[5], color=CYAN), run_time=0.8)
+        note = txt("Physics is differentiable through the input geometry—but the released surrogate parameters never update.", 14, MUTED)
+        note.next_to(chips, UP, buff=0.10)
+        self.play(Write(note))
+        self.wait(1.0)
+
+
+# ---------------------------------------------------------------------------
+# 5. The optimizer step: exact gradient boundaries and EMA update
+# ---------------------------------------------------------------------------
+
+
+class UpdateScene(Scene):
+    def construct(self):
+        h = heading("Only the student learns from this sample", "Steps 9–10: backward and EMA")
+        self.play(Write(h))
+
+        objective = label_panel("weighted total loss", "all active terms summed", RED, 2.15, 0.82).move_to(LEFT * 5.0 + UP * 0.5)
+        student_blocks = VGroup(
+            label_panel("occupancy encoder", "patch + 6 blocks", BLUE, 1.75, 0.70),
+            label_panel("scalar MLP", "live FiLM + summary", YELLOW, 1.75, 0.70),
+            label_panel("fusion", "2 attention blocks", PURPLE, 1.55, 0.70),
+            label_panel("GCLCT", "8 completion blocks", GREEN, 1.55, 0.70),
+            label_panel("decoders", "occupancy + scalars", ORANGE, 1.55, 0.70),
+        ).arrange(DOWN, buff=0.13).move_to(LEFT * 1.55 + UP * 0.10)
+        optimizer = label_panel("AdamW", "gradient clip → parameter step", GREEN, 2.05, 0.80).move_to(RIGHT * 2.15 + UP * 0.45)
+        ema_occ = label_panel("EMA occupancy encoder", "τ old + (1−τ) student", PURPLE, 2.30, 0.80).move_to(RIGHT * 5.10 + UP * 1.20)
+        ema_scalar = label_panel("EMA scalar MLP", "FiLM for target path only", PURPLE, 2.30, 0.80).move_to(RIGHT * 5.10 + DOWN * 0.25)
+        frozen_spectrum = label_panel("released spectrum encoder", "frozen", CYAN, 2.10, 0.70).move_to(RIGHT * 4.95 + DOWN * 1.75)
+        frozen_surrogate = label_panel("EM surrogate", "frozen", CYAN, 2.10, 0.70).move_to(RIGHT * 4.95 + DOWN * 2.70)
+        self.play(FadeIn(objective), FadeIn(student_blocks), FadeIn(optimizer), FadeIn(ema_occ), FadeIn(ema_scalar), FadeIn(frozen_spectrum), FadeIn(frozen_surrogate))
+
+        lines = VGroup(*[arrow_between(objective.get_right(), block.get_left(), RED, 2.5) for block in student_blocks])
+        self.play(*[GrowArrow(line) for line in lines], run_time=0.9)
+        for block in student_blocks:
+            travel(self, objective.get_right(), block.get_left(), RED, 0.30)
+        self.play(GrowArrow(arrow_between(student_blocks.get_right(), optimizer.get_left(), GREEN)), Indicate(optimizer, color=GREEN))
+
+        # Show weights as connected layers; they actually change only on this side.
+        weights = dense_network(1.55, 1.10, (4, 6, 4), GREEN, "trainable weights").move_to(RIGHT * 1.85 + DOWN * 1.85)
+        self.play(FadeIn(weights))
+        self.play(ApplyWave(weights[1], direction=RIGHT), Flash(weights.get_center(), color=GREEN), run_time=0.8)
+        step_note = txt("optimizer.step(): parameters move", 16, GREEN, BOLD).next_to(weights, DOWN, buff=0.12)
+        self.play(Write(step_note))
+
+        ema_lines = VGroup(
+            arrow_between(optimizer.get_right(), ema_occ.get_left(), PURPLE, 2.2),
+            arrow_between(optimizer.get_right(), ema_scalar.get_left(), PURPLE, 2.2),
+        )
+        self.play(*[GrowArrow(line) for line in ema_lines])
+        travel(self, optimizer.get_right(), ema_occ.get_left(), PURPLE, 0.50)
+        travel(self, optimizer.get_right(), ema_scalar.get_left(), PURPLE, 0.50)
+        tau = formula("EMA ← 0.996…0.999 · old + (1 − τ) · student", 18, PURPLE)
+        tau.next_to(ema_scalar, DOWN, buff=0.15)
+        self.play(Write(tau))
+
+        locks = VGroup(
+            txt("no gradients", 12, CYAN, BOLD).next_to(frozen_spectrum, RIGHT, buff=0.16),
+            txt("no gradients", 12, CYAN, BOLD).next_to(frozen_surrogate, RIGHT, buff=0.16),
+            txt("no gradients", 12, PURPLE, BOLD).next_to(ema_occ, RIGHT, buff=0.12),
+            txt("no gradients", 12, PURPLE, BOLD).next_to(ema_scalar, RIGHT, buff=0.12),
+        )
+        self.play(FadeIn(locks), Indicate(frozen_spectrum, color=CYAN), Indicate(frozen_surrogate, color=CYAN))
+        final = txt("The teacher lags the student; the physics references remain fixed; only the student is optimized.", 19, INK, BOLD)
+        final.to_edge(DOWN, buff=0.28)
+        self.play(Write(final))
+        self.wait(1.0)
+
+
+# ---------------------------------------------------------------------------
+# 6. Deployment: same machinery, target/loss/optimizer removed
+# ---------------------------------------------------------------------------
+
+
+class InferenceScene(Scene):
+    def construct(self):
+        h = heading("Inference: condition on a spectrum, complete a design", "Pure inverse design")
+        self.play(Write(h))
+
+        goal = spectrum(3.1, 1.1, CYAN, 31).move_to(LEFT * 5.0 + UP * 1.15)
+        unknown_occ = occupancy_map(side=0.12, hidden=True).move_to(LEFT * 5.0 + DOWN * 1.40)
+        unknown_s = scalar_vector(("0", "0", "0"), (0, 0, 0), compact=True).next_to(unknown_occ, DOWN, buff=0.13)
+        self.play(Create(goal), FadeIn(unknown_occ), FadeIn(unknown_s))
+        self.play(Write(txt("target S", 18, CYAN, BOLD).next_to(goal, DOWN, buff=0.12)),
+                  Write(txt("all design variables unknown", 14, RED).next_to(unknown_s, DOWN, buff=0.12)))
+
+        spec_net = convolution_stack(CYAN, "frozen SpectrumPath", 1.35, 0.95).move_to(LEFT * 2.2 + UP * 1.15)
+        core = VGroup(mini_transformer(2, PURPLE, "fusion", 1.55, 0.82), gclct_stack().scale(0.56)).arrange(RIGHT, buff=0.35).move_to(ORIGIN + UP * 0.75)
+        dec = VGroup(convolution_stack(BLUE, "occupancy decoder", 1.20, 0.82), dense_network(0.85, 0.68, (3, 4, 3), YELLOW, "scalar heads")).arrange(DOWN, buff=0.35).move_to(RIGHT * 3.85 + UP * 0.55)
+        design = occupancy_map(side=0.11, seed=42).move_to(RIGHT * 5.55 + UP * 1.30)
+        design_s = scalar_vector(("2.71", "0.77", "4.18"), (0, 0, 0), compact=True).scale(0.78).next_to(design, DOWN, buff=0.14)
+        verify = spectrum(2.0, 0.62, GREEN, 30).move_to(RIGHT * 5.45 + DOWN * 1.92)
+        self.play(FadeIn(spec_net), FadeIn(core), FadeIn(dec), FadeIn(design), FadeIn(design_s), Create(verify))
         edges = VGroup(
-            connector(desired.get_right(), spectrum_encoder.get_left(), CYAN, 2.8),
-            connector(spectrum_encoder.get_right(), fusion_predictor.get_left(), PURPLE, 2.8),
-            connector(fusion_predictor.get_right(), decode.get_left(), GREEN, 2.8),
-            connector(decode.get_bottom(), verify.get_top(), CYAN, 2.8),
+            arrow_between(goal.get_right(), spec_net.get_left(), CYAN),
+            arrow_between(spec_net.get_right(), core.get_left(), PURPLE),
+            arrow_between(core.get_right(), dec.get_left(), GREEN),
+            arrow_between(dec.get_right(), design.get_left(), GREEN),
+            arrow_between(design.get_bottom(), verify.get_top(), CYAN),
         )
-        self.play(FadeIn(spectrum_encoder), FadeIn(fusion_predictor), FadeIn(decode), FadeIn(verify), GrowArrow(edges[0]))
-        travel(self, desired.get_right(), spectrum_encoder.get_left(), CYAN)
-        self.play(GrowArrow(edges[1]))
-        travel(self, spectrum_encoder.get_right(), fusion_predictor.get_left(), PURPLE)
-
-        # The unknown queries turn into a design, rather than a numerical optimization loop.
-        unknown_queries = VGroup(*[text("?", 25, GREEN, BOLD) for _ in range(7)]).arrange(RIGHT, buff=0.12)
-        unknown_queries.next_to(fusion_predictor, DOWN, buff=0.32)
-        latent = token_row(7, GREEN, radius=0.09).move_to(unknown_queries)
-        self.play(FadeIn(unknown_queries, shift=DOWN * 0.15), Indicate(fusion_predictor, color=GREEN))
-        self.play(Transform(unknown_queries, latent), Flash(fusion_predictor.get_center(), color=GREEN), run_time=1.0)
-        self.play(GrowArrow(edges[2]))
-        travel(self, fusion_predictor.get_right(), decode.get_left(), GREEN)
-
-        output_grid = occupancy_grid(seed=43).scale(0.88).next_to(decode, DOWN, buff=0.48)
-        output_scalars = scalar_chips(("0.71", "0.39", "0.30")).scale(0.85).next_to(output_grid, DOWN, buff=0.22)
-        output_label = text("a proposed metasurface", 17, GREEN, BOLD).next_to(output_scalars, DOWN, buff=0.18)
-        self.play(FadeIn(output_grid, shift=UP * 0.15), FadeIn(output_scalars), Write(output_label))
-        self.play(GrowArrow(edges[3]))
-        travel(self, decode.get_bottom(), verify.get_top(), CYAN, 0.6)
-        returned = spectrum_plot(width=2.2, height=0.78, seed=24, color=GREEN).next_to(verify, DOWN, buff=0.30)
-        match = text("compare against the requested spectrum", 16, CYAN).next_to(returned, DOWN, buff=0.18)
-        self.play(Create(returned), Write(match), Flash(verify.get_center(), color=CYAN))
-        self.wait(0.7)
-
-        no_loop = text("One conditioned forward pass — no gradient descent at inference.", 25, GREEN, BOLD)
-        no_loop.to_edge(DOWN, buff=0.30)
-        self.play(Write(no_loop))
+        self.play(*[GrowArrow(edge) for edge in edges])
+        for start, end, color in [
+            (goal.get_right(), spec_net.get_left(), CYAN),
+            (spec_net.get_right(), core.get_left(), PURPLE),
+            (core.get_right(), dec.get_left(), GREEN),
+            (dec.get_right(), design.get_left(), GREEN),
+        ]:
+            travel(self, start, end, color, 0.42)
+        conclusion = txt("Forward once → decode a complete candidate → evaluate its predicted spectrum. No backpropagation here.", 18, GREEN, BOLD)
+        conclusion.to_edge(DOWN, buff=0.26)
+        self.play(Write(conclusion))
         self.wait(1.2)
 
 
 # ---------------------------------------------------------------------------
-# Scene 4: a visual closing frame for the finished film
+# Master scene
 # ---------------------------------------------------------------------------
 
-class ClosingScene(Scene):
-    def construct(self):
-        heading = title("A representation that speaks physics", "The central idea")
-        self.play(Write(heading))
 
-        left = occupancy_grid(seed=12).scale(1.35).shift(LEFT * 4.6)
-        middle = VGroup(
-            token_row(12, PURPLE, 0.10),
-            text("192-D conditional latent space", 20, PURPLE, BOLD),
-        ).arrange(DOWN, buff=0.35)
-        right = spectrum_plot(width=3.4, height=1.45, seed=12, color=CYAN).shift(RIGHT * 4.5)
-        left_label = text("geometry", 20, BLUE, BOLD).next_to(left, DOWN, buff=0.28)
-        right_label = text("physical response", 20, CYAN, BOLD).next_to(right, DOWN, buff=0.28)
-        arrows = VGroup(
-            connector(left.get_right(), middle.get_left(), PURPLE, 3.0),
-            connector(middle.get_right(), right.get_left(), CYAN, 3.0),
-        )
-        self.play(FadeIn(left), FadeIn(middle), Create(right), Write(left_label), Write(right_label))
-        self.play(GrowArrow(arrows[0]), GrowArrow(arrows[1]))
-        for color, start, end in [(BLUE, left.get_right(), middle.get_left()), (CYAN, right.get_left(), middle.get_right())]:
-            travel(self, start, end, color, 0.65)
-        statement = text(
-            "Learn a stable latent prediction problem.\nDecode a design that satisfies a physical goal.",
-            29,
-            INK,
-            BOLD,
-        )
-        statement.to_edge(DOWN, buff=0.42)
-        self.play(Write(statement))
-        self.wait(2.0)
-
-
-class JEPAFullPresentation(MovingCameraScene):
-    """Render the whole story as one continuous video."""
+class JEPAFullPresentation(Scene):
+    """The complete, implementation-faithful training-to-inference story."""
 
     def construct(self):
         scenes = [
-            ArchitectureFlightScene,
-            WeightUpdateScene,
-            InferenceJourneyScene,
-            ClosingScene,
+            DataAndMaskScene,
+            EncodersScene,
+            FusionPredictorScene,
+            TargetDecodeLossScene,
+            UpdateScene,
+            InferenceScene,
         ]
-        for index, scene_class in enumerate(scenes):
-            scene_class.construct(self)
+        for index, scene_type in enumerate(scenes):
+            scene_type.construct(self)
             if index < len(scenes) - 1:
-                fade_everything(self)
-                self.camera.frame.set(width=config.frame_width).move_to(ORIGIN)
+                fade_scene(self)

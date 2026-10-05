@@ -1,5 +1,5 @@
 {
-  "id": "anosvol/metasurface-jepa-scale-l1-wide-a",
+  "id": "akashkesav/metasurface-jepa-scale-l1-wide-a",
   "title": "metasurface-jepa scale l1 wide a",
   "code_file": "run.py",
   "language": "python",
@@ -9,7 +9,7 @@
   "enable_tpu": false,
   "enable_internet": true,
   "keywords": ["metasurface", "jepa", "scaling"],
-  "dataset_sources": ["anosvol/metadit-aaai2026-staging"],
+  "dataset_sources": ["akashkesav/metadit-aaai2026-staging"],
   "kernel_sources": [],
   "competition_sources": [],
   "model_sources": []

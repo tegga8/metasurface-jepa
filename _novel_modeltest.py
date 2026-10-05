@@ -207,6 +207,10 @@ def main():
             model, surrogate = load_model(cfgp, ckp)
             print(f"=== {name} ===", flush=True)
             prob, err = scenario_a_decode(model, surrogate, occ, svs, spec_meep)
+            dec_path = os.path.join(sp, f"symbol_dec_{name.split()[0]}.npz")
+            np.savez(dec_path, prob=prob.detach().cpu().numpy(),
+                     occ=occ.detach().cpu().numpy())
+            print(f"  saved decodes -> {os.path.basename(dec_path)}", flush=True)
             ious = []
             for k in range(len(pats)):
                 iou, f1, pf, tf = iou_f1(prob[k], occ[k])

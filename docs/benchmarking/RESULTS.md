@@ -476,3 +476,72 @@ constraints → proceed to Phase 2.
   slice (reference context; not protocol-matched).
 - artifacts: per-seed JSONs, logs, and checkpoints in the kernel outputs
   (`kaggle kernels output anosvol/metasurface-jepa-split-<arm>`).
+
+---
+
+## Phase 6b — S0 rung · length-proportional staging arm · symbol round-trip (2026-10-06)
+
+All arms below: `akashkesav` kernels, 70k × seeds {0,1,2}, canonical battery, v1 schedule
+unless stated. Trainable counts are live-audited (`model_size_audit`).
+
+### Model-size ladder (3 seeds each)
+
+| rung | trainable | MAE (mean ± std) | per-seed | A / B / C (mean) |
+|---|---|---|---|---|
+| **S0 tiny** (19.2 % of base) | 2,193,284 | **0.0564 ± 0.0003** | 0.0563 / 0.0562 / 0.0568 | 0.997 / 0.977 / 0.919 |
+| **S1 small** | 4,232,836 | **0.0542 ± 0.0028** | 0.0543 / 0.0576 / 0.0507 | 0.992 / 0.979 / 0.917 |
+| **S2 slim** | 8,142,980 | **0.0518 ± 0.0009** | 0.0516 / 0.0507 / 0.0530 | 0.995 / 0.976 / 0.920 |
+| **base (v1)** | 11,402,628 | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| **L1 wide** | 19,896,708 | **0.0531 ± 0.0036** | 0.0513 / 0.0583 / 0.0498 | 0.996 / 0.975 / 0.920 |
+
+- **Reading: the base is the accuracy peak of the ladder.** Shrinking costs MAE
+  (+5.7 % S2, +10.6 % S1, +15.1 % S0); growing costs +8.4 % (L1). Occupancy IoU ≈ 0.75
+  at every rung (no collapse); scalar dependence ~chance at every rung (the standing
+  weakness, size-independent).
+
+### Length-proportional (v2) staging arm — `sched_fix` — gate FAILED, not adopted
+
+| arm | MAE (mean ± std) | per-seed | A / B / C |
+|---|---|---|---|
+| base v1 (absolutes 2000/3000) | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| base v2 (fracs 0.20 / 0.30, mask 0.30) | **0.0531 ± 0.0019** | 0.0507 / 0.0545 / 0.0530 | 0.996 / 0.970 / 0.905 |
+
+- **Verdict: regression.** Every v2 seed is worse than every v1 seed (disjoint ranges):
+  MAE +8.4 %, gate C −2.5 pp. The gate is not loosened — the v2 schedule is **not
+  adopted**; the default reverts to the v1 absolutes (`resolve_staging_steps` keeps the
+  mechanism for future retunes).
+- Reading: MAE *is* the spectrum (physics) error. At 70k steps, holding physics off for
+  the first 20 % and full only at the 50 % mark buys less total physics exposure than the
+  compressed v1 window (physics full from ~7 % of training) — the proportional-staging
+  argument did not survive measurement.
+
+### Per-term gradient share at the trained state (6 val batches, each term alone)
+
+| model | L_inv | L_var | L_cov | JEPA block | L_phys | L_occ | L_scalar | L_cond |
+|---|---|---|---|---|---|---|---|---|
+| S1 (v1) | 10.4 | 30.6 | 43.2 | **84.2** | 7.7 | 2.1 | 1.9 | 0.8 |
+| S2 (v1) | 17.1 | 39.7 | 29.2 | **86.0** | 6.5 | 1.6 | 2.1 | 1.6 |
+| L1 (v1) | 18.7 | 35.1 | 33.4 | **87.2** | 5.5 | 1.8 | 2.5 | 0.5 |
+| base (v2) | 9.0 | 31.8 | 41.0 | **81.8** | 9.5 | 1.8 | 3.0 | 0.7 |
+
+- The JEPA latent block carries ≈82–87 % of the gradient budget at the trained state on
+  every rung; the surrogate-physics term holds ≈6–10 % (below the 10–25 % design band),
+  consistent with the scalar-dependence weakness. The historical "base = 66 % physics"
+  row was an old-code artifact (recorded in AUDIT_REPORT_192D.md).
+
+### Symbol round-trip — 9 glyphs, Meep-fed, scenario A (full mask, all scalars unknown)
+
+| model | mean IoU | per-symbol best / worst | control (val, CST-fed) |
+|---|---|---|---|
+| S2 slim | **0.304 ± 0.109** | torii 0.510 / faravahar 0.220 | 0.776 |
+| S1 small | **0.306 ± 0.106** | torii 0.508 / faravahar 0.149 | 0.771 |
+| L1 wide | **0.310 ± 0.105** | torii 0.488 / faravahar 0.183 | 0.782 |
+
+- The symbols (swastika, cross, crescent, aum, khanda, dharmachakra, yin-yang, torii,
+  faravahar) sit far outside the dataset's blob morphology; recovery from their full-wave
+  Meep spectra is partial at best — ~0.30 IoU vs ~0.78 in-distribution control, uniform
+  across model sizes. Thin glyph-scale features are not uniquely pinned by the spectrum:
+  several symbols show low surrogate spectrum error at low IoU (the model finds *a*
+  design that explains the spectrum, not *the* glyph).
+- artifacts: `symbol_roundtrip_preview.png`, `symbol_designs.npz` / `_preview.png`,
+  `kaggle/symbol_designs` + `kaggle/symbol_meep` kernel outputs.

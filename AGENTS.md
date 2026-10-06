@@ -107,7 +107,11 @@ remains:
   designed 50 % mark). All runs completed before this commit used the v1 (compressed) schedule and
   remain comparable among themselves; runs after it are the v2 schedule and are judged by their own
   controlled arm (`kaggle/sched_fix`, gate: no regression vs the base 0.0490 ± 0.0013 /
-  0.9967-0.9772-0.9303).
+  0.9967-0.9772-0.9303). **Measured outcome (2026-10-06): gate FAILED — v2 0.0531 ± 0.0019
+  vs v1 0.0490 ± 0.0013 (every v2 seed worse than every v1 seed), gate C 0.905 vs 0.930.
+  The v2 schedule is NOT adopted; the shipped configs revert to the v1 absolutes and
+  `resolve_staging_steps` stays in code for future retunes. Recorded in
+  `docs/benchmarking/RESULTS.md` (Phase 6b).**
 - **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
   directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
   40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;

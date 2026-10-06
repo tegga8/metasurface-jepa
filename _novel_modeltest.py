@@ -132,6 +132,8 @@ def main():
          os.path.join(sp, "s1_out", "s1", "seed0.pt")),
         ("L1 wide", os.path.join(REPO, "configs/scaling/unified_l1_wide.yaml"),
          os.path.join(sp, "l1a_ckpt", "l1", "seed0.pt")),
+        ("base(v2,s0)", os.path.join(REPO, "configs/unified.yaml"),
+         os.path.join(sp, "schedfix_ckpt", "schedfix", "seed0.pt")),
     ]
 
     if mode == "calib":

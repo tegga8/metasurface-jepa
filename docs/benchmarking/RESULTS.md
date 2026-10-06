@@ -536,6 +536,7 @@ unless stated. Trainable counts are live-audited (`model_size_audit`).
 | S2 slim | **0.304 ± 0.109** | torii 0.510 / faravahar 0.220 | 0.776 |
 | S1 small | **0.306 ± 0.106** | torii 0.508 / faravahar 0.149 | 0.771 |
 | L1 wide | **0.310 ± 0.105** | torii 0.488 / faravahar 0.183 | 0.782 |
+| base (v2, seed0) | **0.311 ± 0.110** | torii 0.497 / faravahar 0.173 | 0.782 |
 
 - The symbols (swastika, cross, crescent, aum, khanda, dharmachakra, yin-yang, torii,
   faravahar) sit far outside the dataset's blob morphology; recovery from their full-wave
@@ -543,5 +544,11 @@ unless stated. Trainable counts are live-audited (`model_size_audit`).
   across model sizes. Thin glyph-scale features are not uniquely pinned by the spectrum:
   several symbols show low surrogate spectrum error at low IoU (the model finds *a*
   design that explains the spectrum, not *the* glyph).
-- artifacts: `symbol_roundtrip_preview.png`, `symbol_designs.npz` / `_preview.png`,
+- **Visual verdict (5-row grid, all four models):** the decodes are dataset-style blobs
+  (bowties / two-lobe masses), not glyphs — every OOD spectrum is mapped back onto the
+  learned design manifold. The higher-IoU symbols (torii, swastika, chakram) are simply
+  those whose gross silhouette is closest to that manifold (H / double-bar families).
+  The full-size base behaves identically to the small rungs → not a capacity limitation.
+- artifacts: `symbol_roundtrip_preview_with_base.png`,
+  `symbol_roundtrip_preview.png`, `symbol_designs.npz` / `_preview.png`,
   `kaggle/symbol_designs` + `kaggle/symbol_meep` kernel outputs.

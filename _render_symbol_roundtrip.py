@@ -22,7 +22,8 @@ occ_true = z["patterns"].astype(float)
 
 models = [("S2 slim", "symbol_dec_S2.npz"),
           ("S1 small", "symbol_dec_S1.npz"),
-          ("L1 wide", "symbol_dec_L1.npz")]
+          ("L1 wide", "symbol_dec_L1.npz"),
+          ("base (v2, seed0)", "symbol_dec_base(v2,s0).npz")]
 
 rows = [("original", occ_true)]
 for label, fname in models:
@@ -50,6 +51,7 @@ for r, (label, pats) in enumerate(rows):
 fig.suptitle("Symbol round-trip — Meep spectrum -> model decode "
              "(scenario A: full mask, all scalars unknown)", fontsize=12)
 fig.tight_layout()
-out = os.path.join(REPO, "symbol_roundtrip_preview.png")
+out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
+    REPO, "symbol_roundtrip_preview.png")
 fig.savefig(out, dpi=115)
 print("saved", out)

@@ -112,6 +112,17 @@ remains:
   The v2 schedule is NOT adopted; the shipped configs revert to the v1 absolutes and
   `resolve_staging_steps` stays in code for future retunes. Recorded in
   `docs/benchmarking/RESULTS.md` (Phase 6b).**
+- **2026-10-06 — Kaggle account routing: GPU work moves to `anosvol` via the WSL CLI.**
+  Operator directive: "the kaggle on this windows session is about to run out of usage on
+  the gpu — run it in the wsl kaggle". Effective state: the WSL CLI
+  (`~/meep_env/bin/kaggle`) is authenticated as **anosvol** (fresh OAuth login 2026-10-06;
+  the previous WSL anosvol token had been overwritten during the 2026-10-05 akashkesav
+  setup and was re-established by re-login). The Windows CLI remains **akashkesav** — use
+  it for status/output fetches of its existing kernels (its GPU quota is nearly
+  exhausted). `~/kaggle-akash` (WSL wrapper, outside the repo) runs the CLI temporarily as
+  akashkesav by swapping in the Windows token and syncing refreshes back. This supersedes
+  the akashkesav-only routing of new compute for GPU work; CPU-only kernels may run under
+  either account.
 - **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
   directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
   40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;

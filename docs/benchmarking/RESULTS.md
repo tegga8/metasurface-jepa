@@ -552,3 +552,22 @@ unless stated. Trainable counts are live-audited (`model_size_audit`).
 - artifacts: `symbol_roundtrip_preview_with_base.png`,
   `symbol_roundtrip_preview.png`, `symbol_designs.npz` / `_preview.png`,
   `kaggle/symbol_designs` + `kaggle/symbol_meep` kernel outputs.
+
+### In-distribution round-trip reference — MetaDiT's own released test split (n = 200, true CST spectra)
+
+Same pipeline as the symbol round-trip (scenario A: full mask, all scalars unknown),
+fed the dataset's own released spectra; occupancy-stratified 200-item slice of
+`test_set.mat`.
+
+| model | IoU (n=200) | F1 | surrogate spec err |
+|---|---|---|---|
+| S2 slim | **0.777 ± 0.079** | 0.872 | 0.0896 |
+| S1 small | **0.776 ± 0.078** | 0.872 | 0.0891 |
+| L1 wide | **0.777 ± 0.080** | 0.872 | 0.0917 |
+| base (v2, seed0) | **0.781 ± 0.079** | 0.875 | 0.0868 |
+
+- The 0.78-vs-0.31 gap isolates the OOD effect: on MetaDiT's own data the model
+  recovers the true geometry from the true spectrum at ~0.78 IoU, uniform across model
+  sizes; on the generated symbols the same pipeline collapses to ~0.31. The full-split
+  metrics (MAE/gates in the tables above) were likewise always measured on MetaDiT's
+  released splits — the generated sets are extra OOD probes, not the benchmark.

@@ -8,10 +8,13 @@ Modes:
             EDITED variant and vs its dataset SOURCE (memorization probe).
   symbol  : the 9 symbolic designs (symbol_designs.npz) -> MEEP spectra -> IoU
             decoded vs the original glyph.
+  real    : K items (default 200) from the released split (default test) with
+            their true CST spectra -> IoU decoded vs the true geometry
+            (in-distribution round-trip at scale, all models).
 Controls: 12 val items with true CST spectra through the same pipeline.
 
 Scenario-A inputs (full mask, all scalars unknown), eval mode.
-Usage: python _novel_modeltest.py calib|novel|variant|symbol <scratchpad_dir>
+Usage: python _novel_modeltest.py calib|novel|variant|symbol|real [sp] [split] [K]
 """
 
 import json
@@ -234,8 +237,40 @@ def main():
                 ious.append(iou)
             print(f"  CONTROL (val, CST-fed) mean IoU = {np.mean(ious):.3f} "
                   f"+/- {np.std(ious):.3f}", flush=True)
+    elif mode == "real":
+        split = sys.argv[3] if len(sys.argv) > 3 else "test"
+        k_items = int(sys.argv[4]) if len(sys.argv) > 4 else 200
+        dd = io.loadmat(os.path.join(REPO, "data", "metadit", "split_data",
+                                     f"{split}_set.mat"))
+        pat_r, par_r, real_r, imag_r = (dd["pattern"], dd["parameter"],
+                                        dd["real"], dd["imag"])
+        occ_r = pat_r.reshape(-1, pat_r.shape[-1]).sum(axis=0)
+        cand_r = np.where((occ_r > 0.28 * 4096) & (occ_r < 0.55 * 4096))[0]
+        pick_r = cand_r[np.linspace(0, len(cand_r) - 1, k_items).astype(int)]
+        occ = torch.stack([torch.from_numpy(
+            (pat_r[:, :, i] == 1).astype(np.float32))[None, :, :] for i in pick_r])
+        svs = torch.tensor([par_r[i].tolist() for i in pick_r],
+                           dtype=torch.float32)
+        spec = torch.stack([torch.from_numpy(
+            np.stack([real_r[i], imag_r[i]]).astype(np.float32)) for i in pick_r])
+        print(f"split={split} n={len(pick_r)} "
+              f"(occupancy-stratified, true CST spectra)", flush=True)
+
+        for name, cfgp, ckp in models:
+            model, surrogate = load_model(cfgp, ckp)
+            prob, err = scenario_a_decode(model, surrogate, occ, svs, spec)
+            ious, f1s = [], []
+            for k in range(len(pick_r)):
+                iou, f1, pf, tf = iou_f1(prob[k], occ[k])
+                ious.append(iou)
+                f1s.append(f1)
+            print(f"[{name}] {split} n={len(pick_r)}: "
+                  f"IoU={np.mean(ious):.3f} +/- {np.std(ious):.3f}  "
+                  f"F1={np.mean(f1s):.3f}  "
+                  f"surrogate_sperr_mean={float(err.mean()):.4f}", flush=True)
+
     else:
-        raise SystemExit("mode must be calib|novel|variant")
+        raise SystemExit("mode must be calib|novel|variant|symbol|real")
 
 
 if __name__ == "__main__":

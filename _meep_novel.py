@@ -42,7 +42,11 @@ import os
 import sys
 import time
 
-import meep as mp
+# meep is not installed in every environment this file is analysed from: it
+# lives in the WSL conda env (~/envs/meep) and in the Kaggle/cluster kernels,
+# while the editor's interpreter is the Windows system Python. The import is
+# resolved at runtime, not at analysis time.
+import meep as mp  # type: ignore[import-not-found]
 import numpy as np
 
 RES = 32
@@ -61,19 +65,25 @@ PASSIVITY_TOL = 1.02     # peak ratio above this is a solver failure
 
 def _parse_args(argv):
     a = {"start": 0, "end": None, "loss": LOSS_TANGENT, "res": RES,
-         "max_ring": MAX_RING, "decay_by": DECAY_BY}
+         "max_ring": MAX_RING, "decay_by": DECAY_BY, "ref_from": None}
     i = 0
     while i < len(argv):
         k = argv[i]
         if k in ("--start", "--end", "--loss-tangent", "--res", "--max-ring",
-                 "--decay-by"):
+                 "--decay-by", "--ref-from"):
             if i + 1 >= len(argv):
                 sys.exit(f"{k} needs a value")
             v = argv[i + 1]
             key = {"--start": "start", "--end": "end",
                    "--loss-tangent": "loss", "--res": "res",
-                   "--max-ring": "max_ring", "--decay-by": "decay_by"}[k]
-            a[key] = int(v) if key in ("start", "end", "res") else float(v)
+                   "--max-ring": "max_ring", "--decay-by": "decay_by",
+                   "--ref-from": "ref_from"}[k]
+            if key in ("start", "end", "res"):
+                a[key] = int(v)
+            elif key == "ref_from":
+                a[key] = v
+            else:
+                a[key] = float(v)
             i += 2
         else:
             sys.exit(f"unknown argument: {k}")
@@ -254,6 +264,26 @@ def main():
         else:
             print("existing output used a different loss tangent; "
                   "starting fresh", flush=True)
+
+    # Adopt empty-cell references computed by another run. When many workers
+    # share one scalar combo (the batch40 set uses the dataset-mean scalars for
+    # all 40 designs) each would otherwise recompute an identical reference,
+    # which is duplicated FDTD time for nothing. Mixing loss tangents would
+    # silently corrupt the ratios, so refuse it.
+    if args["ref_from"]:
+        try:
+            donor = json.load(open(args["ref_from"]))
+        except (OSError, ValueError) as exc:
+            sys.exit(f"--ref-from {args['ref_from']}: {exc}")
+        dt = donor.get("harness", {}).get("loss_tangent")
+        if dt is not None and abs(dt - args["loss"]) > 1e-12:
+            sys.exit(f"--ref-from was produced with loss_tangent={dt}, this "
+                     f"run uses {args['loss']}")
+        for k, v in donor.get("refs", {}).items():
+            out["refs"].setdefault(k, v)
+        print(f"adopted {len(donor.get('refs', {}))} empty-cell reference(s) "
+              f"from {args['ref_from']}; {len(out['refs'])} now available",
+              flush=True)
     done = {d["idx"] for d in out["designs"]}
 
     n_bad = 0

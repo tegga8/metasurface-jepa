@@ -307,7 +307,10 @@ def main():
         flux_s, a_s, meta = run_case(pat, l, h, r, args)
         flux_mag = np.sqrt(np.abs(flux_s / np.where(
             flux_e > 0, flux_e, np.inf)))
-        mode_ratio = np.abs(a_s) / np.where(a_e > 0, a_e, np.inf)
+        # Complex transmission ratio, not just its magnitude: the model target
+        # is a complex spectrum and the Meep->CST convention needs the phase.
+        ratio = a_s / np.where(np.abs(a_e) > 0, a_e, np.nan)
+        mode_ratio = np.abs(ratio)
         peak = float(max(flux_mag.max(initial=0.0),
                          mode_ratio.max(initial=0.0)))
         ok = bool(np.isfinite(peak) and peak <= PASSIVITY_TOL)
@@ -315,7 +318,14 @@ def main():
 
         entry = {"idx": k, "occ": int(pat.sum()), "l": l, "h": h, "r": r,
                  "flux_mag": flux_mag.tolist(),
-                 "modes": {"def": {"mag": mode_ratio.tolist()}},
+                 "flux_re": (flux_s / np.where(flux_e > 0, flux_e, np.inf)
+                             ).tolist(),
+                 "flux_im": np.zeros_like(flux_s).tolist(),
+                 "modes": {"def": {"mag": mode_ratio.tolist(),
+                                   "re": np.nan_to_num(
+                                       ratio.real).tolist(),
+                                   "im": np.nan_to_num(
+                                       ratio.imag).tolist()}},
                  "peak_ratio": peak, "passivity_ok": ok,
                  "hit_cap": meta["hit_cap"], "runtime_s": meta["runtime_s"],
                  "ringdown": meta["ringdown"], "blocks": meta["blocks"]}

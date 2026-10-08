@@ -571,3 +571,171 @@ fed the dataset's own released spectra; occupancy-stratified 200-item slice of
   sizes; on the generated symbols the same pipeline collapses to ~0.31. The full-split
   metrics (MAE/gates in the tables above) were likewise always measured on MetaDiT's
   released splits — the generated sets are extra OOD probes, not the benchmark.
+
+---
+
+## Task 1 (2026-10-07) — novel-geometry round-trip, rebuilt on a corrected Meep harness
+
+Everything below supersedes the earlier symbol-round-trip and Meep-based claims in this
+file. Those rested on an instrument that violated passivity and on a convention whose
+held-out error was worse than predicting zero. Both defects are described first because
+they invalidate the prior numbers rather than merely qualify them.
+
+### 0. Two defects found and fixed
+
+**The Meep harness produced unphysical spectra.** `_meep_novel.py` ran every design for a
+fixed 1100 time units in a lossless cell. The cell is PML-terminated in z and periodic in
+x/y, so a lossless slab traps energy the z-PML cannot absorb; the run stopped mid-ring
+and the flux at the monitor was still oscillating. Consequence: **36 of 43 designs across
+the symbol-decodes and batch40 kernels violated the passivity bound |T| <= 1**, up to
+**|T| = 4.7e8** for a passive dielectric. Three further defects: the mode parity channels
+were meaningless (`def`/`EVEN_Z`/`ODD_Z` came out byte-identical for every design, because
+`eig_parity` is not resolvable for a zero-thickness ModeRegion); there was no validity gate;
+and the rewrite had dropped the complex phase, so the output could not have been used to
+condition the model at all. Fixed with a lossy dielectric, field-decay termination plus a
+hard ringdown cap, a single meaningful mode channel, and a per-design `passivity_ok` flag.
+Runtime fell ~1500s -> ~110s per design.
+
+**The Meep->CST convention carried no signal.** The old `_meep_convention.json` was a
+2-parameter global phase rotation fitted on 4 items with residuals up to **3898**, one item
+explicitly discarded, fitted on the defective harness's output. Refitted on 19 usable
+validation geometries with the fixed harness, leave-one-out:
+
+| model | held-out err | corr | |
+|---|---|---|---|
+| phase, conj=False | 1.2079 | 0.680 | **the old parameterisation** |
+| phase, conj=True | 1.1815 | 0.680 | |
+| scalar gain, conj=False | 0.7502 | 0.533 | |
+| scalar gain, conj=True | 0.1278 | 0.698 | |
+| **full 2x2 map** | **0.1138** | **0.785** | **selected** |
+
+So the fixed harness reproduces MetaDiT's CST spectra to ~11% of the target standard
+deviation held out. In-sample 0.0895 vs 0.1138 held out, so it is not overfitting 19
+points. The old convention's 1.18 is worse than predicting zero — **every result built on
+it was uninterpretable, and the prior OOD-collapse claim is withdrawn.**
+
+### 1. Data status
+
+| set | designs | passivity failures | ringdown-capped |
+|---|---|---|---|
+| calibration (validation geometries) | 20 | 1 (peak 1.7e8) | 0 |
+| batch40 novel geometries | 40 | 2 (asym02 1.074, asym15 1.021) | 0 |
+| decoded, full mask | 38 | 3 | 0 |
+| decoded, 50% mask | 38 | 3 | 0 |
+
+Failures are **excluded, not repaired**. Two of the calibration failures previously hit the
+ringdown cap; raising `--max-ring` to 2500 removed that failure mode entirely.
+
+### 2. Decode and geometry metrics (base model, sched-fix step 69900)
+
+| mask | IoU vs true novel geometry | surrogate spec err | \|T\| corr |
+|---|---|---|---|
+| full | 0.674 | 0.280 | 0.664 |
+| 50% | 0.777 | 0.245 | 0.717 |
+
+### 3. Meep-vs-Meep physics, with a shuffled null
+
+Both sides measured with the same instrument, so the fitted convention cancels entirely.
+
+| subset | real err | shuffled | median err margin | win rate | sign test (corr) |
+|---|---|---|---|---|---|
+| full mask, all | 0.428 | 1.056 | -0.279 | 29/35 | p = 0.017 |
+| 50% mask, all | 0.347 | 1.142 | -0.291 | 27/35 | p = 0.041 |
+| **symmetric, full mask** | 0.444 | 1.431 | **-0.060** | — | **p = 1.00** |
+| asymmetric, full mask | 0.396 | 0.804 | -0.250 | — | p = 0.035 |
+| symmetric, 50% mask | 0.287 | 1.254 | -0.289 | — | p = 0.263 |
+
+**The symmetric + full-mask stratum is a null**: median |T| correlation margin +0.0025,
+sign test p = 1.0. Its mean margins (-0.99, +0.23) look favourable but are carried entirely
+by shuffled-error outliers of 12-14, with CI [-2.60, -0.0015]. The pooled result is
+carried by the asymmetric designs.
+
+### 4. Is that stratum ill-posed? (degeneracy check)
+
+Measured on MetaDiT's own validation split with no model involved: for each sampled
+geometry, find the OTHER geometry whose true CST spectrum is closest, then compare the two
+geometries.
+
+| stratum | NN/random spectrum distance | median IoU with that neighbour | frac IoU < 0.8 | frac < 0.5 |
+|---|---|---|---|---|
+| whole corpus (n=3000) | 0.034 | 0.663 | 0.871 | 0.198 |
+| occupancy band 1040-2240 (n=2820) | 0.036 | 0.671 | 0.862 | 0.161 |
+| least mirror-symmetric 300 | 0.054 | 0.662 | 0.897 | 0.167 |
+| **most mirror-symmetric 300** | **0.068** | **0.625** | 0.910 | 0.233 |
+
+**Verdict: partially, not fully, degenerate.** The spectrum is highly informative — the
+nearest-spectrum neighbour sits 29x closer than a random pair — so the condition is not
+ill-posed. But for ~87% of geometries the closest-spectrum neighbour is a *different*
+design (IoU < 0.8), and mirror symmetry makes this worse (median NN IoU 0.625 and 23.3%
+below 0.5, vs 0.662 and 16.7% for the least symmetric subset).
+
+The relevant calibration: **our model's IoU on that stratum is 0.674, at or slightly above
+the corpus's own nearest-neighbour IoU of 0.625-0.671.** The model is therefore performing
+at approximately the intrinsic identifiability limit of the spectrum->geometry map, not
+below it. The null is a real result under a weakly-identified condition — so the stratum is
+recorded as **weakly identified, not excluded by design**.
+
+### 5. Style statistics vs the real MetaDiT corpus
+
+| set | occ | holes | edge | mirror | components |
+|---|---|---|---|---|---|
+| real MetaDiT (n=402) | 0.428 | 0.55 | 0.125 | **1.000** | 1.12 |
+| our novel (40) | 0.426 | 0.35 | 0.097 | 0.859 | 1.00 |
+| JEPA decoded, full mask | 0.409 | **2.05** | 0.109 | 0.904 | **3.50** |
+| JEPA decoded, 50% mask | 0.408 | **1.97** | 0.114 | 0.883 | 1.95 |
+| MetaDiT-S (same input) | 0.398 | **0.21** | 0.121 | **1.000** | 1.47 |
+
+**The real corpus is exactly mirror-symmetric**: 300/300 random validation geometries are
+bit-identical under `fliplr`, under `flipud`, and under 180 degree rotation. This is
+architectural, not physical — MetaDiT's `restore_structure` builds its 64x64 output by
+mirroring a 32x32 quadrant, so every generation is mirror-symmetric by construction. Our
+decoder has no equivalent constraint.
+
+**Our novel designs are not drawn from the corpus distribution** (mirror 0.859 vs 1.000):
+`make_random_batch40.py` enforces only a partial mirror, so the OOD probe is more OOD than
+intended. The decodes fragment — up to 3.50 components and ~4x too many holes against the
+corpus — and carry visible speckle and horizontal seam artifacts.
+
+### 6. Same-input MetaDiT-S comparison
+
+MetaDiT-S conditioned on the identical `[2,301]` targets, 500 steps, cfg 4.0, seed 0.
+Cluster (2x A100 80GB) produced all 38 generations in 90.8s of sampling.
+
+| model | IoU vs original novel geometry |
+|---|---|
+| JEPA full mask | 0.674 |
+| JEPA 50% mask | **0.777** |
+| **MetaDiT-S diffusion** | **0.576** |
+
+The two models fail differently: we reconstruct the input more accurately; MetaDiT-S emits
+far cleaner, more corpus-like bodies (0.21 holes, 1.47 components, mirror exactly 1.000).
+
+**Caveats:** MetaDiT-S is stochastic and this is a single seed; a fair comparison needs
+several seeds per input. And the targets are our novel geometries (mirror 0.865), which are
+unlike anything in MetaDiT's corpus (mirror 1.000), which plausibly depresses its IoU.
+
+### 7. Verdict and what is still open
+
+- The harness and convention are now trustworthy: **0.1138** held-out against real CST.
+- On novel geometries the decode **beats a shuffled null** for asymmetric designs and under
+  a 50% mask, but **not** for symmetric designs under a full mask (p = 1.0).
+- That stratum is **weakly identified** rather than ill-posed, and the model sits at the
+  corpus's own nearest-neighbour identifiability limit there.
+- Against MetaDiT-S on identical input we are **better on IoU** (0.674 / 0.777 vs 0.576)
+  and **worse on geometry well-formedness** (fragmentation up to 3.50 components, ~4x too
+  many holes, visible speckle and horizontal seams against MetaDiT-S's 1.47 / 0.21).
+- **Superseded by this section:** the earlier symbol round-trip IoU ~0.31 and the
+  "decoded spectra do not match symbol spectra" finding. Both were measured with the
+  passivity-violating harness and the signal-free convention, so neither supports a claim.
+
+### 8. What is NOT established here
+
+- Nothing above says the JEPA beats MetaDiT. It beats MetaDiT-S on geometry IoU for a
+  single diffusion seed on 38 OOD targets, and loses to it on geometry well-formedness.
+  A multi-seed comparison is required before any such claim.
+- The base-model headline numbers (MAE 0.0490 +- 0.0013, gates A/B/C
+  0.9967/0.9772/0.9303) are unaffected by anything here: they are measured on MetaDiT's
+  released test split with true CST spectra and never touched the Meep harness.
+- The scalar path remains the recorded open weakness (0.505 / 0.529, at chance).
+- Task 1 covers the geometry-first direction only. The spectrum-first direction (arbitrary
+  target spectrum -> model -> geometry -> physics) has not been run.

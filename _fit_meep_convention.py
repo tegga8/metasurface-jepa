@@ -144,31 +144,37 @@ def apply_scalar(e, conv):
 def fit_full(train, conj):
     """Per-frequency complex 2x2 map + bias: [Re,Im] -> M [Re,Im] + b."""
     nf = NFREQ
-    A = np.zeros((nf, 4, 5))
-    for i, (_, e, gr, gi) in enumerate(train):
+    # Three regressors per output: [Re(t), Im(t), 1]. Per frequency and per
+    # output we accumulate the 3x3 Gram matrix G = sum x x^T and the
+    # right-hand side V = sum x y, then solve (G + lam I) c = V.
+    G = np.zeros((nf, 2, 3, 3))
+    V = np.zeros((nf, 2, 3))
+    for _, e, gr, gi in train:
         t = _meep_t(e, conj)
         x = np.stack([t.real, t.imag, np.ones(nf)], axis=1)  # [nf,3]
         y = np.stack([np.asarray(gr, float), np.asarray(gi, float)],
                      axis=1)                                  # [nf,2]
         for j in range(2):
-            A[:, j, :4] += x * y[:, j:j + 1]
-            A[:, j, 4] += y[:, j]
-    lam = 1e-8
-    coef = np.zeros((nf, 2, 4))
+            G[:, j] += np.einsum("fp,fq->fpq", x, x)
+            V[:, j] += np.einsum("fp,f->fp", x, y[:, j])
+    lam = 1e-6
+    coef = np.zeros((nf, 2, 3))
     for f in range(nf):
         for j in range(2):
-            M = A[f, j, :4].reshape(4, 4) + lam * np.eye(4)
-            v = A[f, j, 4]
-            coef[f, j] = np.linalg.solve(M, v)
+            coef[f, j] = np.linalg.solve(G[f, j] + lam * np.eye(3), V[f, j])
     return {"kind": "full", "conj": conj,
-            "coef": coef.reshape(nf, 8).tolist()}
+            "coef": coef.reshape(nf, 6).tolist()}
 
 
 def apply_full(e, conv):
     t = _meep_t(e, conv["conj"])
     x = np.stack([t.real, t.imag], axis=1)
-    c = np.array(conv["coef"]).reshape(-1, 2, 4)
-    out = np.einsum("fj,fjc->fc", x, c[:, :, :2]) + c[:, :, 2]
+    c = np.array(conv["coef"]).reshape(-1, 2, 3)
+    # Sum over the COEFFICIENT axis: out[f,j] = sum_p x[f,p]*c[f,j,p] for the
+    # two inputs, then add the bias c[f,j,2]. Writing this as "fj,fjc->fc"
+    # instead would pair output 0's and output 1's coefficients for the SAME
+    # input, which silently produces a wrong prediction.
+    out = np.einsum("fp,fjp->fj", x, c[:, :, :2]) + c[:, :, 2]
     return out[:, 0] + 1j * out[:, 1]
 
 
@@ -215,8 +221,9 @@ def main():
     print(f"\nBEST: {best[2]} conj={best[3]}  held-out err={best[0]:.4f} "
           f"corr={best[1]:.4f}")
 
-    # Refit on everything for the deployed convention.
-    full_train = [d for _, d, _, _ in keep]
+    # Refit on everything for the deployed convention. keep holds
+    # (idx, entry, gr, gi) tuples, which is what the fitters expect.
+    full_train = list(keep)
     conv = FIT[best[2]](full_train, best[3])
     errs = [score(APPLY[best[2]](e, conv), gr, gi)[0] for _, e, gr, gi in keep]
     print(f"in-sample (all {len(keep)}): err={np.mean(errs):.4f}")

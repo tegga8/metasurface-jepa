@@ -874,3 +874,108 @@ byte-identically and every base checkpoint still strict-loads).
 - The mandated gate-8 (real/**null**/**shuffled**, stratified by mask ratio) still has no test.
 - Phase-2's negative result is now a *comparative* statement (ours and MetaDiT's, same
   instrument) but remains single-seed per model.
+
+---
+
+## 2026-10-15 (later) — three seeds for imp1/imp2, the five-model physics table, corrected phase 2
+
+Adds to the block above. All three model variants were trained 70k × seeds {0,1,2} on the
+cluster, each with its own battery; all numbers here are from those runs.
+
+### 1. imp1 — mirror-parameterised (quadrant) decoder · 3 seeds · NEGATIVE
+
+| metric | imp1 (3 seeds) | base v1 (3 seeds) | verdict |
+|---|---|---|---|
+| MAE (n=512) | 0.0517 ± 0.0021 | 0.0490 ± 0.0013 (full split) | worse † |
+| gate A | 0.9928 ± 0.0030 | 0.9967 ± 0.0011 | **worse, CIs do not overlap** |
+| gate B | 0.9714 ± 0.0091 | 0.9772 ± 0.0040 | tied |
+| gate C | 0.9297 ± 0.0070 | 0.9303 ± 0.0110 | tied |
+| scalar 1 / 2 known | 0.523 ± 0.037 / 0.519 ± 0.007 | 0.505 / 0.529 | tied |
+| occ IoU (masked) | 0.7565 | ~0.750 | equal |
+
+**The mirror decoder is a clean negative on the battery** — identical on B/C and the scalars,
+consistently slightly worse on A and MAE. Per-seed MAE 0.0514 / 0.0497 / 0.0539; A 0.9961 /
+0.9922 / 0.9902.
+
+### 2. imp2 — leak-free (mirror-pair) masking · 3 seeds · a TRADE
+
+| metric | imp2 (3 seeds) | base v1 (3 seeds) | verdict |
+|---|---|---|---|
+| MAE (n=512) | 0.0501 ± 0.0009 | 0.0490 ± 0.0013 (full split) | inconclusive † |
+| gate A | 0.9928 ± 0.0030 | 0.9967 ± 0.0011 | base better (separated) |
+| **gate B** | **0.9824 ± 0.0020** | 0.9772 ± 0.0040 | **imp2 better: all 3 imp2 seeds ≥ base's best seed** |
+| gate C | 0.9251 ± 0.0100 | 0.9303 ± 0.0110 | tied |
+| scalar 1 / 2 known | 0.525 ± 0.011 / 0.539 ± 0.026 | 0.505 / 0.529 | higher means, overlapping |
+| occ IoU (masked) | 0.7540 ± 0.0007 | ~0.750 | equal |
+
+Per-seed imp2: MAE 0.0509 / 0.0492 / 0.0503; A 0.9922 / 0.9961 / 0.9902; B 0.9824 / 0.9805 /
+0.9844; C 0.9277 / 0.9336 / 0.9141.
+
+### 3. Mirror-leak ablation — the mechanism result
+
+Masked-region IoU, ratio 0.5, n=38, identical inputs; only the mask placement changes:
+
+| checkpoint | leaky masks (leak 0.431) | leak-free masks (leak 0.000) | Δ |
+|---|---|---|---|
+| base v1 | 0.7530 | 0.7363 | −0.0166 |
+| imp1 | 0.7516 | 0.7328 | −0.0187 |
+| imp2 seed 0 | 0.7138 | 0.7385 | **+0.0248** |
+| imp2 seed 1 | 0.7198 | 0.7459 | **+0.0261** |
+
+- The leak is real and inflates the leaky-mask scores of both models trained with it by
+  ~0.017–0.019 IoU. imp1's mirror-by-construction decoder does **not** exploit it more than
+  the baseline had already learned to.
+- imp2 is the only checkpoint better under leak-free evaluation and the worst under leaky
+  masks — both signs as predicted, replicated across its seeded runs.
+
+### 4. Task-1 physics, five models on the identical 28 designs
+
+Common passivity-clean intersection, one shared shuffled permutation:
+
+| model | real err | shuffled | med. margin err | real corr | med. margin corr | win err/corr | sign p err/corr |
+|---|---|---|---|---|---|---|---|
+| v2 | 0.4482 | 1.156 | −0.341 | **+0.777** | **+0.286** | 22/28 · 23/28 | 3.7e−3 · 9.1e−4 |
+| base v1 | 0.4519 | 1.201 | −0.264 | +0.766 | +0.236 | 22/28 · 21/28 | 3.7e−3 · 0.013 |
+| imp2 | 0.4754 | 1.182 | −0.343 | +0.755 | +0.181 | 21/28 · 20/28 | 0.013 · 0.036 |
+| imp1 | 0.5006 | 1.253 | **−0.346** | +0.657 | +0.132 | 22/28 · 19/28 | 3.7e−3 · 0.087 |
+| MetaDiT-S | 0.5497 | 0.962 | −0.275 | +0.606 | +0.183 | 24/28 · 22/28 | 1.8e−4 · 3.7e−3 |
+
+- **All five beat the shuffled null.** Ranking on absolute agreement: v2 ≈ base v1 > imp2 >
+  imp1 > MetaDiT-S; imp1's correlation is only marginally significant (p=0.087).
+- On the models' own sets, imp2's half-mask correlation (+0.810) is the best of the five.
+- Supersedes the earlier "v1 full-mask is not significant" caveat: on matched subsets it is
+  significant (p=6e−5 at n=30, p=3.7e−3 at n=28).
+
+### 5. Phase 2 re-specified — the targets were unreachable, and fixing that does not rescue it
+
+- **The defect:** the original set A sat **1.87** from the nearest realizable spectrum in the
+  evaluator's normalized-L1 units against a corpus self-NN density of ~0.33 (27× further), and
+  70 % of the way to the "unrelated spectra" scale (2.73); set B sat at 4.27, beyond unrelated.
+  Every prior phase-2 decode was scored against a target no corpus geometry can realize.
+  Roughness — the generator's original screen — does not detect this.
+- **The fix:** `_make_feasible_spectra.py` screens on two metrics (normalized L1 and a
+  scale-free correlation) and accepts A′ only near the manifold: **l1n 0.348 (corpus 0.331),
+  corr 0.96**; B′ remains infeasible (l1n 4.49) as the control.
+- **The result (same instrument, same null):**
+
+| arm | real err / corr | shuffled | median margin err / corr | sign p |
+|---|---|---|---|---|
+| JEPA v1 (n=19) | 0.714 / +0.502 | 0.706 / +0.652 | +0.060 / −0.075 | 0.65 / 0.17 |
+| JEPA v2 (n=19) | 0.691 / +0.549 | 0.702 / +0.625 | +0.093 / −0.119 | 0.36 / 0.65 |
+| MetaDiT-S (n=23) | 0.722 / +0.402 | 0.689 / +0.617 | +0.033 / −0.176 | 0.40 / 0.40 |
+
+- Absolute agreement improves substantially on feasible targets (v1 0.861 → 0.714; v2 0.849 →
+  0.691), so the unreachable benchmark *was* inflating the numbers. **But every model still
+  fails the fair control** — a mismatched realizable target is explained just as well — and
+  MetaDiT's correlation margin is the worst of the three.
+- **Corrected verdict:** the phase-2 negative is a property of the single-shot
+  spectrum→geometry formulation, not of our architecture and not of the benchmark's targets.
+
+### 6. What is NOT established (additions)
+
+- imp1/imp2 battery numbers are 3 seeds but on the n=512 benchmark subset †; the full-split
+  (17,489) re-measure is owed before their MAE is compared with base's 0.0490.
+- imp1's and imp2's physics used seed-0 checkpoints only; the other seeds have no Meep pass.
+- imp2's gate-B edge (all three seeds ≥ base's best) is small and offset by gate A: a trade,
+  not an improvement.
+- The task-3 harness fix and the gate-8 stratified test remain open, as in the block above.

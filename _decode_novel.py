@@ -15,7 +15,7 @@ Reports, per mask setting:
     the Meep target (surrogate side only -- the full-wave check is Meep-vs-Meep
     and runs later, on the cluster)
 
-Usage: python _decode_novel.py <batch40_merged.json> <convention.json> <ckpt> <out_dir>
+Usage: python _decode_novel.py <batch40_merged.json> <convention.json> <ckpt> <out_dir> [config.yaml]
 """
 
 import json
@@ -59,6 +59,8 @@ def entry_to_target(entry, conv):
 
 def main():
     meep_path, conv_path, ckpt, out_dir = sys.argv[1:5]
+    cfg_path = (sys.argv[5] if len(sys.argv) > 5
+                else os.path.join(REPO, "configs/unified.yaml"))
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError as exc:
@@ -83,8 +85,7 @@ def main():
     sv = torch.tensor([[l, h, r]] * n, dtype=torch.float32)
     print(f"target tensor {tuple(target.shape)}  occupancy {tuple(pats.shape)}")
 
-    model, surrogate = nmt.load_model(os.path.join(REPO, "configs/unified.yaml"),
-                                     ckpt)
+    model, surrogate = nmt.load_model(cfg_path, ckpt)
 
     summary = {}
     for ratio, tag in ((1.0, "full"), (0.5, "half")):

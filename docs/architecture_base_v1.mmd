@@ -1,0 +1,110 @@
+flowchart TB
+  %% ===== DATA =====
+  subgraph DATA["DATA — MetaDiT released splits"]
+    direction LR
+    SPL["train 139,906 · val 17,488 · test 17,489"]
+    FAC["Factorise [3,64,64] broadcast into<br/>occupancy [1,64,64] + scalars l,h,r<br/>G0=occ·r/5 · G1=occ·h · G2=occ·l/3"]
+    SPL --> FAC
+  end
+  OCC(["occupancy [1,64,64]"])
+  SCV(["scalars l,h,r (raw)"])
+  SKN(["known flags [3]"])
+  SPT(["spectrum [2,301] complex"])
+  FAC --> OCC
+  FAC --> SCV
+  FAC --> SKN
+  FAC --> SPT
+
+  %% ===== FORWARD PASS =====
+  subgraph FWD["FORWARD PASS — 11.40M trainable"]
+    direction TB
+    SEN["Scalar encoder 0.34M<br/>in: value + known-flag ×3 = 6 dims"]
+    FIL{{"FiLM gamma,beta (zero-init → identity)"}}
+    OEN["Occupancy encoder 2.67M<br/>patch embed → 256 tokens, 6 blocks<br/>masked tokens replaced by mask_token"]
+    SSM(["scalar-summary [1,192]"])
+    SPR["Spectrum read-out 0.46M trainable<br/>(on the FROZEN released encoder)"]
+    FUS["Fusion 0.96M<br/>2 layers over 273 tokens = 256 + 16 + 1"]
+    PRE["Predictor GCLCT 6.63M<br/>8 blocks · 257 queries<br/>LayerNorm → FiLM(c_physics) → self-attn<br/>→ cross-attn(×273) → MLP"]
+    ODE["Occupancy decoder 0.26M"]
+    SDE["Scalar decoder 0.04M"]
+    SPP["spec_proj 0.04M"]
+  end
+  SCV --> SEN
+  SKN --> SEN
+  SEN --> FIL
+  FIL -.-> OEN
+  SEN --> SSM
+  OCC --> OEN
+  OEN -->|"z_x [256,192]"| FUS
+  SSM --> FUS
+  SPT --> SPR
+  SPR -->|"c_physics [384]"| PRE
+  SPR -->|"a_goal [16,384]"| FUS
+  FUS -->|"273 fused"| PRE
+  PRE -->|"z_hat [257,192]"| ODE
+  PRE --> SDE
+  PRE --> SPP
+  ODE --> GEO(["decoded occupancy [1,64,64]"])
+  SDE --> SCA(["decoded scalars l,h,r"])
+
+  %% ===== FROZEN + TEACHER =====
+  subgraph FROZEN["FROZEN — preflight asserts *_params_with_grad = 0"]
+    direction TB
+    RSE["Released MetaDiT spectrum encoder 4.53M"]
+    SUR["Released EM surrogate 0.89M"]
+    EMA["EMA occupancy encoder 2.67M<br/>momentum 0.996 → 0.999"]
+    EMA2["EMA scalar encoder 0.34M"]
+    SFL["SpectrumFilm 0.89M (init std 0.1)"]
+  end
+  SPT --> RSE
+  RSE --> SPR
+  OCC --> EMA
+  SCV --> EMA2
+  EMA2 --> EMA
+  SPT --> SFL
+  SFL -.-> EMA
+  EMA --> T1(["z_y_raw — stable target"])
+  EMA --> T2(["z_y_occ_spec — spectrum-conditioned"])
+  EMA2 --> T3(["z_y_scal — EMA summary"])
+
+  %% ===== OBJECTIVE =====
+  subgraph OBJ["OBJECTIVE — one node per term; read where each applies"]
+    direction TB
+    LOSSES["L_inv 25 · latent match, MASKED TOKENS ONLY<br/>L_var 25 · L_cov 1 · VICReg anti-collapse<br/>L_scalar 1 · L1, UNKNOWN SCALARS ONLY<br/>L_occ 1 · BCE, MASKED PIXELS ONLY<br/>L_summary 1 · known scalars via the summary token, bypasses predictor<br/>L_cond 0.5 · L_scal_t 0.5 · cosine JEPA vs the two conditioned targets<br/>Projector: mlp_bn"]
+    PHY["L_phys 3.32 · the physics term<br/>decoded geometry → [3,64,64] → FROZEN EM surrogate → [2,301]<br/>σ-normalised L1 vs the true spectrum<br/>straight-through: hard forward, soft backward"]
+  end
+  PJRHIER(("predictions<br/>+ targets")) 
+  PRE -.-> PJRHIER
+  PJRHIER -.-> LOSSES
+  GEO -.-> PHY
+  SUR -.-> PHY
+  T1 -.-> LOSSES
+  T2 -.-> LOSSES
+  T3 -.-> LOSSES
+
+  %% ===== STAGING =====
+  subgraph STAGE["TRAINING STAGING — 1 epoch = 70k steps, batch 2"]
+    direction LR
+    ST1["λ_phys = 0 → 2000<br/>then ramp → 3.32 by 5000"]
+    ST2["mask ratios 0.25/0.5/0.75/1.0<br/>ramp easy → full"]
+    ST3["scalars all_known /<br/>all_unknown / mixed"]
+    ST4["goal dropout 10%<br/>real / null / shuffled"]
+    ST1 --> ST2 --> ST3 --> ST4
+  end
+
+  %% ===== STYLES =====
+  classDef data fill:#fff3bf,stroke:#b58900,color:#000
+  classDef train fill:#dbeafe,stroke:#1d4ed8,color:#000
+  classDef frozen fill:#eeeeee,stroke:#666666,stroke-dasharray:5 5,color:#000
+  classDef target fill:#dcfce7,stroke:#15803d,color:#000
+  classDef loss fill:#fee2e2,stroke:#b91c1c,color:#000
+  classDef stage fill:#f3e8ff,stroke:#7e22ce,color:#000
+  classDef note fill:#ffedd5,stroke:#c2410c,color:#000
+  class SPL,FAC,OCC,SCV,SKN,SPT data
+  class SEN,OEN,SPR,FUS,PRE,ODE,SDE,SPP,SSM,GEO,SCA train
+  class RSE,SUR,EMA,EMA2,SFL frozen
+  class T1,T2,T3 target
+  class LOSSES,PHY loss
+  class PJRHIER note
+  class ST1,ST2,ST3,ST4 stage
+  class FIL note

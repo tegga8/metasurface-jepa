@@ -126,7 +126,8 @@ def main():
         t = APPLY[conv["kind"]](orig_meep[name], conv)
         return np.stack([t.real, t.imag]).astype(np.float32)
 
-    target = torch.from_numpy(np.stack([to_target(nm) for nm in picks]))
+    target = (torch.from_numpy(np.stack([to_target(nm) for nm in picks]))
+              if picks else torch.zeros(0, 2, NFREQ))
 
     results = {"true_scalars": base.tolist(), "n": len(picks), "rows": []}
 

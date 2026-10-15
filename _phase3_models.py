@@ -243,8 +243,10 @@ def main():
                 os.path.join(REPO, "configs/unified.yaml"), ref_ckpt)
         else:
             from physics.physics_loop import load_surrogate
-            config = _load_json(os.path.join(REPO, "configs", "unified.yaml"),
-                                "config")
+            import yaml
+            with open(os.path.join(REPO, "configs", "unified.yaml"),
+                      encoding="utf-8") as f:
+                config = yaml.safe_load(f)
             surrogate = load_surrogate(config.get("physics", {}).get(
                 "surrogate_path", "data/metadit/weights/surrogate_model.bin"))
 

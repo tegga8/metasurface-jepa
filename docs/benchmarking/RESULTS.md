@@ -739,3 +739,138 @@ unlike anything in MetaDiT's corpus (mirror 1.000), which plausibly depresses it
 - The scalar path remains the recorded open weakness (0.505 / 0.529, at chance).
 - Task 1 covers the geometry-first direction only. The spectrum-first direction (arbitrary
   target spectrum -> model -> geometry -> physics) has not been run.
+
+---
+
+## 2026-10-15 — v1/v2 re-scoring, the three-model comparison, imp1/imp2 (cluster: `paramsakti`)
+
+All numbers below were produced on the HPC cluster (`paramsakti`, `mm24r002`) with the fixed
+Meep harness; the Meep→CST convention is **0.1138** held out. **Supersedes**: every decode
+number earlier in this file that came from the `sched_fix` (v2, failed-gate) checkpoint, and
+the confounded MetaDiT scalar table. v1 = the retrained base (`checkpoints/unified/final.pt`
+on the cluster, 70k, 1 seed); v2 = `sched_fix` seed0.
+
+### 0. Scorer validation — why these numbers are comparable
+
+- Re-scoring **v2 from raw cluster data with the current scorers reproduced this ledger
+  exactly**: task 1 full `0.4284/1.0558`, half `0.3467/1.1419`; task 2 A `0.8487/0.6527`,
+  B `1.9729/0.5756`. The v1 numbers come from the same code path.
+- Cross-model comparisons use the **intersection** of each model's passivity-clean designs
+  and **one shared shuffled permutation** (per-model subsets are not comparable).
+
+### 1. Task 1 (geometry-first) physics — v1 / v2 / MetaDiT-S on the common 31 designs
+
+| model | real err ↓ | shuffled | med. margin err / corr | win rate err / corr | sign p err / corr |
+|---|---|---|---|---|---|
+| base v1 | 0.4629 | 1.2866 | −0.2282 / +0.1981 | 23/31 · 23/31 | 0.011 · 0.011 |
+| v2 | 0.4464 | 1.2928 | −0.3677 / +0.2239 | 23/31 · 21/31 | 0.011 · 0.071 |
+| MetaDiT-S | 0.5432 | 1.3614 | −0.2517 / +0.1958 | 24/31 · 22/31 | 0.0033 · 0.029 |
+
+- All three beat the shuffled null; **MetaDiT-S has the worst absolute agreement** (highest
+  error, lowest correlation) and the best per-design win rate. v1 and v2 are statistically
+  tied here.
+- **Subset sensitivity (recorded, not smoothed):** v1's full-mask result is p=0.296 on its own
+  33 designs but p=0.011 on the common 31 — two excluded designs carried large shuffled-error
+  outliers. The common-subset value is the fair one; the sign test remains underpowered for
+  small n (task 3 below, n=10).
+- Still open: the symmetric + full-mask stratification has not been recomputed for v1.
+
+### 2. Task 2 (spectrum-first) physics — three-way, same targets and null
+
+| model | A real err / corr | A shuffled | A med. margin err / corr | A p | B real | B shuffled | B margin | B p |
+|---|---|---|---|---|---|---|---|---|
+| v1 | 0.8607 / +0.4597 | 0.7353 / +0.5744 | +0.168 / −0.092 | 0.13 / 0.29 | 1.8362 | 0.6781 | +1.20 / −0.364 | 1.2e−7 |
+| v2 | 0.8487 / +0.4609 | 0.6527 / +0.6092 | +0.149 / −0.114 | 0.13 / 0.13 | 1.9729 | 0.5756 | +1.37 / −0.420 | 0.031 |
+| MetaDiT-S | 0.8368 / +0.4409 | 0.8038 / +0.5876 | +0.071 / −0.153 | 0.31 / 0.064 | 1.8393 | 0.7274 | +1.06 / −0.452 | 9.5e−7 |
+
+- **Negative for all three models** — none beats a mismatched target on the spectrum-first
+  task, and MetaDiT is marginally the worst on set A (largest negative correlation margin).
+  Single-shot arbitrary-spectrum inversion is therefore **unsolved in this comparison**, not a
+  weakness of our architecture relative to the reference.
+- Passivity of the decodes: set A 24/24 clean for v1 and MetaDiT; set B clean for v1 (24/24),
+  MetaDiT 21/24, v2 only 6/24.
+
+### 3. Task 3 (scalar sensitivity) — matched conditions for all three models
+
+Geometry rows (n=10, identical conditioning; IoU vs the true novel geometry):
+
+| model | true scalars | −20 % | +20 % | occupancy (−20 / +20) |
+|---|---|---|---|---|
+| JEPA v1 | 0.607 (given-scalars row) | 0.153 | 0.145 | 0.071 / 0.067 |
+| JEPA v2 | 0.622 | 0.280 | 0.288 | 0.125 / 0.133 |
+| MetaDiT-S | 0.728 | 0.435 | 0.472 | 0.380 / 0.375 |
+
+- MetaDiT tracks perturbed scalars through the spectrum far better; ours collapse to
+  near-empty (v1) or fragment (v2). Caveat on our side: the JEPA must also *predict* the
+  scalars in that regime (MetaDiT has no scalar input), so part of the gap is the
+  conditioning path, not tracking ability.
+- Physics (`_compare_phase3_physics.py`, same-instrument for the given-scalars rows):
+  - `jepa_v1_B_true` n=10: real err 0.396 / corr **+0.892** vs shuffled 1.384 / +0.576
+    (margins −0.99 err / +0.32 corr; win 6/10 · 6/10; sign p=0.75 — underpowered).
+  - `jepa_v2_B_true` n=9: real 0.420 / **+0.899** vs shuffled 0.900 / +0.636
+    (+0.26 corr margin; win 6/9 · 7/9; p=0.51/0.18).
+  - **Three perturbed-scalar rows are excluded**: every design failed the passivity gate
+    (peaks 1.02–1.10 for v2's sets, 1.17–2.11 for v1's +20 % set; all converged, none
+    capped). These decodes are the near-empty ones (occ 0.07–0.13) and a nearly-empty cell
+    against an almost-empty reference should measure |T| ≈ 1, so the excess is a
+    **measurement artefact** (the sample and reference runs end on different field-decay
+    windows → different spectral leakage). Fixing it requires an identical ringout window
+    for the run/reference pair — a harness change, not a model change.
+  - `v1_spec_m20`'s null (real == shuffled) is **not** quoted as a model result: its peaks
+    are pinned at 0.999–1.000, the same artefact in benign form.
+
+### 4. imp1 — mirror-parameterised (quadrant) decoder · 1 seed · preliminary
+
+Separate model (`configs/unified_imp1.yaml`, decoder emits a 32×32 quadrant and mirrors it,
+plus refinement blocks; 11,565,444 trainable vs base 11,403,012; base config builds
+byte-identically and every base checkpoint still strict-loads).
+
+| metric | base v1 (3 seeds) | imp1 s0 (1 seed) |
+|---|---|---|
+| MAE, scenario A | 0.0490 ± 0.0013 (full split) | 0.0514 (n=512) |
+| AAE | 29.51 | 30.92 |
+| gate A / B / C | 0.9967 / 0.9772 / 0.9303 | 0.9961 / 0.9609 / 0.9238 |
+| scalar 1 / 2 known | 0.505 / 0.529 | 0.559 / 0.527 |
+| occupancy IoU (masked) | ~0.75 | 0.7544 |
+| pred occ fraction (true) | 0.427 (0.425) | 0.422 (0.425) |
+
+- **Parity within single-seed noise** on A/B/C and MAE; no improvement established.
+  Guidance sweep: w=0 → 0.553, w=1 → 0.129 (best), w≥2 breaks down (7.2 / 11.8 / 14.9).
+- Seeds 1-2 are queued (the cluster allows one GPU job at a time).
+
+### 5. imp2 — leak-free (mirror-pair) masking · in flight
+
+- **Measured leak** under the shipped random placement: **0.67** of masked tokens have a
+  visible mirror partner at ratio 0.5 (the corpus is exactly mirror-symmetric by
+  construction). Any symmetric decoder exploits this path automatically (imp1 does so by
+  construction), which is why masked-region scores under leaky masks are not comparable.
+- `mask_placement: mirror_pairs` closes the masked set under {fliplr, flipud, rot180}:
+  **leak exactly 0.0 at every ratio**; calibration 0.25→0.27, 0.50→0.50, 0.75→0.75.
+- Tests: 8 new (incl. masked pixels provably cannot change `z_hat`/`scalar_pred`, and the
+  JEPA loss is invariant to the unmasked region) → suite **401 passed / 10 skipped**.
+- First ablation datum (`scripts/diagnostics/mirror_leak.py`, base v1, n=6, ratio 0.5):
+  masked-region IoU 0.5488 (leaky) → **0.6140** (leak-free) — base v1 does *not* exploit the
+  leak; imp1 is the arm the instrument exists for.
+- Training in flight (step ~37k/70k); its battery and the three-checkpoint leak ablation run
+  in the same job.
+
+### 6. Operational record for the next session
+
+- `paramsakti` QOS: **one concurrent GPU job per user** (`QOSMaxJobsPerUserLimit` otherwise);
+  `small` accepts several concurrent CPU jobs. GPU nodes are drained/reserved intermittently.
+- The home **quota (50 GB) filled** mid-run, killing 3 Meep workers with `[Errno 122]`; a
+  targeted resume job re-solved exactly those designs (`passivity_ok=True`, peaks 0.94–0.98).
+  27 GB of the quota is the operator's own conda environments (untouched).
+- Meep throughput on one 48-core node: ~7–40 min per 10-design set (memory-bandwidth bound;
+  the first set of a run also pays the empty-cell reference solves for new scalar combos).
+
+### 7. What is NOT established today
+
+- **Everything on v1 is one training seed** → preliminary by `ACCEPTANCE_PROTOCOL.md`; the
+  three-seed replication is queued, not done.
+- imp1 vs base v1: parity, not an improvement.
+- Task-3 perturbed-spectrum physics: **unmeasurable with the current harness** (reference/run
+  decay-window mismatch, aggravated by near-empty decodes). No model claim is made from it.
+- The mandated gate-8 (real/**null**/**shuffled**, stratified by mask ratio) still has no test.
+- Phase-2's negative result is now a *comparative* statement (ours and MetaDiT's, same
+  instrument) but remains single-seed per model.

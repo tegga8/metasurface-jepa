@@ -72,36 +72,38 @@ def main():
         c = np.array(conv["coef"]).reshape(-1, 2, 3)
         p2.conv_bias = c[:, :, 2]
 
-    # gather every Meep dir under the given path (per-row dirs) or the dir itself
+    # gather every Meep dir under the given path (per-row dirs) or the dir itself.
+    # The MODEL tag lives in the directory name (jepa_v1_B_true, metadit_spec_m20,
+    # ...) while the design names carry only the ROW ("B_true/sym00"), so rows must
+    # be keyed by (dir, row) -- grouping by row alone silently merged v1 and v2.
     sub = sorted(d for d in glob.glob(os.path.join(args.meep_dir, "*"))
                  if os.path.isdir(d))
     rows = {}
     for d in [args.meep_dir] + sub:
+        tag = os.path.basename(os.path.normpath(d))
         for row, designs in load_rows(d).items():
-            rows.setdefault(row, {}).update(designs)
+            rows.setdefault((tag, row), {}).update(designs)
 
     rng = np.random.default_rng(0)
-    print(f"rows found: {sorted(rows)}\n")
-    for row in sorted(rows):
-        ds = rows[row]
+    print("rows found:", sorted(f"{t}:{r}" for t, r in rows), "\n")
+    for (tag, row) in sorted(rows):
+        ds = rows[(tag, row)]
         if row in orig_rows:
             common = sorted(set(ds) & set(orig))
             if len(common) < 4:
-                print(f"[{row}] not enough overlap with the originals "
+                print(f"[{tag}:{row}] not enough overlap with the originals "
                       f"({len(common)})")
                 continue
             tgt = {k: curve(orig[k]) for k in common}
         else:
             conds = None
             if args.cond_dir:
-                for tag in ("jepa_v1", "jepa_v2"):
-                    p = os.path.join(args.cond_dir, f"{tag}_{row}_cond.npz")
-                    if os.path.exists(p):
-                        conds = np.load(p, allow_pickle=True)
-                        break
+                p = os.path.join(args.cond_dir, f"{tag}_cond.npz")
+                if os.path.exists(p):
+                    conds = np.load(p, allow_pickle=True)
             if conds is None:
-                print(f"[{row}] no conditioning spectra (--cond-dir); "
-                      f"skipping target-based scoring")
+                print(f"[{tag}:{row}] no conditioning spectra "
+                      f"({tag}_cond.npz in --cond-dir); skipping")
                 continue
             names = [str(n) for n in conds["names"]]
             ok = [n for n in sorted(ds) if n in names]
@@ -115,7 +117,7 @@ def main():
             common = ok
 
         if len(common) < 4:
-            print(f"[{row}] too few comparable designs ({len(common)})")
+            print(f"[{tag}:{row}] too few comparable designs ({len(common)})")
             continue
 
         re_e, re_c, sh_e, sh_c = [], [], [], []
@@ -129,7 +131,7 @@ def main():
         mc, lo_c, hi_c = boot_margin(re_c, sh_c)
         de = np.asarray(re_e) - np.asarray(sh_e)
         dc = np.asarray(re_c) - np.asarray(sh_c)
-        print(f"=== {row}: n={len(common)} ===")
+        print(f"=== {tag}:{row}: n={len(common)} ===")
         print(f"  REAL     err={np.mean(re_e):.4f} corr={np.mean(re_c):+.4f}")
         print(f"  SHUFFLED err={np.mean(sh_e):.4f} corr={np.mean(sh_c):+.4f}")
         print(f"  MEAN margin  err {me:+.4f} CI [{lo_e:+.4f},{hi_e:+.4f}] | "

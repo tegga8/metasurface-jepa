@@ -98,6 +98,9 @@ def main():
         REPO, "data", "metadit", "weights", "metadit-small.bin"))
     ap.add_argument("--skip-metadit", action="store_true")
     ap.add_argument("--skip-task2", action="store_true")
+    ap.add_argument("--task2-only", action="store_true",
+                    help="MetaDiT on the random-spectrum sets only; skips the "
+                         "scalar-matched rows (and needs no b40 targets)")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -109,7 +112,7 @@ def main():
     l0, h0, r0 = (float(v) for v in b["scalars"])
     base = np.array([l0, h0, r0])
 
-    orig_meep = load_dir_or_file(os.path.join(
+    orig_meep = {} if args.task2_only else load_dir_or_file(os.path.join(
         os.path.dirname(args.out_dir), "b40_merged.json"))[0]
 
     picks = [nm for nm in names_all if nm in orig_meep][:args.n]
@@ -237,39 +240,40 @@ def main():
         # matched scalar rows: identical conditions to the JEPA spectrum-only
         # rows (build them here rather than reusing a JEPA model's surrogate --
         # same math, but this keeps MetaDiT's rows independent of the ckpts)
-        if args.jepa:
-            ref_ckpt = args.jepa[0].split(":", 1)[1]
-            _, surrogate = nmt.load_model(
-                os.path.join(REPO, "configs/unified.yaml"), ref_ckpt)
-        else:
-            from physics.physics_loop import load_surrogate
-            import yaml
-            with open(os.path.join(REPO, "configs", "unified.yaml"),
-                      encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            surrogate = load_surrogate(config.get("physics", {}).get(
-                "surrogate_path", "data/metadit/weights/surrogate_model.bin"))
+        if not args.task2_only:
+            if args.jepa:
+                ref_ckpt = args.jepa[0].split(":", 1)[1]
+                _, surrogate = nmt.load_model(
+                    os.path.join(REPO, "configs/unified.yaml"), ref_ckpt)
+            else:
+                from physics.physics_loop import load_surrogate
+                import yaml
+                with open(os.path.join(REPO, "configs", "unified.yaml"),
+                          encoding="utf-8") as f:
+                    config = yaml.safe_load(f)
+                surrogate = load_surrogate(config.get("physics", {}).get(
+                    "surrogate_path", "data/metadit/weights/surrogate_model.bin"))
 
-        md_specs = {}
-        for row, off in OFFSETS:
-            sv = base * (1 + off)
-            sv_t = torch.tensor(np.tile(sv, (len(picks), 1)),
-                                dtype=torch.float32)
-            g = assemble_metadit_geometry(occ, sv_t[:, 0], sv_t[:, 1],
-                                          sv_t[:, 2])
-            with torch.no_grad():
-                cond = surrogate(g).prediction
-            md_specs[row] = cond
-            pats = generate(cond, row)
-            ious = [iou(pats[k], occ_np[k]) for k in range(len(picks))]
-            st = style(list(pats))
-            print(f"    IoU={np.mean(ious):.3f} holes={st['holes']:.2f} "
-                  f"comps={st['comps']:.2f} mirror={st['mirror']:.3f}",
-                  flush=True)
-            results["rows"].append({"model": "metadit_s", "row": row,
-                                    "iou": float(np.mean(ious)),
-                                    **st})
-            save_row(args.out_dir, "metadit", row, pats, sv, picks)
+            md_specs = {}
+            for row, off in OFFSETS:
+                sv = base * (1 + off)
+                sv_t = torch.tensor(np.tile(sv, (len(picks), 1)),
+                                    dtype=torch.float32)
+                g = assemble_metadit_geometry(occ, sv_t[:, 0], sv_t[:, 1],
+                                              sv_t[:, 2])
+                with torch.no_grad():
+                    cond = surrogate(g).prediction
+                md_specs[row] = cond
+                pats = generate(cond, row)
+                ious = [iou(pats[k], occ_np[k]) for k in range(len(picks))]
+                st = style(list(pats))
+                print(f"    IoU={np.mean(ious):.3f} holes={st['holes']:.2f} "
+                      f"comps={st['comps']:.2f} mirror={st['mirror']:.3f}",
+                      flush=True)
+                results["rows"].append({"model": "metadit_s", "row": row,
+                                        "iou": float(np.mean(ious)),
+                                        **st})
+                save_row(args.out_dir, "metadit", row, pats, sv, picks)
 
         # ---- task 2: random-spectrum sets ----
         if not args.skip_task2:

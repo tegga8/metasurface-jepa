@@ -979,3 +979,22 @@ Common passivity-clean intersection, one shared shuffled permutation:
 - imp2's gate-B edge (all three seeds ≥ base's best) is small and offset by gate A: a trade,
   not an improvement.
 - The task-3 harness fix and the gate-8 stratified test remain open, as in the block above.
+
+### 7. Variants re-measured on the full test split (resolves †)
+
+Scenario A, the whole 17,489-item test split — the same protocol as the baseline's
+0.0490 ± 0.0013 (base seeds 0.0500 / 0.0494 / 0.0476):
+
+| variant | MAE (3 seeds) | per-seed | vs base v1 |
+|---|---|---|---|
+| **imp1** | **0.0524 ± 0.0014** | 0.0531 / 0.0508 / 0.0533 | **+7.0 %; every imp1 seed worse than every base seed** |
+| **imp2** | **0.0522 ± 0.0028** | 0.0519 / 0.0496 / 0.0551 | +6.5 %; 2 of 3 seeds above base's range |
+
+- **Both variants are worse than base v1 on fidelity** once measured on the full split.
+  imp1's deficit is a complete per-seed separation and lines up with its CI-separated gate-A
+  deficit — the mirror decoder is a coherent negative.
+- imp2's spread (0.0496–0.0551) is twice base's; its gate-B edge (0.9824 vs 0.9772, every seed
+  ≥ base's best) is therefore bought with MAE: a trade, not an improvement.
+- Method note: the n=512 subset read understated both variants' deficit (imp2's seed 2 reads
+  0.0503 on the subset and 0.0551 on the full split) — subset comparisons flatter.
+- Supersedes the "inconclusive †" rows in §§1–2 above; the gate and scalar columns there stand.

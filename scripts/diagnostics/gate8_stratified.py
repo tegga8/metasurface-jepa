@@ -100,7 +100,7 @@ def main():
         for name, s in strata.items():
             masker = BlockMasker(placement="random", grid=16, min_side=3,
                                  k_range=(1, 4), seed=int(seed))
-            M = masker.sample(occ, ratio=s["ratio"])
+            M = masker.sample(occ, ratio=s["ratio"]).to(device)
             known = torch.full((occ.shape[0], 3), bool(s["known"]),
                                dtype=torch.bool, device=device)
             res = es.real_null_shuffled(model, surrogate, occ, sv, spec, M,

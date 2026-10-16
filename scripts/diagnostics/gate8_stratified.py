@@ -81,6 +81,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, surrogate = nmt.load_model(args.config, args.ckpt)
     model = model.to(device)
+    surrogate = surrogate.to(device)
     model.eval()
     surrogate.eval()
 

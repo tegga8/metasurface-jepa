@@ -1117,3 +1117,41 @@ Run-to-run spread: **0.0000**. Three consequences:
 paired comparisons and is now guarded so protocols can never be mixed, even though it is not
 the fix for this. The gate itself still needs the two corrections above wired in (flux-only
 scoring, conditioned-band evaluation) before any future run's `passivity_ok` is trustworthy.
+
+### 10. The surviving `v1_spec_p20` excess vs resolution — direction measured, not yet settled
+
+`v1_spec_p20` is the one row that survives every correction, so its origin decides whether it
+is a finding about the model or about the solver. The empty-cell control rules out instrument
+offset (identical system reads exactly 1.0000), leaving discretisation/boundary effects. One
+variable was varied — resolution — on three designs spanning the observed range, with the
+res-32 replicas reproducing the stored values bit-for-bit first (so the comparison is
+same-code).
+
+| design | res 32 | res 48 | change | vs 1.02 |
+|---|---|---|---|---|
+| `sym03` (worst) | 1.1063 | **1.0835** | −0.0228 | still over |
+| `sym05` | 1.1639 | **1.0701** | −0.0938 | still over |
+| `sym00` | 1.0300 | (running) | — | still over |
+
+Corrected statistic (flux-only, conditioned band). The raw statistic is unstable across the
+same pair of runs — `sym03` falls 2.1141 → 1.3086 while `sym05` *rises* 1.1748 → 1.3186 —
+which is further evidence that the raw number measures the band edges rather than the sample.
+
+- **The direction has a mechanism.** The PML is a fixed 0.5 length units, i.e. **16 pixels at
+  res 32, 24 at res 48, 32 at res 64**. A thicker-in-pixels absorbing boundary reflects less,
+  and a slab changes the field profile reaching it, so a PML-reflection artefact predicts
+  exactly the observed shrink. Both designs move the same way and by an amount (2–8 %) of the
+  size a few-percent boundary systematic would produce.
+- **What that does and does not establish.** It establishes that the excess is resolution-
+  dependent and therefore not a quotable property of the model; it does **not** yet establish
+  convergence to 1. Two points give a direction, not a limit, so the row stays **excluded**
+  and no claim about v1's +20 % scalar row is made in either direction. A third point at
+  res 64 is queued (`642594` + its chained follow-up `642623`, ~4 h per FDTD run — res-64 costs
+  ~13× res-32) and will show whether the shrink continues or plateaus near 1.07.
+- **The proper fix is not more resolution points.** `|T| <= 1` is a statement about the
+  *incident* field, and this harness has no incident monitor: it normalises by an empty-cell
+  run, which is a different physical system (and, at the band edges, a poorly conditioned one).
+  Adding a flux monitor *before* the sample and normalising by it makes the passivity statement
+  well-posed without any conditioning heuristic. That is a harness change which invalidates
+  comparability with every existing t3 curve (they would need re-running), so it is recorded
+  here as the recommended next step rather than adopted unilaterally.

@@ -482,7 +482,16 @@ constraints → proceed to Phase 2.
 ## Phase 6b — S0 rung · length-proportional staging arm · symbol round-trip (2026-10-06)
 
 All arms below: `akashkesav` kernels, 70k × seeds {0,1,2}, canonical battery, v1 schedule
-unless stated. Trainable counts are live-audited (`model_size_audit`).
+unless stated. Trainable counts are live-audited (`model_size_audit`), **which sums
+submodules and therefore excludes the two trainable tokens registered directly on
+`UnifiedJEPA` — `mask_token` and `scalar_query_token`, each `(1, 1, hidden)`, i.e. 2 × hidden
+in total.** Audit of 2026-10-16: counting *all* `model.parameters()` adds exactly 2 × hidden
+per arm (base 11,403,012 not 11,402,628; S1 4,233,092; S2 8,143,364; S0 2,193,476;
+L1 19,897,220), and the two figures are the same model under two definitions — no code or
+checkpoint changed (no commit has touched `src/` since this study). Both tokens are present
+in every staged checkpoint, and a key-by-key diff against the current configs shows **0
+missing trainable keys, 0 unexpected keys and 0 shape mismatches** for base v1, S1, S2 and
+L1, so the checkpoints carry every trainable parameter these configs build.
 
 ### Model-size ladder (3 seeds each)
 
@@ -1038,12 +1047,12 @@ recorded below:
 
 | arm | trainable | easy win | **hard win** | hard paired margin (95 % CI) |
 |---|---|---|---|---|
-| base v1 | 11,402,628 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
+| base v1 | 11,403,012 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
 | imp1 s0 | 11,565,444 | 0.8717 | 0.9935 | +0.4964 [+0.4373, +0.5511] |
-| imp2 s0 | 11,402,628 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
-| S1 small | 4,232,836 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
-| S2 slim | 8,142,980 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
-| L1 wide | 19,896,708 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
+| imp2 s0 | 11,403,012 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
+| S1 small | 4,233,092 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
+| S2 slim | 8,143,364 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
+| L1 wide | 19,897,220 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
 
 - **Every arm passes, and the hard-stratum rate is nearly flat across a 4.7× parameter range**
   (0.9902–0.9974; binomial SE ≈ 0.0021 at n=1,536, so only base-vs-S2/L1 separates at ~2–3σ

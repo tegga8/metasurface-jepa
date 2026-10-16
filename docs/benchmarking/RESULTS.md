@@ -1081,13 +1081,37 @@ So **two of the three excluded rows are recovered** (both v2 rows — the models
 gate was not), one row (`v1_spec_p20`) remains a genuine finding at 1.026–1.193, and the
 `v1_spec_m20` "pinned null" is reclassified as a correct measurement rather than an artefact.
 
-**What is not yet established.** Whether `v1_spec_p20`'s excess is physics or the
-instrument's own offset: the surviving excess approaches a uniform ~2.6 % (1.026 at the
-strictest floor, across all 10 designs), which is the size of a PML-reflection systematic, and
-1.02 is a tolerance tighter than that. The control that settles it is running — the harness
-applied to an **empty** cell (sample and reference physically identical, so the reading is the
-statistic's own error), twice per scalar combo, job `642465`. Until it returns, no passivity
-claim about `v1_spec_p20` should be quoted in either direction.
+**What was not established at the time of writing.** Whether `v1_spec_p20`'s excess is
+physics or the instrument's own offset. The control below settles it (job `642465`, the
+harness applied to an **empty** cell, i.e. sample and reference physically identical, so the
+reading is the statistic's own error).
+
+**Control result (job `642465`, 3 of 4 runs; the fourth adds nothing).** The empty cell —
+sample and reference physically identical — reads **exactly 1.0000**, reproducibly:
+
+| run | raw max | mode channel | flux-only @1e-2 | flux-only @5e-2 |
+|---|---|---|---|---|
+| `m20_a` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| `m20_b` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| `p20_a` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+Run-to-run spread: **0.0000**. Three consequences:
+
+1. **The statistic is exact for an identical system**, so the 1.02 tolerance *is* resolvable
+   and the gate is not noise-limited. The `v1_spec_p20` excess is therefore a **real measured
+   difference**, not an offset of the instrument — it is the one row of the three that
+   survives every correction.
+2. The mode channel also reads exactly 1.0000 on identical geometry, which confirms the
+   explanation above: its excesses appear only when the geometry *differs* between sample and
+   reference, i.e. they come from the per-geometry normalisation, not from noise.
+3. What remains open is the *origin* of `v1_spec_p20`'s difference and whether it should be
+   attributed to the model at all. It is not an instrument offset, but a slab changes the
+   field profile reaching the PML, so a PML-reflection systematic is still the leading
+   explanation for a few-percent flux excess. The test is a single `v1_spec_p20` design re-run
+   at higher resolution: if the excess shrinks with resolution it is a solver-setup artefact
+   and the row stays unquotable; if it holds it is a property of those decodes and becomes a
+   real finding about v1's +20 % scalar row. No passivity claim on this row in either
+   direction until that run is in.
 
 **Harness status.** `--ring-fixed` (shared window) is retained: it is correct practice for
 paired comparisons and is now guarded so protocols can never be mixed, even though it is not

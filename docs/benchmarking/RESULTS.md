@@ -998,3 +998,35 @@ Scenario A, the whole 17,489-item test split — the same protocol as the baseli
 - Method note: the n=512 subset read understated both variants' deficit (imp2's seed 2 reads
   0.0503 on the subset and 0.0551 on the full split) — subset comparisons flatter.
 - Supersedes the "inconclusive †" rows in §§1–2 above; the gate and scalar columns there stand.
+
+### 8. Gate 8 — stratified real / null / shuffled (the plan's critical gap)
+
+`scripts/diagnostics/gate8_stratified.py`, n=512 per evaluation seed × seeds {3,4,5}
+(1,536 pooled samples per stratum), paired per-sample win rate `real < shuffled` against the
+0.75 threshold, bootstrap CI on the paired difference (5,000 resamples). Strata: *easy*
+= mask ratio 0.25 with all scalars known; *hard* = mask ratio 1.00 with all scalars unknown
+(the mandated gate).
+
+| checkpoint | easy win rate | easy paired diff | **hard win rate** | hard paired diff (95 % CI) |
+|---|---|---|---|---|
+| **base v1** | 0.8945 | +0.1786 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
+| imp1 s0 | 0.8717 | +0.1674 | **0.9935** | +0.4964 [+0.4373, +0.5511] |
+| imp2 s0 | 0.9023 | +0.2051 | **0.9948** | +0.5000 [+0.4244, +0.5711] |
+
+- **The gate passes for all three checkpoints, decisively.** Gate 8 — "real must beat shuffled
+  in physics-consistency, stratified by regime, gated on the hard stratum" — was the validation
+  plan's *critical* gap (the suite covered real-vs-null only, unstratified). Answer: in the
+  hard stratum the true spectrum beats a deranged one on 99.4–99.7 % of samples, with the CI
+  nowhere near 0.5. The goal-ignoring collapse the plan was built to catch is **not present**.
+- **The hard stratum is where conditioning is strongest, not weakest** (mean error real 0.129
+  vs shuffled 0.62 vs null 0.53): with every geometry token and all three scalars masked, the
+  spectrum is the only signal the predictor has and it clearly uses it. The easy stratum's
+  lower win rate (0.87–0.90) reflects the visible context carrying the answer, not a defect.
+- Real-vs-null alone would have been the weaker instrument here: null distance is +0.42 to
+  +0.43 in the hard stratum while the shuffled margin is +0.50 — the two agree in direction,
+  but only the shuffled control rules out the generic "predictions move when any input moves"
+  explanation.
+- Ranking on the hard gate: base v1 0.9974 > imp2 0.9948 > imp1 0.9935 — ordering consistent
+  with the fidelity results (base best), and all three far above threshold.
+- Not established here: gate 8 on the *scaling* arms (S0–L1) and on v2; and the hard-stratum
+  numbers are eval-seed means of one checkpoint per arm, not 3 training seeds.

@@ -1161,7 +1161,7 @@ paired comparisons and is now guarded so protocols can never be mixed, even thou
 the fix for this. The gate itself still needs the two corrections above wired in (flux-only
 scoring, conditioned-band evaluation) before any future run's `passivity_ok` is trustworthy.
 
-### 10. The surviving `v1_spec_p20` excess vs resolution — direction measured, not yet settled
+### 10. The surviving `v1_spec_p20` excess — resolution axis exhausted, row not quotable
 
 `v1_spec_p20` is the one row that survives every correction, so its origin decides whether it
 is a finding about the model or about the solver. The empty-cell control rules out instrument
@@ -1170,35 +1170,38 @@ variable was varied — resolution — on three designs spanning the observed ra
 res-32 replicas reproducing the stored values bit-for-bit first (so the comparison is
 same-code).
 
-| design | res 32 | res 48 | change | vs 1.02 |
+| design | res 32 | res 48 | res 64 | vs 1.02 |
 |---|---|---|---|---|
-| `sym00` (mildest) | 1.0300 | 1.0311 | **+0.0011 — unchanged** | still over |
-| `sym03` (worst) | 1.1063 | **1.0835** | −0.0228 | still over |
-| `sym05` | 1.1639 | **1.0701** | −0.0938 | still over |
+| `sym00` (mildest) | 1.0300 | 1.0311 | (not run) | still over |
+| `sym03` (worst) | 1.1063 | 1.0835 | (not run — see below) | still over |
+| `sym05` | 1.1639 | **1.0701** | **1.0929** | still over at all three |
 
-Corrected statistic (flux-only, conditioned band). The raw statistic is unstable across the
-same pair of runs — `sym03` falls 2.1141 → 1.3086 while `sym05` *rises* 1.1748 → 1.3186 —
+Corrected statistic (flux-only, conditioned band). The raw statistic is unstable at every
+resolution — `sym03` falls 2.1141 → 1.3086 while `sym05` rises 1.1748 → 1.3186 → 1.9108 —
 which is further evidence that the raw number measures the band edges rather than the sample.
 
-- **This is not a uniform shrink toward 1, and the third design is what shows it.** Read from
-  two designs the pattern looked like convergence (−0.023, −0.094); the mildest design then
-  moved by **+0.001**, i.e. not at all. The measurements therefore separate into two
-  components: a **resolution-independent residual at ≈1.03** (exactly what `sym00` sits at,
-  unchanged from 32 to 48) plus a **resolution-dependent part** that accounts for most of the
-  larger excesses.
-- **The direction still has a mechanism** for the resolution-dependent half: the PML is a fixed
-  0.5 length units — **16 pixels at res 32, 24 at res 48, 32 at res 64** — so a thicker-in-pixels
-  absorber reflects less, and a slab changes the field profile reaching it. But that mechanism
-  cannot explain the stable 3 %, since a boundary effect should shrink with the absorber's
-  thickness.
-- **What that establishes.** The survivor is *not* a quotable property of the model: it is a
-  measurement-side excess on near-empty decodes (air reference, lossy near-empty sample, which
-  cannot transmit more than air), and an identical-system control reads exactly 1.0000, so it is
-  not an offset of the instrument either. It also is **not** demonstrated to converge, so the
-  row stays **excluded** and no claim about v1's +20 % scalar row is made in either direction.
-  A res-64 point (`642594` + chained `642623`) is the last resolution datum: if the two larger
-  excesses keep shrinking while `sym00` stays at 1.03, the residual is a resolution-stable
-  systematic, which is the reading the three points already support.
+- **The resolution axis is now exhausted, and it does not converge.** Read from two designs the
+  pattern looked like convergence to 1, and the first draft of this section proposed a mechanism
+  for it (the PML is a fixed 0.5 length units, i.e. 16/24/32 pixels at res 32/48/64, so a
+  thicker absorber should reflect less). The next two measurements refuted both: `sym00` is
+  **exactly stable** (1.0300 → 1.0311, i.e. unchanged) and `sym05` is **non-monotone**
+  (1.1639 → 1.0701 → **1.0929**, and at the strict 5e-2 floor 1.0214 → 1.0722). A boundary
+  effect that shrinks with absorber thickness cannot produce a stable 3 % on one design and an
+  up-tick on another.
+- **What survives every measurement**: the excess is above the 1.02 tolerance at **every**
+  resolution tested (32/48/64) and on **every** design tested (1.026–1.19 at floor 1e-2), it is
+  not an offset of the instrument (identical-system control reads exactly 1.0000), and it is a
+  measurement-side quantity on near-empty decodes (air reference vs a lossy near-empty sample,
+  which cannot transmit more than air). It is therefore **not quotable as a property of the
+  model**, and the row stays **excluded** — no claim about v1's +20 % scalar row in either
+  direction.
+- **Disclosure: `sym03`'s res-64 run was skipped by my own guard.** The follow-up job skipped
+  any design whose output file already existed, and the first job had left `res64_k3.json` as a
+  reference-only file (written before its design run was cancelled) — a reference-only file is
+  indistinguishable from a completed run by existence alone. I have **not** re-run it: with
+  `sym00` stable and `sym05` non-monotone, a third design on this axis cannot settle the
+  question, and 4 h of FDTD for another point in the same band is not a good trade. The record
+  says what was measured and what was skipped, rather than implying four points.
 - **The proper fix is not more resolution points.** `|T| <= 1` is a statement about the
   *incident* field, and this harness has no incident monitor: it normalises by an empty-cell
   run, which is a different physical system (and, at the band edges, a poorly conditioned one).

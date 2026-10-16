@@ -1031,8 +1031,35 @@ Scenario A, the whole 17,489-item test split — the same protocol as the baseli
   explanation.
 - Ranking on the hard gate: base v1 0.9974 > imp2 0.9948 > imp1 0.9935 — ordering consistent
   with the fidelity results (base best), and all three far above threshold.
-- Not established here: gate 8 on the *scaling* arms (S0–L1) and on v2; and the hard-stratum
-  numbers are eval-seed means of one checkpoint per arm, not 3 training seeds.
+
+**Completed 2026-10-16 across the whole ladder** (same instrument, n=512 × eval seeds
+{3,4,5} = 1,536 pooled per stratum, threshold 0.75), which closes the "not established" gap
+recorded below:
+
+| arm | trainable | easy win | **hard win** | hard paired margin (95 % CI) |
+|---|---|---|---|---|
+| base v1 | 11,402,628 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
+| imp1 s0 | 11,565,444 | 0.8717 | 0.9935 | +0.4964 [+0.4373, +0.5511] |
+| imp2 s0 | 11,402,628 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
+| S1 small | 4,232,836 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
+| S2 slim | 8,142,980 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
+| L1 wide | 19,896,708 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
+
+- **Every arm passes, and the hard-stratum rate is nearly flat across a 4.7× parameter range**
+  (0.9902–0.9974; binomial SE ≈ 0.0021 at n=1,536, so only base-vs-S2/L1 separates at ~2–3σ
+  and the rest tie). Goal-conditioning quality is therefore **capacity-insensitive** on this
+  ladder — the same shape as the physics gate, which was flat across the size rungs. A smaller
+  model is not paying for its size in spectrum conditioning.
+- The easy stratum (0.87–0.90, no CI anywhere near threshold) behaves as before: with most of
+  the geometry visible the context carries the answer, so the *relative* margin is smaller even
+  though the absolute error is much lower.
+- Still not established: **S0 tiny** (2,193,284 params; its checkpoint is published as a Kaggle
+  dataset, not staged locally) and **v2** (its cluster copy was deleted in the quota cleanup,
+  and the local sched-fix checkpoint needs identifying against the v2 arm before it can be
+  claimed).
+- Superseded: the original "not established on the *scaling* arms (S0–L1)" caveat is closed for
+  S1/S2/L1 by the table above; only S0 and v2 remain. The hard-stratum numbers here are still
+  eval-seed means of one checkpoint per arm, not 3 training seeds.
 
 ### 9. CORRECTION — the task-3 passivity gate was measuring itself, not the models
 

@@ -1053,6 +1053,7 @@ recorded below:
 | base v1 | 11,403,012 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
 | imp1 s0 | 11,565,444 | 0.8717 | 0.9935 | +0.4964 [+0.4373, +0.5511] |
 | imp2 s0 | 11,403,012 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
+| **v2 (sched_fix)** | 11,403,012 | 0.8822 | **0.9915** | +0.4997 [+0.4571, +0.5413] |
 | L1 wide | 19,897,220 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
 
 - **Every arm passes, and the hard-stratum rate is nearly flat across a 9.1× parameter range**
@@ -1060,6 +1061,17 @@ recorded below:
   separates at ~2–3σ and the rest tie). Goal-conditioning quality is therefore
   **capacity-insensitive** on this ladder — the same shape as the physics gate, which was flat
   across the size rungs. A smaller model is not paying for its size in spectrum conditioning.
+- **v2 is the useful counter-case**: the arm whose length-proportional staging *failed* its MAE
+  gate (0.0531 vs 0.0490) still passes gate 8 at 0.9915, i.e. the schedule change cost fidelity
+  without damaging spectrum conditioning. Its easy stratum is the weakest of the eight
+  (+0.1490, CI [+0.1395, +0.1587]), which is consistent with it being the weaker arm overall.
+- **v2's checkpoint identity was confirmed, not assumed from a filename.** The local copy is
+  `schedfix_ckpt/schedfix/seed0.pt` (both local copies byte-identical, md5 `a3ac6228`), its
+  architecture key-matches the shipped config (0 missing trainable keys, 0 unexpected, 0 shape
+  mismatches), the ledger already calls it "`sched_fix` (v2)", and its full-split scenario-A MAE
+  reproduces the recorded v2 seed-0 value **exactly (0.0507)** rather than base v1's seed values
+  (0.0500 / 0.0494 / 0.0476). The MAE and gate-8 numbers above therefore belong to a checkpoint
+  whose provenance is traceable on four independent grounds.
 - **Capacity does show up in absolute error, not in the win rate.** S0's hard-stratum real error
   is 0.1424 against base's 0.1289 (and its MAE is 0.0564 vs 0.0490), so the *ranking/consistency*
   of the conditioning survives shrinking while the *magnitudes* degrade — worth stating, because
@@ -1071,11 +1083,10 @@ recorded below:
 - The easy stratum (0.87–0.90, no CI anywhere near threshold) behaves as before: with most of
   the geometry visible the context carries the answer, so the *relative* margin is smaller even
   though the absolute error is much lower.
-- Still not established: **v2** (its cluster copy was deleted in the quota cleanup, and the local
-  sched-fix checkpoint needs identifying against the v2 arm before it can be claimed).
-- Superseded: the original "not established on the *scaling* arms (S0–L1)" caveat is now **fully
-  closed** for every rung S0–L1 by the table above; only v2 remains. The hard-stratum numbers
-  here are eval-seed means of one checkpoint per arm, not 3 training seeds.
+- Still not established: nothing on this ladder — the table now covers every rung S0–L1 plus
+  base, both variants and the `sched_fix` (v2) arm, and the original scaling-arms caveat is
+  closed. The hard-stratum numbers remain eval-seed means of one checkpoint per arm, not 3
+  training seeds.
 
 ### 9. CORRECTION — the task-3 passivity gate was measuring itself, not the models
 

@@ -35,6 +35,32 @@ The loss tangent is a deviation from the lossless CST reference the dataset was
 generated with. It is bounded and configurable, and the harness must be
 validated against MetaDiT's own CST spectra on real dataset geometries before
 its output is used for any claim (see _meep_validate_vs_cst.py).
+
+WINDOW PROTOCOLS (task-3 fix, 2026-10-16). The flux monitor integrates over the
+whole run, so a pair that stops at different times is compared over different
+integration windows -- and the task-3 scalar sweep is nothing but such pairs
+(reference scalars vs a perturbed l/h/r on the same geometry). Nothing about a
+perturbed scalar changes the source, so any window difference is an artefact
+that can swamp the effect being measured; it also explains rows that converged
+yet still read |T| > 1.
+
+  adaptive (default)   stop when |E|^2 decays by --decay-by, capped by
+                       --max-ring. Correct for a single design.
+  fixed (--ring-fixed) an explicit post-source duration, no adaptive stop, so
+                       every member of a comparison set integrates over a
+                       byte-identical window.
+
+This is NOT a return to the pre-2026-10-07 "fixed 1100 units in a lossless
+cell" defect: the material stays lossy, and the window is meant to be derived
+from converged adaptive runs (two-pass recipe below), not guessed. Every
+design's JSON records which protocol produced it, because a fixed-window curve
+must never be compared against an adaptive one.
+
+  Two-pass recipe for a scalar sweep on one geometry:
+    1. run every variant with the default adaptive protocol; read `ringdown`
+       from each JSON;
+    2. re-run all of them with `--ring-fixed <max(ringdown) * 1.05>` so the
+       pair shares one window, and compare only those curves.
 """
 
 import json
@@ -65,28 +91,32 @@ PASSIVITY_TOL = 1.02     # peak ratio above this is a solver failure
 
 def _parse_args(argv):
     a = {"start": 0, "end": None, "loss": LOSS_TANGENT, "res": RES,
-         "max_ring": MAX_RING, "decay_by": DECAY_BY, "ref_from": None}
+         "max_ring": MAX_RING, "decay_by": DECAY_BY, "ref_from": None,
+         "ring_fixed": None}
     i = 0
     while i < len(argv):
         k = argv[i]
         if k in ("--start", "--end", "--loss-tangent", "--res", "--max-ring",
-                 "--decay-by", "--ref-from"):
+                 "--decay-by", "--ref-from", "--ring-fixed"):
             if i + 1 >= len(argv):
                 sys.exit(f"{k} needs a value")
             v = argv[i + 1]
             key = {"--start": "start", "--end": "end",
                    "--loss-tangent": "loss", "--res": "res",
                    "--max-ring": "max_ring", "--decay-by": "decay_by",
-                   "--ref-from": "ref_from"}[k]
+                   "--ref-from": "ref_from", "--ring-fixed": "ring_fixed"}[k]
             if key in ("start", "end", "res"):
                 a[key] = int(v)
-            elif key == "ref_from":
+            elif key in ("ref_from",):
                 a[key] = v
             else:
                 a[key] = float(v)
             i += 2
         else:
             sys.exit(f"unknown argument: {k}")
+    # Single source of truth for the protocol name: the harness record, the
+    # resume guard and the --ref-from guard all key off it.
+    a["window_name"] = "fixed" if a["ring_fixed"] is not None else "adaptive"
     return a
 
 
@@ -115,6 +145,62 @@ def make_stop_condition(decay_by, window, cap):
         return stop
 
     return _stop, state
+
+
+def window_plan(args):
+    """Decide what `sim.run` gets and how the run is described in the JSON.
+
+    Two protocols (see the module docstring):
+
+      fixed     --ring-fixed given: an explicit post-source duration. Meep
+                treats a numeric `until_after_sources` as "sources off, then
+                this many time units", and the source is identical across a
+                comparison set, so the integration window is identical too.
+      adaptive  default: the field-decay criterion with its hard cap.
+
+    Returns (until_after_sources, describe) where `describe()` yields the meta
+    fields for the finished run. `window` records which protocol produced the
+    curve -- fixed-window and adaptive curves must never be compared with each
+    other, and the fixed window must not depend on any per-variant convergence
+    parameter, which is what makes a pair comparable.
+    """
+    if args["ring_fixed"] is not None:
+        t = float(args["ring_fixed"])
+
+        def describe():
+            return {"window": "fixed", "ringdown": round(t, 1),
+                    "hit_cap": False}
+
+        return t, describe
+
+    cond, state = make_stop_condition(args["decay_by"], DECAY_WINDOW,
+                                      args["max_ring"])
+
+    def describe():
+        return {"window": "adaptive",
+                "ringdown": None if state["t_end"] is None
+                else round(state["t_end"], 1),
+                "hit_cap": bool(state["capped"])}
+
+    return cond, describe
+
+
+def protocol_matches(record, window_name, loss, loss_tol=1e-12):
+    """May a run with (window_name, loss) be merged with `record`?
+
+    Both merge points use this: resuming an existing output file, and adopting
+    empty-cell references from a donor via --ref-from. Merging across
+    protocols silently corrupts the ratios -- a design's T is its own flux
+    divided by the reference's, so the two runs must have integrated over the
+    same window (and used the same loss tangent).
+
+    A record with no `window` key predates the protocol and is adaptive; a
+    record with no `loss_tangent` does not constrain the loss.
+    """
+    recorded_loss = record.get("loss_tangent")
+    if recorded_loss is not None and abs(recorded_loss - loss) > loss_tol:
+        return False
+    return record.get("window", "adaptive") == window_name
 
 
 def run_case(pat, l, h, n, args):
@@ -172,10 +258,9 @@ def run_case(pat, l, h, n, args):
                            size=mp.Vector3(sx, sy, 0))
     mon = sim.add_mode_monitor(FREQS, region)
 
-    cond, cstate = make_stop_condition(args["decay_by"], DECAY_WINDOW,
-                                       args["max_ring"])
+    stop_spec, describe = window_plan(args)
     t0 = time.time()
-    sim.run(until_after_sources=cond)
+    sim.run(until_after_sources=stop_spec)
     runtime = time.time() - t0
 
     flux = np.array(mp.get_fluxes(trans))
@@ -183,11 +268,9 @@ def run_case(pat, l, h, n, args):
     # ModeRegion; the parity variants were byte-identical to this one.
     alpha = sim.get_eigenmode_coefficients(mon, [1]).alpha[0, :, 0]
     meta = {"runtime_s": round(runtime, 1),
-            "ringdown": None if cstate["t_end"] is None
-            else round(cstate["t_end"], 1),
-            "hit_cap": bool(cstate["capped"]),
             "blocks": len(geom),
             "d_conductivity": round(float(sigma), 6)}
+    meta.update(describe())
     return flux, alpha, meta
 
 
@@ -244,6 +327,8 @@ def main():
            "harness": {"res": args["res"], "loss_tangent": args["loss"],
                        "decay_by": args["decay_by"],
                        "max_ring": args["max_ring"],
+                       "window": args["window_name"],
+                       "ring_fixed": args["ring_fixed"],
                        "mode_channels": ["def"]},
            "refs": {}, "designs": []}
     prev = None
@@ -255,15 +340,17 @@ def main():
             print(f"could not resume from {out_path} ({exc}); starting fresh",
                   flush=True)
     if prev is not None:
-        if prev.get("harness", {}).get("loss_tangent") == args["loss"]:
+        ph = prev.get("harness", {})
+        if protocol_matches(ph, args["window_name"], args["loss"]):
             out["refs"] = prev.get("refs", {})
             out["designs"] = [d for d in prev.get("designs", [])
                               if lo <= d["idx"] < hi]
             print(f"resuming: {len(out['designs'])} designs already done",
                   flush=True)
         else:
-            print("existing output used a different loss tangent; "
-                  "starting fresh", flush=True)
+            print(f"existing output used a different loss tangent or window "
+                  f"protocol ({ph.get('window', 'adaptive')} -> "
+                  f"{args['window_name']}); starting fresh", flush=True)
 
     # Adopt empty-cell references computed by another run. When many workers
     # share one scalar combo (the batch40 set uses the dataset-mean scalars for
@@ -275,10 +362,14 @@ def main():
             donor = json.load(open(args["ref_from"]))
         except (OSError, ValueError) as exc:
             sys.exit(f"--ref-from {args['ref_from']}: {exc}")
-        dt = donor.get("harness", {}).get("loss_tangent")
-        if dt is not None and abs(dt - args["loss"]) > 1e-12:
-            sys.exit(f"--ref-from was produced with loss_tangent={dt}, this "
-                     f"run uses {args['loss']}")
+        dh = donor.get("harness", {})
+        if not protocol_matches(dh, args["window_name"], args["loss"]):
+            sys.exit(f"--ref-from {args['ref_from']} was produced with "
+                     f"loss_tangent={dh.get('loss_tangent')}, "
+                     f"window={dh.get('window', 'adaptive')}; this run uses "
+                     f"loss={args['loss']}, window={args['window_name']}. A "
+                     f"design's T is its own flux divided by the reference's, "
+                     f"so the two must share a window and a loss tangent.")
         for k, v in donor.get("refs", {}).items():
             out["refs"].setdefault(k, v)
         print(f"adopted {len(donor.get('refs', {}))} empty-cell reference(s) "

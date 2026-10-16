@@ -1156,25 +1156,33 @@ same-code).
 
 | design | res 32 | res 48 | change | vs 1.02 |
 |---|---|---|---|---|
+| `sym00` (mildest) | 1.0300 | 1.0311 | **+0.0011 — unchanged** | still over |
 | `sym03` (worst) | 1.1063 | **1.0835** | −0.0228 | still over |
 | `sym05` | 1.1639 | **1.0701** | −0.0938 | still over |
-| `sym00` | 1.0300 | (running) | — | still over |
 
 Corrected statistic (flux-only, conditioned band). The raw statistic is unstable across the
 same pair of runs — `sym03` falls 2.1141 → 1.3086 while `sym05` *rises* 1.1748 → 1.3186 —
 which is further evidence that the raw number measures the band edges rather than the sample.
 
-- **The direction has a mechanism.** The PML is a fixed 0.5 length units, i.e. **16 pixels at
-  res 32, 24 at res 48, 32 at res 64**. A thicker-in-pixels absorbing boundary reflects less,
-  and a slab changes the field profile reaching it, so a PML-reflection artefact predicts
-  exactly the observed shrink. Both designs move the same way and by an amount (2–8 %) of the
-  size a few-percent boundary systematic would produce.
-- **What that does and does not establish.** It establishes that the excess is resolution-
-  dependent and therefore not a quotable property of the model; it does **not** yet establish
-  convergence to 1. Two points give a direction, not a limit, so the row stays **excluded**
-  and no claim about v1's +20 % scalar row is made in either direction. A third point at
-  res 64 is queued (`642594` + its chained follow-up `642623`, ~4 h per FDTD run — res-64 costs
-  ~13× res-32) and will show whether the shrink continues or plateaus near 1.07.
+- **This is not a uniform shrink toward 1, and the third design is what shows it.** Read from
+  two designs the pattern looked like convergence (−0.023, −0.094); the mildest design then
+  moved by **+0.001**, i.e. not at all. The measurements therefore separate into two
+  components: a **resolution-independent residual at ≈1.03** (exactly what `sym00` sits at,
+  unchanged from 32 to 48) plus a **resolution-dependent part** that accounts for most of the
+  larger excesses.
+- **The direction still has a mechanism** for the resolution-dependent half: the PML is a fixed
+  0.5 length units — **16 pixels at res 32, 24 at res 48, 32 at res 64** — so a thicker-in-pixels
+  absorber reflects less, and a slab changes the field profile reaching it. But that mechanism
+  cannot explain the stable 3 %, since a boundary effect should shrink with the absorber's
+  thickness.
+- **What that establishes.** The survivor is *not* a quotable property of the model: it is a
+  measurement-side excess on near-empty decodes (air reference, lossy near-empty sample, which
+  cannot transmit more than air), and an identical-system control reads exactly 1.0000, so it is
+  not an offset of the instrument either. It also is **not** demonstrated to converge, so the
+  row stays **excluded** and no claim about v1's +20 % scalar row is made in either direction.
+  A res-64 point (`642594` + chained `642623`) is the last resolution datum: if the two larger
+  excesses keep shrinking while `sym00` stays at 1.03, the residual is a resolution-stable
+  systematic, which is the reading the three points already support.
 - **The proper fix is not more resolution points.** `|T| <= 1` is a statement about the
   *incident* field, and this harness has no incident monitor: it normalises by an empty-cell
   run, which is a different physical system (and, at the band edges, a poorly conditioned one).

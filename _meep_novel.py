@@ -31,6 +31,17 @@ values up to |T| = 4.7e8 for a passive dielectric. Three defects caused it:
      a `passivity_ok` flag, and the run prints a violation count. A design that
      violates |T| <= 1 in a lossy cell is a solver failure, not physics.
 
+     CORRECTED 2026-10-16 (details in the passivity() docstring and the ledger §9).
+     The gate as first written measured itself, not the sample: it took a max over
+     the WHOLE band of max(flux ratio, eigenmode-coefficient ratio). The stored
+     references show why that fails -- the empty cell's spectrum is the source's
+     and spans 2.8e-4 to 12.2x its own median across 0.1-0.2, so the edges divide
+     by ~1e-4 of the band centre where both signals are noise; and the mode
+     coefficient is normalised per-geometry, so |T| <= 1 never applied to it.
+     The verdict is now flux-only and taken where the reference is at least
+     NULL_FLOOR x its band median; both verdicts and the excluded fraction are
+     recorded so the correction stays auditable rather than silent.
+
 The loss tangent is a deviation from the lossless CST reference the dataset was
 generated with. It is bounded and configurable, and the harness must be
 validated against MetaDiT's own CST spectra on real dataset geometries before
@@ -87,6 +98,7 @@ DECAY_BY = 1e-5          # stop when |E|^2 falls this far below its peak
 DECAY_WINDOW = 7.0       # averaging window, ~1 optical period at f = 0.15
 MAX_RING = 600.0         # hard cap on post-source ringdown
 PASSIVITY_TOL = 1.02     # peak ratio above this is a solver failure
+NULL_FLOOR = 1e-2        # ... above this fraction of the reference's band median
 
 
 def _parse_args(argv):
@@ -183,6 +195,59 @@ def window_plan(args):
                 "hit_cap": bool(state["capped"])}
 
     return cond, describe
+
+
+def passivity(flux_s, flux_e, a_s, a_e, tol=PASSIVITY_TOL, null_floor=NULL_FLOOR):
+    """Passivity verdicts, raw and corrected (see the module docstring).
+
+    Two corrections, both forced by measurement (ledger §9):
+      * FLUX CHANNEL ONLY. `a_s/a_e` is an eigenmode-coefficient ratio, and Meep
+        normalises the coefficient by the mode of the geometry at the monitor --
+        different for an air reference and for a cell containing a slab. It is
+        not a transmission coefficient, so |T| <= 1 does not apply to it, and it
+        was the channel that exceeded 1 at well-conditioned frequencies.
+      * CONDITIONED BAND. The reference is an empty air cell, so its spectrum is
+        the source's: measured, it spans 2.8e-4 to 12.2x its own median over the
+        0.1-0.2 band. Taking a max over the whole band therefore divides by
+        ~1e-4 of the band centre at the edges, where both signals are numerical
+        noise. The corrected verdict is taken where the reference is at least
+        `null_floor` x its median.
+
+    Returns a dict with both verdicts and the conditioning diagnostics, so a
+    reader can see how much of the band the corrected number covers.
+    """
+    import numpy as _np
+
+    flux_s = _np.asarray(flux_s, dtype=float)
+    flux_e = _np.asarray(flux_e, dtype=float)
+    a_s = _np.asarray(a_s, dtype=float)
+    a_e = _np.asarray(a_e, dtype=float)
+
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        flux_mag = _np.sqrt(_np.abs(flux_s / _np.where(flux_e > 0, flux_e,
+                                                       _np.inf)))
+        a_abs = _np.abs(a_e)
+        mode_mag = _np.abs(a_s / _np.where(a_abs > 0, a_abs, _np.nan))
+
+    peak_raw = float(max(_np.nanmax(flux_mag), _np.nanmax(mode_mag)))
+    median_e = float(_np.median(_np.abs(flux_e))) if flux_e.size else 0.0
+    if median_e > 0:
+        keep = _np.abs(flux_e) >= null_floor * median_e
+    else:
+        keep = _np.ones_like(flux_e, dtype=bool)
+    sel = flux_mag[keep]
+    sel = sel[_np.isfinite(sel)]
+    peak_flux = float(sel.max()) if sel.size else float("nan")
+
+    return {
+        "peak_ratio": peak_raw,                       # unchanged definition
+        "peak_ratio_flux": peak_flux,                 # the corrected statistic
+        "passivity_ok": bool(_np.isfinite(peak_flux) and peak_flux <= tol),
+        "passivity_ok_raw": bool(_np.isfinite(peak_raw) and peak_raw <= tol),
+        "null_floor": float(null_floor),
+        "null_excluded_frac": float(1.0 - keep.mean()) if keep.size else 0.0,
+        "mode_peak": float(_np.nanmax(mode_mag)),
+    }
 
 
 def protocol_matches(record, window_name, loss, loss_tol=1e-12):
@@ -396,15 +461,15 @@ def main():
         a_e = np.array(ref["abs_alpha"])
 
         flux_s, a_s, meta = run_case(pat, l, h, r, args)
+        pv = passivity(flux_s, flux_e, a_s, a_e)
         flux_mag = np.sqrt(np.abs(flux_s / np.where(
             flux_e > 0, flux_e, np.inf)))
         # Complex transmission ratio, not just its magnitude: the model target
         # is a complex spectrum and the Meep->CST convention needs the phase.
         ratio = a_s / np.where(np.abs(a_e) > 0, a_e, np.nan)
         mode_ratio = np.abs(ratio)
-        peak = float(max(flux_mag.max(initial=0.0),
-                         mode_ratio.max(initial=0.0)))
-        ok = bool(np.isfinite(peak) and peak <= PASSIVITY_TOL)
+        peak = pv["peak_ratio"]
+        ok = pv["passivity_ok"]
         n_bad += (not ok)
 
         entry = {"idx": k, "occ": int(pat.sum()), "l": l, "h": h, "r": r,
@@ -418,8 +483,14 @@ def main():
                                    "im": np.nan_to_num(
                                        ratio.imag).tolist()}},
                  "peak_ratio": peak, "passivity_ok": ok,
+                 "peak_ratio_flux": pv["peak_ratio_flux"],
+                 "passivity_ok_raw": pv["passivity_ok_raw"],
+                 "null_floor": pv["null_floor"],
+                 "null_excluded_frac": pv["null_excluded_frac"],
+                 "mode_peak": pv["mode_peak"],
                  "hit_cap": meta["hit_cap"], "runtime_s": meta["runtime_s"],
-                 "ringdown": meta["ringdown"], "blocks": meta["blocks"]}
+                 "ringdown": meta["ringdown"], "blocks": meta["blocks"],
+                 "window": meta["window"]}
         if names is not None:
             entry["name"] = names[k]
         if src_idx is not None:
@@ -427,7 +498,10 @@ def main():
         out["designs"].append(entry)
         write_json(out, out_path)
         print(f"[{k}{'/' + names[k] if names else ''}] occ={entry['occ']} "
-              f"peak={peak:.4f} {'OK' if ok else 'PASSIVITY-FAIL'} "
+              f"peak={peak:.4f} (flux {pv['peak_ratio_flux']:.4f}) "
+              f"{'OK' if ok else 'PASSIVITY-FAIL'}"
+              f"{' [raw would pass]' if ok and not pv['passivity_ok_raw'] else ''}"
+              f"{' [raw also fails]' if not ok and not pv['passivity_ok_raw'] else ''} "
               f"ring={entry['ringdown']}s cap={meta['hit_cap']} "
               f"t={meta['runtime_s']}s", flush=True)
 

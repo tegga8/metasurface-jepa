@@ -26,6 +26,8 @@ import os
 import sys
 import types
 
+import numpy as np
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
@@ -103,6 +105,60 @@ def test_protocol_guard_refuses_cross_protocol_merges():
     # a record that constrains neither is acceptable
     assert h.protocol_matches({}, "fixed", 1e-3) is False
     assert h.protocol_matches({}, "adaptive", 1e-3) is True
+
+
+def test_passivity_gate_ignores_the_mode_channel():
+    """|T| <= 1 is an energy statement. The eigenmode coefficient is normalised
+    by the mode of the geometry at the monitor, so the air reference and a
+    slab-containing sample are not on a common scale and its ratio is not a
+    transmission coefficient. v2's rows exceeded 1 ONLY through this channel."""
+    n = 11
+    flux_s = np.full(n, 1.0)
+    flux_e = np.full(n, 1.0)          # ratio exactly 1, well conditioned
+    a_e = np.full(n, 1.0)
+    a_s = np.full(n, 1.10)            # mode channel 10 % over
+    pv = h.passivity(flux_s, flux_e, a_s, a_e)
+    assert pv["mode_peak"] > 1.02          # the raw number does flag it
+    assert pv["peak_ratio"] > 1.02
+    assert pv["passivity_ok_raw"] is False
+    assert pv["passivity_ok"] is True      # the corrected verdict does not
+    assert abs(pv["peak_ratio_flux"] - 1.0) < 1e-9
+
+
+def test_passivity_gate_conditions_on_the_denominator():
+    """The reference is an empty air cell, so its spectrum is the source's and
+    spans ~4.4 decades. A max over the whole band divides by ~1e-4 of the band
+    centre at the edges, where the ratio is noise over noise -- measured, that is
+    what produced the 1.17-2.11 peaks. The corrected verdict must ignore those
+    frequencies and report how much of the band it dropped."""
+    n = 101
+    freq = np.linspace(0.1, 0.2, n)
+    # source-shaped denominator: tiny at the edges, large in the middle
+    flux_e = 1e-4 + np.exp(-((freq - 0.15) / 0.02) ** 2)
+    flux_s = 1.0 * flux_e                     # physically identical sample
+    flux_s[0] = 9.0 * flux_e[0]               # amplitude ratio 3.0, at a dead edge
+    a_e = np.ones(n)
+    a_s = np.ones(n)
+    pv = h.passivity(flux_s, flux_e, a_s, a_e)
+    assert pv["peak_ratio"] > 2.0, "the raw max is dominated by the dead edge"
+    assert pv["passivity_ok_raw"] is False
+    assert pv["peak_ratio_flux"] < 1.02, "conditioned verdict ignores the edge"
+    assert pv["passivity_ok"] is True
+    assert 0.0 < pv["null_excluded_frac"] < 0.5
+    assert pv["null_floor"] == h.NULL_FLOOR
+
+
+def test_passivity_gate_still_fails_a_real_violation():
+    """The correction must not become a way to pass: a violation inside the
+    well-conditioned part of the band is still a failure."""
+    n = 101
+    freq = np.linspace(0.1, 0.2, n)
+    flux_e = 1e-4 + np.exp(-((freq - 0.15) / 0.02) ** 2)
+    flux_s = 1.30 * flux_e                    # 30 % over, mid-band
+    pv = h.passivity(flux_s, flux_e, np.ones(n), np.ones(n))
+    assert pv["peak_ratio_flux"] > 1.02
+    assert pv["passivity_ok"] is False
+    assert pv["passivity_ok_raw"] is False
 
 
 def test_adaptive_record_surfaces_the_measured_ringdown():

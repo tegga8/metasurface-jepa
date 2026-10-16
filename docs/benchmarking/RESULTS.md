@@ -811,13 +811,16 @@ Geometry rows (n=10, identical conditioning; IoU vs the true novel geometry):
     (+0.26 corr margin; win 6/9 · 7/9; p=0.51/0.18).
   - **Three perturbed-scalar rows are excluded**: every design failed the passivity gate
     (peaks 1.02–1.10 for v2's sets, 1.17–2.11 for v1's +20 % set; all converged, none
-    capped). These decodes are the near-empty ones (occ 0.07–0.13) and a nearly-empty cell
-    against an almost-empty reference should measure |T| ≈ 1, so the excess is a
-    **measurement artefact** (the sample and reference runs end on different field-decay
-    windows → different spectral leakage). Fixing it requires an identical ringout window
-    for the run/reference pair — a harness change, not a model change.
-  - `v1_spec_m20`'s null (real == shuffled) is **not** quoted as a model result: its peaks
-    are pinned at 0.999–1.000, the same artefact in benign form.
+    capped). These decodes are the near-empty ones (occ 0.07–0.13).
+  - **CORRECTION (see §9): the explanation given here was wrong.** This passage originally
+    attributed the excess to the sample and reference runs ending on different field-decay
+    windows, and prescribed an identical window as the fix. The shared-window re-run was
+    executed and changed every peak by **< 0.001**, refuting it. The measured cause is that
+    the gate divides by a source spectrum spanning ~4.4 decades and mixes an eigenmode
+    coefficient ratio (not an energy quantity) into a passivity statement. Corrected
+    verdicts, and which rows survive, are in §9.
+  - `v1_spec_m20`'s null (real == shuffled): peaks 0.998–0.999, which §9 shows is the
+    *correct* value for a near-empty decode against an air reference, not an artefact.
 
 ### 4. imp1 — mirror-parameterised (quadrant) decoder · 1 seed · preliminary
 
@@ -1030,3 +1033,63 @@ Scenario A, the whole 17,489-item test split — the same protocol as the baseli
   with the fidelity results (base best), and all three far above threshold.
 - Not established here: gate 8 on the *scaling* arms (S0–L1) and on v2; and the hard-stratum
   numbers are eval-seed means of one checkpoint per arm, not 3 training seeds.
+
+### 9. CORRECTION — the task-3 passivity gate was measuring itself, not the models
+
+**The claim this replaces.** §3 explained the |T| > 1 rows as a measurement artefact in which
+the sample and its empty-cell reference "end on different field-decay windows", and prescribed
+"an identical ringout window for the run/reference pair" as the fix. That was a hypothesis
+stated as a finding. It was then implemented and tested, and it is **wrong**.
+
+**Refutation.** The measured window mismatch was real and large — the affected designs ring
+for up to 470 time units while the reference adopted from `runs/t1/ref.json` stops at 105.2, a
+4.5× difference — so the hypothesis was plausible. Four sets (`v1/v2 × spec_m20/spec_p20`)
+were re-run with one shared explicit post-source window (`--ring-fixed 493.5`), sample and
+reference integrated over the identical window. Result: **every peak moved by less than
+0.001** (v2 spec_m20: 1.0218–1.0309 before, 1.0217–1.0308 after; v1 spec_m20: 0.9985–0.9994
+before, 0.9984–1.0006 after). The excess is not window-related.
+
+**The measured cause, from the stored curves only (no new FDTD).**
+
+1. *The denominator is a source spectrum spanning ~4.4 decades.* Every stored reference — two
+   files, two scalar combos — is the **identical** smooth curve: 2.77e-4 of its band median at
+   ω = 0.10, 12.17× at ω = 0.1517, 1.11e-3 at ω = 0.20. It does not move with (l, h, r), which
+   is what an empty air cell must look like: it is the source's own spectrum. The gate takes
+   `max` over the whole band, so it includes frequencies where the denominator is 1e-4 of the
+   band centre — where the ratio is noise over noise. Measured at every recorded peak, the
+   denominator sat at 2.8e-4 to 4.8e-4 of its band median.
+2. *The channel that exceeds 1 is not an energy quantity.* The harness scores
+   `max(flux ratio, eigenmode-coefficient ratio)`. The second is `a_s/a_e` from
+   `get_eigenmode_coefficients`, which MEEP normalises by the mode of the geometry at the
+   monitor — different for an air cell and for a cell containing a slab — so it is not a
+   transmission coefficient and |T| ≤ 1 does not apply to it. It is exactly the channel that
+   exceeds 1 at *well-conditioned* frequencies for v2 (depth 2.1–2.7× median).
+
+**Corrected verdicts** (flux channel only, i.e. the energy statement; denominator floor 1e-2
+of band median, throat of the band excluded; floor swept 0 → 5e-2 and the verdicts are stable):
+
+| set | flux peak range | verdict vs 1.02 | what changed |
+|---|---|---|---|
+| `v1_B_true` | 0.918–0.985 | pass | unchanged |
+| `v1_spec_m20` | 0.998–0.999 | pass | was "benign artefact" — it is the correct value for a near-empty decode vs air |
+| **`v1_spec_p20`** | **1.026–1.193** | **still fails** | survives every correction; 1.026 even at the 5e-2 floor |
+| `v2_B_true` | 0.908–0.976 | pass | the 1.2584 outlier was a band-edge denominator |
+| `v2_spec_m20` | 0.996–0.997 | **pass** | its 1.022–1.031 excess was entirely mode-channel |
+| `v2_spec_p20` | 0.989–0.994 | **pass** | its 1.070–1.096 excess was entirely mode-channel |
+
+So **two of the three excluded rows are recovered** (both v2 rows — the models are fine; the
+gate was not), one row (`v1_spec_p20`) remains a genuine finding at 1.026–1.193, and the
+`v1_spec_m20` "pinned null" is reclassified as a correct measurement rather than an artefact.
+
+**What is not yet established.** Whether `v1_spec_p20`'s excess is physics or the
+instrument's own offset: the surviving excess approaches a uniform ~2.6 % (1.026 at the
+strictest floor, across all 10 designs), which is the size of a PML-reflection systematic, and
+1.02 is a tolerance tighter than that. The control that settles it is running — the harness
+applied to an **empty** cell (sample and reference physically identical, so the reading is the
+statistic's own error), twice per scalar combo, job `642465`. Until it returns, no passivity
+claim about `v1_spec_p20` should be quoted in either direction.
+
+**Harness status.** `--ring-fixed` (shared window) is retained: it is correct practice for
+paired comparisons and is now guarded so protocols can never be mixed, even though it is not
+the fix for this. The gate itself still needs the two corrections above wired in (flux-only
+scoring, conditioned-band evaluation) before any future run's `passivity_ok` is trustworthy.

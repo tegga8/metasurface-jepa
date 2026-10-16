@@ -89,19 +89,32 @@ Recorded so they are not repeated:
 | 5 | Per-scenario gates reported separately | `eval_scenarios.py` | ❌ | **GAP on v1** |
 | 6 | VICReg grad attribution re-run | `test_grad_share.py` | ❌ | **GAP on v1** |
 | 7 | Within-bucket shape probe vs +0.225 | `test_representation_calibration.py` | ❌ | **GAP on v1** |
-| 8 | Goal-ignoring collapse: real/**null**/**shuffled**, **stratified** | `test_goal_mode_validation.py` (real/null only) | ❌ | **CRITICAL GAP** |
+| 8 | Goal-ignoring collapse: real/**null**/**shuffled**, **stratified** | `scripts/diagnostics/gate8_stratified.py` — **ran on every arm** | ✅ | **ANSWERED 2026-10-16** (hard-stratum win 0.9902–0.9974; `RESULTS.md` §8) |
 | 9 | Scalar-conditioning collapse, stratified | — | partial | **GAP** |
 | 10 | Generative (output) diversity collapse | — | ❌ | **GAP** |
 | 11 | Majority-class collapse in decoder | partial in eval | ❌ | **PARTIAL** |
 
-**The single most important gap is gate 8.** The mandated comparison is
+**The single most important gap was gate 8 — ANSWERED 2026-10-16.** The mandated comparison is
 real/**shuffled** (not real/null) **stratified by masking regime**, gated on the
 stratum where occupancy *and* scalars are both heavily masked. Existing tests
-cover real-vs-null only, and no test stratifies by mask ratio. The whole point of
+covered real-vs-null only, and no test stratified by mask ratio. The whole point of
 the redesign is the pure-inverse-design scenario; a pooled real/null gap says
-almost nothing about it — and this project already has direct evidence of exactly
+almost nothing about it — and this project already had direct evidence of exactly
 that failure (real-vs-null distance ≈1.4 while the predictor barely used the
 spectrum).
+
+It is now a runnable diagnostic (`scripts/diagnostics/gate8_stratified.py`) and the gate has
+been run on **every arm**: hard-stratum paired win rate 0.9902–0.9974 across the S0–L1 ladder,
+base v1, both variants and the `sched_fix` arm (n=1,536 pooled per stratum; every CI far from
+0.5). The failure the gate exists to catch is **not present**, and the split of the result is
+recorded in `RESULTS.md` §8. The gate is not merely passed but **capacity-insensitive**, so
+this is a property of the formulation rather than of any particular size.
+
+**What is now the most important open gap** is a judgement the operator should make; the
+remaining rows below are gates 2–7 and 9–11, and the one with measured evidence behind it is
+**gate 9 (scalar-conditioning collapse)**: scalar dependence sits at ~chance at every rung of
+the size ladder — the standing weakness, and the only one the scaling study found to be
+size-independent rather than size-driven.
 
 ---
 

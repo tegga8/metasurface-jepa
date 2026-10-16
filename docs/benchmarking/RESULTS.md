@@ -985,12 +985,19 @@ Common passivity-clean intersection, one shared shuffled permutation:
 
 ### 6. What is NOT established (additions)
 
-- imp1/imp2 battery numbers are 3 seeds but on the n=512 benchmark subset †; the full-split
-  (17,489) re-measure is owed before their MAE is compared with base's 0.0490.
+- ~~imp1/imp2 battery numbers are 3 seeds but on the n=512 benchmark subset †; the full-split
+  (17,489) re-measure is owed before their MAE is compared with base's 0.0490.~~
+  **Closed by §7** (2026-10-16): imp1 0.0524 ± 0.0014, imp2 0.0522 ± 0.0028 on the full split,
+  both worse than base v1's 0.0490 ± 0.0013.
 - imp1's and imp2's physics used seed-0 checkpoints only; the other seeds have no Meep pass.
+  *(still true)*
 - imp2's gate-B edge (all three seeds ≥ base's best) is small and offset by gate A: a trade,
-  not an improvement.
-- The task-3 harness fix and the gate-8 stratified test remain open, as in the block above.
+  not an improvement. *(still true)*
+- ~~The task-3 harness fix and the gate-8 stratified test remain open, as in the block above.~~
+  **Both closed** (2026-10-16): gate 8 is answered for every arm (§8) and the task-3 passivity
+  gate was corrected and its surviving row characterised (§9, §10). The task-3 harness fix that
+  was *prescribed here* (an identical ringdown window) turned out to be the wrong diagnosis —
+  see §9.
 
 ### 7. Variants re-measured on the full test split (resolves †)
 

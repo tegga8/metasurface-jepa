@@ -26,6 +26,7 @@ from assembly import build_unified_model  # noqa: E402
 
 CASES = [
     ("base v1", "configs/unified.yaml", r"D:\metamaterials_scratch\ckpt\v1base\v1_final.pt"),
+    ("S0 tiny", "configs/scaling/unified_s0_tiny.yaml", r"D:\metamaterials_scratch\s0_kaggle\s0\seed0.pt"),
     ("S1 small", "configs/scaling/unified_s1_small.yaml", r"D:\metamaterials_scratch\s1_out\s1\seed0.pt"),
     ("S2 slim", "configs/scaling/unified_s2_slim.yaml", r"D:\metamaterials_scratch\s2_out\s2\seed0.pt"),
     ("L1 wide", "configs/scaling/unified_l1_wide.yaml", r"D:\metamaterials_scratch\l1a_ckpt\l1\seed0.pt"),

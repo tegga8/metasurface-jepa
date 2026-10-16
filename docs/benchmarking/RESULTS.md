@@ -1047,28 +1047,35 @@ recorded below:
 
 | arm | trainable | easy win | **hard win** | hard paired margin (95 % CI) |
 |---|---|---|---|---|
+| **S0 tiny** | 2,193,476 | 0.8776 | **0.9935** | +0.4915 [+0.4160, +0.5626] |
+| S1 small | 4,233,092 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
+| S2 slim | 8,143,364 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
 | base v1 | 11,403,012 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
 | imp1 s0 | 11,565,444 | 0.8717 | 0.9935 | +0.4964 [+0.4373, +0.5511] |
 | imp2 s0 | 11,403,012 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
-| S1 small | 4,233,092 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
-| S2 slim | 8,143,364 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
 | L1 wide | 19,897,220 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
 
-- **Every arm passes, and the hard-stratum rate is nearly flat across a 4.7× parameter range**
-  (0.9902–0.9974; binomial SE ≈ 0.0021 at n=1,536, so only base-vs-S2/L1 separates at ~2–3σ
-  and the rest tie). Goal-conditioning quality is therefore **capacity-insensitive** on this
-  ladder — the same shape as the physics gate, which was flat across the size rungs. A smaller
-  model is not paying for its size in spectrum conditioning.
+- **Every arm passes, and the hard-stratum rate is nearly flat across a 9.1× parameter range**
+  (0.9902–0.9974 from 2.19 M to 19.90 M; binomial SE ≈ 0.0021 at n=1,536, so only base-vs-S2/L1
+  separates at ~2–3σ and the rest tie). Goal-conditioning quality is therefore
+  **capacity-insensitive** on this ladder — the same shape as the physics gate, which was flat
+  across the size rungs. A smaller model is not paying for its size in spectrum conditioning.
+- **Capacity does show up in absolute error, not in the win rate.** S0's hard-stratum real error
+  is 0.1424 against base's 0.1289 (and its MAE is 0.0564 vs 0.0490), so the *ranking/consistency*
+  of the conditioning survives shrinking while the *magnitudes* degrade — worth stating, because
+  a flat win rate alone could be misread as "size does not matter".
+- S0's checkpoint came from the Kaggle kernel output
+  (`akashkesav/metasurface-jepa-scale-s0-tiny`), key-diffed against
+  `configs/scaling/unified_s0_tiny.yaml` before use: 0 missing trainable keys, 0 unexpected keys,
+  0 shape mismatches (only the 106 frozen released-encoder tensors absent, as by design).
 - The easy stratum (0.87–0.90, no CI anywhere near threshold) behaves as before: with most of
   the geometry visible the context carries the answer, so the *relative* margin is smaller even
   though the absolute error is much lower.
-- Still not established: **S0 tiny** (2,193,284 params; its checkpoint is published as a Kaggle
-  dataset, not staged locally) and **v2** (its cluster copy was deleted in the quota cleanup,
-  and the local sched-fix checkpoint needs identifying against the v2 arm before it can be
-  claimed).
-- Superseded: the original "not established on the *scaling* arms (S0–L1)" caveat is closed for
-  S1/S2/L1 by the table above; only S0 and v2 remain. The hard-stratum numbers here are still
-  eval-seed means of one checkpoint per arm, not 3 training seeds.
+- Still not established: **v2** (its cluster copy was deleted in the quota cleanup, and the local
+  sched-fix checkpoint needs identifying against the v2 arm before it can be claimed).
+- Superseded: the original "not established on the *scaling* arms (S0–L1)" caveat is now **fully
+  closed** for every rung S0–L1 by the table above; only v2 remains. The hard-stratum numbers
+  here are eval-seed means of one checkpoint per arm, not 3 training seeds.
 
 ### 9. CORRECTION — the task-3 passivity gate was measuring itself, not the models
 

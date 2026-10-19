@@ -1227,3 +1227,46 @@ which is further evidence that the raw number measures the band edges rather tha
   well-posed without any conditioning heuristic. That is a harness change which invalidates
   comparability with every existing t3 curve (they would need re-running), so it is recorded
   here as the recommended next step rather than adopted unilaterally.
+
+## 2026-10-19 — imp2 through phases 2 and 3 (the three-phase comparison)
+
+Until now imp2 had only ever been run through phase 1, so the requested three-phase comparison
+did not exist. Filled in on the cluster with the same instruments as the v1/v2/MetaDiT numbers:
+same worker (`worker.sh`), same shared empty-cell reference (`runs/t1/ref.json`), same
+`--max-ring 2500`, and the same **corrected A′/B′ targets** — regenerated locally and verified
+against this ledger's recorded screen (A′ l1n 0.3480 / corr 0.9592, B′ 4.4850, corpus 0.3307)
+before use, so imp2's phase 2 is scored on exactly the targets the other three arms were.
+
+| phase | metric | base v1 | imp2 | reading |
+|---|---|---|---|---|
+| **1** geometry-first (28 designs) | real err / corr | **0.4519 / +0.766** | 0.4754 / +0.755 | base ahead |
+| | vs shuffled, corr margin | **+0.236** (p 0.013) | +0.181 (p 0.036) | both beat the null |
+| | win rate err · corr | **22/28 · 21/28** | 21/28 · 20/28 | base ahead |
+| **2** spectrum-first (A′, n clean) | real err / corr | 0.714 / +0.502 | **0.689 / +0.547** | imp2 marginally better on absolute |
+| | vs shuffled, corr margin | −0.075 (p 0.17) | **−0.133 (p 0.0413)** | **imp2 fails significantly; base does not** |
+| | B′ control (infeasible) | spells failure | 1.7985 vs 0.6509 (p 3e−5) | both, as designed |
+| **3** scalar sensitivity | given-scalars err / corr (n=9-10) | **0.396 / +0.892** | 0.5639 / +0.850 | base clearly ahead |
+| | given-scalars win err · corr | 6/10 · 6/10 | 7/9 · **5/9** (p=1) | imp2's corr is at chance |
+| | geometry-side IoU (−20 % / +20 %) | 0.153 / 0.145 | 0.095 / 0.083 | imp2 collapses harder |
+
+- **Phase 1 is essentially parity, with base slightly ahead** — same shape as the battery.
+- **Phase 2 is a negative for both, and imp2's is the more clearly negative of the two.** Its
+  absolute agreement is a touch better (0.689 vs 0.714) but the fair control is decisive: a
+  *mismatched* target explains imp2's decode **significantly better** than the real one
+  (correlation margin −0.133, p=0.041), whereas base's failure is not significant (−0.075,
+  p=0.17). So on this phase imp2 is not an improvement; the evidence against it is stronger.
+- **Phase 3 is where imp2 loses clearly.** Given the true scalars it is worse on both error and
+  correlation, its correlation win rate is exactly chance (5/9, p=1), and under perturbed
+  scalars its geometry-side collapse is deeper (IoU 0.095/0.083 against base's 0.153/0.145).
+  Two of its three perturbed rows are unmeasurable, for the reasons this ledger already
+  documented for the other arms: `spec_m20` reads **identically** to its shuffled null
+  (3.6031 vs 3.6031, the pinned-decode pathology of §3), and `spec_p20` has **0/10**
+  passivity-clean designs (raw peaks 1.024–1.733) and is excluded outright.
+- Passivity census of imp2's five sets (raw peaks, pre-correction definition): A′ 20/24 clean
+  with 3 ringdown-capped and one catastrophic peak (1.5e8), B′ 16/24, `B_true` 9/10 (max 37.9),
+  `spec_m20` 10/10 (pinned at 0.999–1.000 — the benign form), `spec_p20` 0/10. Those failures
+  are the known band-edge/mode-channel artefact of §9–§10, not new model defects.
+- **Net: imp2 does not beat base on any phase.** Phase 1 is a tie within noise, phases 2 and 3
+  are both worse — which matches its battery verdict (§2 of the 2026-10-15 block: gate B better,
+  gate A and MAE worse) and leaves its **leak-ablation result** as the one thing it genuinely
+  contributes.

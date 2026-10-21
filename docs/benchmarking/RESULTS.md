@@ -1270,3 +1270,38 @@ before use, so imp2's phase 2 is scored on exactly the targets the other three a
   are both worse — which matches its battery verdict (§2 of the 2026-10-15 block: gate B better,
   gate A and MAE worse) and leaves its **leak-ablation result** as the one thing it genuinely
   contributes.
+
+### Follow-up — is the phase-2 *target generation* wrong? No, and the error decomposes
+
+The operator suspected the target generation. Three checks say it is sound, and the third
+reframes the failure:
+
+| check | measurement | verdict |
+|---|---|---|
+| passivity | A′ peak \|T\| **0.994** (corpus 1.000); B′ clipped at 1.000 | no impossible targets |
+| causality | real-weight linear combination of causal responses ⇒ causal (KK is linear) | consistent |
+| structural realism | roughness **0.91×** corpus, peak/median **1.02×**, spectral features **1.33×**; NN distance 0.348 vs the corpus's own self-density 0.331 | as deep in the corpus as real samples |
+| decode not degenerate | imp2's A′ decodes at **occupancy 0.397** (corpus ≈0.427); surrogate error **0.427** plausible vs **3.21** implausible | model separates the two classes |
+
+**The error then decomposes, and neither obvious culprit dominates.** For the *same* decoded
+geometry, measured against its Meep result:
+
+| leg | imp2, A′ | imp2, B′ (control) |
+|---|---|---|
+| surrogate → target (the model's own fit) | 0.427 | 3.211 |
+| **surrogate → Meep** (same geometry) | **0.515** (median 0.425) | 0.288 |
+| target → Meep (the phase-2 number) | 0.689 | 1.799 |
+
+- The surrogate disagrees with full wave by **0.515** on geometries it is asked to judge, and the
+  model misses the target by 0.427 *in surrogate space*: two comparable legs, summing to the
+  observed 0.689. So phase 2's failure is **not** the target generator and **not** the surrogate
+  alone — the instrument's own transfer error is the same size as the effect being measured, which
+  is precisely why a shuffled target is indistinguishable from the real one.
+- The B′ control validates the instrument: surrogate misfit is only 0.288 there while the target
+  error is 1.80, i.e. the surrogate is sound and the geometry genuinely cannot radiate a garbage
+  target.
+- **Consequence:** phase 2 as constructed cannot resolve inversion quality. Reducing one leg is
+  not enough — the practical route is **Meep-in-the-loop refinement** (which bypasses the
+  surrogate leg entirely), not a better target generator or a larger model.
+- Caveat: the Meep→CST convention's 0.1138 held-out error applies to every number in the table
+  equally, so it cannot create this decomposition, but it is part of the floor.

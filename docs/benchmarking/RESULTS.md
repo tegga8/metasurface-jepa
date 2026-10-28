@@ -1305,3 +1305,119 @@ geometry, measured against its Meep result:
   surrogate leg entirely), not a better target generator or a larger model.
 - Caveat: the Meep→CST convention's 0.1138 held-out error applies to every number in the table
   equally, so it cannot create this decomposition, but it is part of the floor.
+
+## 2026-10-28 — the seed test: Meep-as-judge candidate selection · NEGATIVE
+
+The last experiment on the spectrum→geometry line (operator request, 2026-10-26): if the
+surrogate leg is what kills phase 2, then measuring candidates with full wave and *selecting*
+on the measurement should bypass it. That is the Meep-in-the-loop route the 2026-10-19 block
+named as the way forward. It was run; it does not rescue the formulation.
+
+- cluster `paramsakti`, job `657870`, 18 tasks, **90/90 solves completed**, 15:58–20:39, no srun
+  failures; 13/90 designs fail passivity (9 of those ringdown-capped, peaks to 8.5e10 — the known
+  band-edge/mode artefact of §9–§10, not new), concentrated at the higher guidance strengths
+- decode `_seedtest_decode.py` — frozen base v1, 18 targets from the A′ screened set
+  (l1n 0.348 vs the corpus's own 0.331), **5 candidates per target** by CFG guidance strength
+  `w ∈ {0.5, 0.75, 1.0, 1.25, 1.5}` (`z_null + w·(z_real − z_null)`)
+- solve `_seedtest_job.sh` — same worker, shared empty-cell reference (`runs/t1/ref.json`) and
+  `--max-ring 2500` as every phase-2 number, so the errors are on that scale
+- score `_seedtest_score.py` (selection), `_seedtest_diag.py` (pool geometry), `_seedtest_retrieval.py`
+  and `_seedtest_fe.py` (all-pairs retrieval, target fixed effects)
+
+### The control had to be rebuilt before any budget was spent
+
+The first draft decoded a *separate* set from shuffled targets and selected per slot. That
+control is degenerate: a derangement across slots makes the shuffled statistic an exact
+permutation of the real one, so the means are identical **by construction** and the sign test
+has no power — which is exactly what the decode printed (identical real/shuffled numbers at
+every `w`). The corrected form keeps the **same five geometries** and shuffles only the target
+the errors are scored against, which also halved the cost (180 → 90 solves). A model carrying
+no target information gives a margin of zero in expectation under this control.
+
+### 1. Selection — null
+
+| quantity | value |
+|---|---|
+| real mean / median err | 0.6342 / 0.6106 |
+| shuffled mean / median err | 0.6749 / 0.5324 |
+| paired margin | **+0.0408**, 95 % CI **[−0.1210, +0.2216]** |
+| median margin | +0.0087 |
+| win rate | **10/18** |
+| sign test | **p = 0.81** |
+| guidance chosen | w050 ×8, w100 ×5, w125 ×3, w075 ×2 |
+
+Per guidance strength, no selection (passivity-clean `n` varies):
+
+| w | vs own target | vs shuffled | margin |
+|---|---|---|---|
+| 0.50 | 0.8176 | 0.8222 | +0.0045 |
+| 0.75 | 0.7707 | 0.7542 | −0.0166 |
+| 1.00 | 0.7444 | 0.8437 | +0.0993 |
+| 1.25 | 0.7887 | 0.8306 | +0.0419 |
+| 1.50 | 0.8498 | 0.8066 | −0.0432 |
+
+The single-shot reference (w = 1.0, n = 14 clean) is the same null: margin +0.0993, 7/14 wins,
+p = 1. n = 18 can only exclude large effects, so the next check is the well-powered form of the
+same question.
+
+### 2. All-pairs retrieval — also null, at 1,386 pairs
+
+Every one of the 77 passivity-clean designs was scored against **all 18 targets** (not just its
+own), so the question becomes: is the target a design was decoded for its best match among the
+18? Per-target difficulty is removed by a two-way (design × target) fixed-effects decomposition,
+and the p-value comes from 20,000 derangement permutations of the own-target labels.
+
+| quantity | value |
+|---|---|
+| designs × targets | 77 × 18 = **1,386 pairs** |
+| mean rank of own target (raw) | 10.08 (uniform 9.50) |
+| mean rank of own target (fixed effects) | **9.36** |
+| permutation null | 9.51 ± 0.99 |
+| p (better than chance) | **0.44** |
+| own target is the residual-best | 5/77 (chance 4.3) |
+
+So the geometry decoded for target k is an ordinary member of k's row: no target-specific
+information is detectable at this sample size.
+
+### 3. Why — the candidate pool varies along a target-agnostic axis
+
+The null is not an artefact of having nothing to select between. The five candidates of a target
+*are* distinct, and their measured errors *do* spread:
+
+| check | value |
+|---|---|
+| within-target IoU (same slot, different `w`) | **0.849** (min 0.445) |
+| between-target IoU (same `w`, adjacent slot) | **0.694** (min 0.248) |
+| within-target std of the five measured errors | 0.1202 |
+| mean selection margin (§1) | +0.0408 |
+| spread ÷ margin | **2.9×** (0.1202 ÷ 0.0408) |
+| rank corr, real vs shuffled error vectors | **+0.088** |
+| same argmin, real vs shuffled | 8/17 |
+
+The pool has real geometric diversity and real error spread; what it does not have is a
+*target-specific* axis. Guidance strength mostly trades global fill (mean occupancy 0.469 at
+`w`=0.5 → 0.384 at `w`=1.5), which is why the error ranking of the five candidates barely
+depends on which target they are scored against.
+
+### 4. Guidance strength costs physicality
+
+Passivity-clean designs out of 18:
+
+| w | 0.50 | 0.75 | 1.00 | 1.25 | 1.50 |
+|---|---|---|---|---|---|
+| clean | **18/18** | 17/18 | 14/18 | 13/18 | 15/18 |
+
+Higher guidance buys spectrum push at the cost of realizable designs — an argument against
+treating CFG strength as a free diversity knob for this decoder.
+
+### Verdict
+
+The 2026-10-19 block concluded that phase 2 could not be resolved because the surrogate leg
+(0.515) was the same size as the effect, and that the practical route was **Meep-in-the-loop
+refinement**. This is that experiment, run with the measurement as the judge and the surrogate
+leg removed from the selection loop entirely. The answer is still null, and the well-powered
+retrieval form of the question is null too.
+
+That closes the line rather than leaving it open: the limitation is the single-shot
+spectrum→geometry map itself, not the surrogate that was judging it. No mechanism is added in
+response — per `AGENTS.md`, a failed gate is recorded, not worked around.

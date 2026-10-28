@@ -31,6 +31,7 @@ import numpy as np
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "src"))
 
 import _compare_phase2 as p2  # noqa: E402
 from _compare_phase2 import (  # noqa: E402

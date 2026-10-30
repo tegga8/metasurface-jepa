@@ -159,12 +159,115 @@ def sensitivity_masks(rng, geometry, ratio, surrogate, grid=DEFAULT_GRID,
     return m
 
 
+# --- mirror-pair (leak-free) masking ----------------------------------------
+#
+# Why this exists: the released corpus is EXACTLY mirror-symmetric by
+# construction (MetaDiT's restore_structure builds its 64x64 output by mirroring
+# a 32x32 quadrant), so every design satisfies occ == fliplr(occ) == flipud(occ)
+# == rot180(occ). Under independent random/block masking a masked token therefore
+# very often has a VISIBLE mirror partner, and its content is then fully
+# determined by the visible one -- no prediction required. That is a leakage
+# path, not an inference problem, and any decoder constrained to be symmetric
+# exploits it automatically (imp1's quadrant decoder does so by construction).
+#
+# Closing the masked set under the group {id, fliplr, flipud, rot180} removes the
+# path: no masked token ever has a visible mirror partner, so masked content
+# cannot be read off the visible geometry. Same calibration discipline as random
+# masking -- the achieved ratio is measured and the closest draw kept, because
+# orbits have size 1, 2 or 4 and can make an exact ratio unattainable (e.g. 0.75
+# can jump to 1.0).
+
+MIRROR_GROUP = ("fliplr", "flipud", "rot180")
+
+# Scales applied to the requested ratio before drawing, because closing a draw
+# under the group multiplies its coverage (up to 4x). The ladder lets the search
+# land near the request even though the min-side clamp makes a block at least
+# 3x3 tokens (14% closed), i.e. sub-14% steps are impossible.
+_MIRROR_SCALES = (0.15, 0.25, 0.40, 0.60, 0.85)
+
+
+def close_under_mirror_group(m):
+    """Union of the masked set with its fliplr, flipud and rot180 images.
+
+    m: (B, grid, grid), 1 = visible, 0 = masked. Masked is 0, so the union of the
+    masked sets is the elementwise MINIMUM.
+    """
+    return torch.minimum(
+        torch.minimum(m, torch.flip(m, dims=[2])),
+        torch.minimum(torch.flip(m, dims=[1]), torch.flip(m, dims=[1, 2])))
+
+
+def mirror_leak_fraction(m):
+    """Fraction of masked tokens whose mirror partner is VISIBLE.
+
+    The quantity this whole section exists to drive to zero: a masked token with
+    a visible mirror partner is determined by symmetry alone.
+    """
+    masked = m < 0.5
+    leaky = masked & torch.flip(m, dims=[1]).gt(0.5)       # flipud partner visible
+    leaky = leaky | (masked & torch.flip(m, dims=[2]).gt(0.5))   # fliplr
+    leaky = leaky | (masked & torch.flip(m, dims=[1, 2]).gt(0.5))  # rot180
+    n = int(masked.sum().item())
+    return float(leaky.sum().item()) / n if n else 0.0
+
+
+def mirror_pair_masks(rng, batch_size, ratio, grid=DEFAULT_GRID,
+                      min_side=DEFAULT_MIN_SIDE, k_range=DEFAULT_K_RANGE,
+                      tolerance=0.02, max_attempts=40):
+    """Block masks closed under the mirror group (leak fraction exactly 0).
+
+    Selection rule: the ALL-VISIBLE candidate is never a valid answer — the
+    masked-token objective is undefined without masked tokens (VICReg needs >= 2
+    valid rows and the trainer refuses to substitute zero). Closure only grows
+    the masked set, so the search stops at the first candidate that reaches the
+    requested ratio; when orbit granularity overshoots, the closest CLOSED
+    candidate is kept and the achieved fraction is reported by the caller's
+    usual per-bucket logging.
+    """
+    if ratio <= 0.0:
+        return torch.ones(batch_size, grid, grid, dtype=torch.float32)
+    if ratio >= 0.999:
+        return torch.zeros(batch_size, grid, grid, dtype=torch.float32)
+    # Redraw-and-keep-closest, the same calibration discipline as random_masks,
+    # but over the scale ladder: closure multiplies coverage, so a draw at the
+    # full requested ratio systematically overshoots.
+    per_scale = max(1, max_attempts // len(_MIRROR_SCALES))
+    best, best_err = None, None
+    for scale in _MIRROR_SCALES:
+        for _ in range(per_scale):
+            m = close_under_mirror_group(
+                _draw_random_mask(rng, batch_size, ratio * scale, grid,
+                                  min_side, k_range))
+            achieved = float((m < 0.5).float().mean().item())
+            if achieved <= 0.0:
+                continue
+            err = abs(achieved - ratio)
+            if best is None or err < best_err:
+                best, best_err = m, err
+            if err <= tolerance:
+                return best
+    if best is None:                       # nothing masked: take one closed draw
+        best = close_under_mirror_group(
+            _draw_random_mask(rng, batch_size, ratio, grid, min_side, k_range))
+    return best
+
+
+def mirror_pair_masks_per_sample(rng, ratios, grid=DEFAULT_GRID,
+                                 min_side=DEFAULT_MIN_SIDE,
+                                 k_range=DEFAULT_K_RANGE, tolerance=0.02,
+                                 max_attempts=40):
+    """Per-sample mirror-closed masks for a batch with per-sample ratios."""
+    masks = [mirror_pair_masks(rng, 1, float(r), grid, min_side, k_range,
+                               tolerance, max_attempts)[0] for r in ratios]
+    return torch.stack(masks, dim=0)
+
+
 class BlockMasker:
-    """Samples block masks per §2. Placement: 'random' | 'half_sensitivity'."""
+    """Samples block masks per §2. Placement: 'random' | 'half_sensitivity' | 'mirror_pairs'."""
 
     def __init__(self, placement="random", grid=DEFAULT_GRID, min_side=DEFAULT_MIN_SIDE,
                  k_range=DEFAULT_K_RANGE, seed=0):
-        assert placement in ("random", "half_sensitivity")
+        assert placement in ("random", "half_sensitivity", "mirror_pairs")
         self.placement = placement
         self.grid = grid
         self.min_side = min_side
@@ -178,6 +281,9 @@ class BlockMasker:
         b = geometry.shape[0]
         if self.placement == "random":
             return random_masks(self.rng, b, ratio, self.grid, self.min_side, self.k_range)
+        if self.placement == "mirror_pairs":
+            return mirror_pair_masks(self.rng, b, ratio, self.grid, self.min_side,
+                                     self.k_range)
         use_sens = int(torch.randint(0, 2, (), generator=self.rng).item()) == 1
         if use_sens:
             assert surrogate is not None, "sensitivity placement needs the frozen surrogate"
@@ -194,6 +300,9 @@ class BlockMasker:
         the batch-MEAN ratio (keeps a mixed batch well-defined); the shipped
         config uses random.
         """
+        if self.placement == "mirror_pairs":
+            return mirror_pair_masks_per_sample(self.rng, ratios, self.grid,
+                                                self.min_side, self.k_range)
         if self.placement != "random":
             mean_ratio = sum(float(r) for r in ratios) / max(1, len(list(ratios)))
             return self.sample(geometry, mean_ratio, surrogate)

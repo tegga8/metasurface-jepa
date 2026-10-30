@@ -181,7 +181,8 @@ class UnifiedJEPA(nn.Module):
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
                  n_film_blocks=6, spec_dim=256,
                  momentum_start=0.996, momentum_end=0.999,
-                 scalar_predictor_film=False):
+                 scalar_predictor_film=False,
+                 decoder_variant="base", decoder_depth=2):
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
@@ -238,8 +239,12 @@ class UnifiedJEPA(nn.Module):
         # by effective (l,h,r) at every layer (architecture_v5.md §4.1).
         # No 3-channel geometry head: the broadcast tensor is assembled once,
         # at the physics-surrogate boundary.
+        # variant "base" = the shipped base-v1 decoder (default, byte-identical
+        # state dict); "quadrant" = imp1's mirror-parameterised decoder.
+        self.decoder_variant = decoder_variant
         self.occupancy_decoder = OccupancyDecoder(
             hidden=hidden, base_dim=hidden // 2, scalar_hidden=scalar_hidden,
+            variant=decoder_variant, depth=decoder_depth,
         )
 
         # EMA target for occupancy encoder (z_y_raw JEPA target)
@@ -608,6 +613,11 @@ def build_unified_model(cfg, spec_weights, device="cpu",
         n_film_blocks=cfg.get("n_film_blocks", 6),
         spec_dim=cfg.get("spec_dim", 256),
         scalar_predictor_film=cfg.get("scalar_predictor_film", False),
+    )
+    decoder_cfg = cfg.get("decoder") or {}
+    kwargs.update(
+        decoder_variant=decoder_cfg.get("variant", "base"),
+        decoder_depth=int(decoder_cfg.get("depth", 2)),
     )
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),

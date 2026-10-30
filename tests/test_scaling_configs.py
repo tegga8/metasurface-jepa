@@ -33,6 +33,9 @@ SCALING_CONFIGS = sorted(glob.glob(
     os.path.join(REPO_ROOT, "configs", "scaling", "*.yaml")))
 
 EXPECTED_MUTATIONS = {
+    "unified_s0_tiny.yaml": {"hidden": 96, "num_heads": 4, "geo_depth": 4,
+                             "predictor_depth": 4, "num_predictor_heads": 4,
+                             "scalar_hidden": 64, "n_film_blocks": 4},
     "unified_s1_small.yaml": {"hidden": 128, "num_heads": 4, "geo_depth": 4,
                               "predictor_depth": 6, "num_predictor_heads": 4,
                               "scalar_hidden": 96, "n_film_blocks": 4},
@@ -41,6 +44,7 @@ EXPECTED_MUTATIONS = {
                              "num_predictor_heads": 8, "scalar_hidden": 192},
 }
 SIZE_RELATION = {
+    "unified_s0_tiny": "smaller",
     "unified_s1_small": "smaller",
     "unified_s2_slim": "smaller",
     "unified_l1_wide": "larger",

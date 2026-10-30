@@ -1,0 +1,111 @@
+flowchart LR
+  %% ===== INPUTS =====
+  subgraph DATA["DATA"]
+    direction TB
+    SPL["MetaDiT splits<br/>train 139,906<br/>val 17,488<br/>test 17,489"]
+    FAC["Factorise [3,64,64]<br/>G0=occ·r/5<br/>G1=occ·h<br/>G2=occ·l/3"]
+    SPL --> FAC
+  end
+  OCC(["occupancy [1,64,64]"])
+  SCV(["scalars l,h,r (raw)"])
+  SKN(["known flags [3]"])
+  SPT(["spectrum [2,301]<br/>complex"])
+  FAC --> OCC
+  FAC --> SCV
+  FAC --> SKN
+  FAC --> SPT
+
+  %% ===== SCALARS + CONTEXT =====
+  SEN["Scalar encoder 0.34M<br/>6-dim: value + known-flag ×3"]
+  FIL{{"FiLM gamma,beta<br/>zero-init → identity"}}
+  SSM(["scalar-summary<br/>[1,192]"])
+  OEN["Occupancy encoder 2.67M<br/>patch embed → 256 tokens<br/>6 blocks · masked tokens<br/>replaced by mask_token"]
+
+  SCV --> SEN
+  SKN --> SEN
+  SEN --> FIL
+  FIL -.-> OEN
+  SEN --> SSM
+  OCC --> OEN
+
+  %% ===== SPECTRUM =====
+  subgraph SPEC["SPECTRUM PATH"]
+    direction TB
+    RSE["Released MetaDiT spectrum<br/>encoder 4.53M — FROZEN"]
+    SPR["Read-out 0.46M<br/>trainable"]
+    RSE --> SPR
+  end
+  SPT --> RSE
+  SPR --> CPT(["c_physics [384]"])
+  SPR --> AGL(["a_goal<br/>[16,384]"])
+
+  %% ===== FUSION + PREDICTOR =====
+  FUS["Fusion 0.96M<br/>2 layers · 273 tokens =<br/>256 occ + 16 goal + 1 scalar"]
+  PRE["Predictor GCLCT 6.63M<br/>8 blocks · 257 queries<br/>LayerNorm → FiLM(c_physics)<br/>→ self-attn → cross-attn(×273)<br/>→ MLP"]
+  OEN -->|"z_x [256,192]"| FUS
+  AGL --> FUS
+  SSM --> FUS
+  FUS -->|"273 fused"| PRE
+  CPT --> PRE
+
+  %% ===== HEADS =====
+  ODE["Occupancy decoder 0.26M"]
+  SDE["Scalar decoder 0.04M"]
+  SPP["spec_proj 0.04M"]
+  PRE -->|"z_hat [257,192]"| ODE
+  PRE --> SDE
+  PRE --> SPP
+  ODE --> GEO(["decoded occupancy<br/>[1,64,64]"])
+  SDE --> SCA(["decoded scalars<br/>l,h,r"])
+
+  %% ===== TEACHER =====
+  subgraph TEACH["TEACHER — FROZEN, no gradients"]
+    direction TB
+    EMA2["EMA scalar encoder<br/>0.34M"]
+    SFL["SpectrumFilm 0.89M<br/>init std 0.1"]
+    EMA["EMA occupancy encoder<br/>2.67M · momentum<br/>0.996 → 0.999"]
+    EMA2 --> EMA
+    SFL -.-> EMA
+  end
+  OCC --> EMA
+  SCV --> EMA2
+  SPT --> SFL
+  EMA --> T1(["z_y_raw<br/>stable target"])
+  EMA --> T2(["z_y_occ_spec<br/>spectrum-conditioned"])
+  EMA2 --> T3(["z_y_scal<br/>EMA summary"])
+
+  %% ===== PHYSICS =====
+  SUR["Released EM surrogate 0.89M<br/>FROZEN"]
+  PHY["L_phys 3.32<br/>geometry → [3,64,64] → surrogate<br/>→ [2,301] → σ-normalised L1<br/>straight-through: hard fwd, soft bwd"]
+  GEO -.-> PHY
+  SUR -.-> PHY
+  SPT -.-> PHY
+
+  %% ===== OBJECTIVE =====
+  LOSSES["L_inv 25 · latent match,<br/>MASKED TOKENS ONLY<br/>L_var 25 · L_cov 1 · VICReg<br/>L_scalar 1 · L1 on<br/>UNKNOWN SCALARS ONLY<br/>L_occ 1 · BCE on<br/>MASKED PIXELS ONLY<br/>L_summary 1 · known scalars via<br/>the summary token<br/>L_cond 0.5 · L_scal_t 0.5 · cosine JEPA<br/>Projector: mlp_bn"]
+  PRE -.->|"predictions"| LOSSES
+  T1 -.->|"answer key"| LOSSES
+  T2 -.-> LOSSES
+  T3 -.-> LOSSES
+  SDE -.-> LOSSES
+  ODE -.-> LOSSES
+  SSM -.-> LOSSES
+
+  %% ===== STAGING =====
+  STAGE["TRAINING STAGING<br/>1 epoch = 70k steps, batch 2<br/>—<br/>λ_phys = 0 until 2000,<br/>then ramp → 3.32 by 5000<br/>—<br/>mask ratios 0.25/0.5/0.75/1.0,<br/>distribution ramps easy → full<br/>—<br/>scalars all_known /<br/>all_unknown / mixed<br/>—<br/>goal dropout 10%<br/>real / null / shuffled"]
+
+  %% ===== STYLES =====
+  classDef data fill:#fff3bf,stroke:#b58900,color:#000
+  classDef train fill:#dbeafe,stroke:#1d4ed8,color:#000
+  classDef frozen fill:#eeeeee,stroke:#666666,stroke-dasharray:5 5,color:#000
+  classDef target fill:#dcfce7,stroke:#15803d,color:#000
+  classDef loss fill:#fee2e2,stroke:#b91c1c,color:#000
+  classDef stage fill:#f3e8ff,stroke:#7e22ce,color:#000
+  classDef note fill:#ffedd5,stroke:#c2410c,color:#000
+  class SPL,FAC,OCC,SCV,SKN,SPT data
+  class SEN,OEN,FUS,PRE,ODE,SDE,SPP,GEO,SCA,SSM,CPT,AGL,SPR train
+  class RSE,SUR,EMA,EMA2,SFL frozen
+  class T1,T2,T3 target
+  class LOSSES,PHY loss
+  class STAGE stage
+  class FIL note

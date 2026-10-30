@@ -429,3 +429,995 @@ constraints → proceed to Phase 2.
 
 - date: _TBD_   commit: _TBD_   change: _
 - before / after / delta / gate: _
+
+---
+
+### Phase 6 — split-ratio re-splits (60:20:20 / 50:25:25 / 40:40:20) · DONE
+
+- date: 2026-10-05   kernels: `anosvol/metasurface-jepa-split-{60-20-20,50-25-25,40-40-20}`
+  (Kaggle T4; run account `anosvol`, read-only pulls)   pin: `fda7236`
+- change: **data-allocation study** (operator override 2026-10-04, `AGENTS.md`) — the released
+  pool (174,883) re-split at three ratios with **one permutation** (perm seed 42, nested
+  prefixes; `scripts/data/make_split_ratio.py`). Total data unchanged; only the allocation
+  moves. 1 epoch per arm (`steps = train // 2` @ batch 2), seeds {0,1,2}. **All stage exit
+  codes 0 on every rung × seed** (train / scenario-A / common-slice / eval battery).
+- evaluation: MetaDiT-parity scenario-A benchmark (4 candidates) on the **shared 20 % test
+  slice (n=34,976)** for cross-arm comparability; A/B/C gate battery (n=512) on each arm's
+  own val split. **Not MetaDiT-protocol comparable** (allocation shifted by design).
+- reference row (unchanged, from `fe_current` above): 80:10:10 · 139,906 train / 70k steps ·
+  MAE 0.0490 ± 0.0013 · A/B/C 0.9967 / 0.9772 / 0.9303.
+
+| arm | train / steps | **MAE** (mean ± std, 3 seeds) | per-seed | A / B / C gate (mean) |
+|---|---|---|---|---|
+| **80:10:10** (reference) | 139,906 / 70,000 | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| **60:20:20** | 104,931 / 52,465 | **0.0544 ± 0.0013** | 0.0539 / 0.0536 / 0.0559 | 0.994 / 0.973 / 0.915 |
+| **50:25:25** | 87,443 / 43,721 | **0.0552 ± 0.0018** | 0.0532 / 0.0559 / 0.0566 | 0.991 / 0.973 / 0.898 |
+| **40:40:20** | 69,954 / 34,977 | **0.0619 ± 0.0006** | 0.0617 / 0.0615 / 0.0626 | 0.992 / 0.965 / 0.884 |
+
+- 50:25:25 note: this arm's own test split is the 25 % slice (superset of the common 20 %);
+  it was scored on the common slice as well — own-slice MAE **0.0551 ± 0.0018** vs common
+  0.0552 → no slice artifact.
+
+| arm | AAE | AAE&2 / AAE&4 | IoU / F1 (masked) | pred occ frac (true) | scalar MAE (unknown) | scalar 1 / 2 known | floor |
+|---|---|---|---|---|---|---|---|
+| 60:20:20 | 32.78 | 33.44 / 34.14 | 0.744 / 0.853 | 0.424 (0.415) | 0.089 | 0.509 / 0.538 | 0.00709 |
+| 50:25:25 | 33.25 | 33.87 / 34.57 | 0.741 / 0.850 | 0.424 (0.415) | 0.091 | 0.531 / 0.542 | 0.00701 |
+| 40:40:20 | 37.29 | 37.87 / 38.54 | 0.739 / 0.849 | 0.425 (0.422) | 0.096 | 0.592 / 0.574 | 0.00709 |
+
+- **Reading:** the data axis is monotone but gentle above ~60 % train — MAE +11 % (60 %),
+  +13 % (50 %), +26 % (40 %) vs the 80:10:10 reference; the 60→50 step is within noise of
+  each other (0.0544 vs 0.0552, overlapping seed spread).
+- **Gate C degrades smoothly with less data (0.930 → 0.915 → 0.898 → 0.884) but passes
+  comfortably (≥ 0.75) at every rung and every seed.** A/B pass at every rung.
+- **Scalar dependence stays ~chance on every rung (0.51–0.59)** — the known open weakness,
+  unchanged by data allocation.
+- No occupancy collapse on any rung (pred occ fraction ≈ true; all-empty / all-occupied both
+  False). Every rung still beats MetaDiT-S (0.0801) and vanilla DiT (0.1677) on the common
+  slice (reference context; not protocol-matched).
+- artifacts: per-seed JSONs, logs, and checkpoints in the kernel outputs
+  (`kaggle kernels output anosvol/metasurface-jepa-split-<arm>`).
+
+---
+
+## Phase 6b — S0 rung · length-proportional staging arm · symbol round-trip (2026-10-06)
+
+All arms below: `akashkesav` kernels, 70k × seeds {0,1,2}, canonical battery, v1 schedule
+unless stated. Trainable counts are live-audited (`model_size_audit`), **which sums
+submodules and therefore excludes the two trainable tokens registered directly on
+`UnifiedJEPA` — `mask_token` and `scalar_query_token`, each `(1, 1, hidden)`, i.e. 2 × hidden
+in total.** Audit of 2026-10-16: counting *all* `model.parameters()` adds exactly 2 × hidden
+per arm (base 11,403,012 not 11,402,628; S1 4,233,092; S2 8,143,364; S0 2,193,476;
+L1 19,897,220), and the two figures are the same model under two definitions — no code or
+checkpoint changed (no commit has touched `src/` since this study). Both tokens are present
+in every staged checkpoint, and a key-by-key diff against the current configs shows **0
+missing trainable keys, 0 unexpected keys and 0 shape mismatches** for base v1, S1, S2 and
+L1, so the checkpoints carry every trainable parameter these configs build.
+
+### Model-size ladder (3 seeds each)
+
+| rung | trainable | MAE (mean ± std) | per-seed | A / B / C (mean) |
+|---|---|---|---|---|
+| **S0 tiny** (19.2 % of base) | 2,193,284 | **0.0564 ± 0.0003** | 0.0563 / 0.0562 / 0.0568 | 0.997 / 0.977 / 0.919 |
+| **S1 small** | 4,232,836 | **0.0542 ± 0.0028** | 0.0543 / 0.0576 / 0.0507 | 0.992 / 0.979 / 0.917 |
+| **S2 slim** | 8,142,980 | **0.0518 ± 0.0009** | 0.0516 / 0.0507 / 0.0530 | 0.995 / 0.976 / 0.920 |
+| **base (v1)** | 11,402,628 | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| **L1 wide** | 19,896,708 | **0.0531 ± 0.0036** | 0.0513 / 0.0583 / 0.0498 | 0.996 / 0.975 / 0.920 |
+
+- **Reading: the base is the accuracy peak of the ladder.** Shrinking costs MAE
+  (+5.7 % S2, +10.6 % S1, +15.1 % S0); growing costs +8.4 % (L1). Occupancy IoU ≈ 0.75
+  at every rung (no collapse); scalar dependence ~chance at every rung (the standing
+  weakness, size-independent).
+
+### Length-proportional (v2) staging arm — `sched_fix` — gate FAILED, not adopted
+
+| arm | MAE (mean ± std) | per-seed | A / B / C |
+|---|---|---|---|
+| base v1 (absolutes 2000/3000) | **0.0490 ± 0.0013** | 0.0500 / 0.0494 / 0.0476 | 0.997 / 0.977 / 0.930 |
+| base v2 (fracs 0.20 / 0.30, mask 0.30) | **0.0531 ± 0.0019** | 0.0507 / 0.0545 / 0.0530 | 0.996 / 0.970 / 0.905 |
+
+- **Verdict: regression.** Every v2 seed is worse than every v1 seed (disjoint ranges):
+  MAE +8.4 %, gate C −2.5 pp. The gate is not loosened — the v2 schedule is **not
+  adopted**; the default reverts to the v1 absolutes (`resolve_staging_steps` keeps the
+  mechanism for future retunes).
+- Reading: MAE *is* the spectrum (physics) error. At 70k steps, holding physics off for
+  the first 20 % and full only at the 50 % mark buys less total physics exposure than the
+  compressed v1 window (physics full from ~7 % of training) — the proportional-staging
+  argument did not survive measurement.
+
+### Per-term gradient share at the trained state (6 val batches, each term alone)
+
+| model | L_inv | L_var | L_cov | JEPA block | L_phys | L_occ | L_scalar | L_cond |
+|---|---|---|---|---|---|---|---|---|
+| S1 (v1) | 10.4 | 30.6 | 43.2 | **84.2** | 7.7 | 2.1 | 1.9 | 0.8 |
+| S2 (v1) | 17.1 | 39.7 | 29.2 | **86.0** | 6.5 | 1.6 | 2.1 | 1.6 |
+| L1 (v1) | 18.7 | 35.1 | 33.4 | **87.2** | 5.5 | 1.8 | 2.5 | 0.5 |
+| base (v2) | 9.0 | 31.8 | 41.0 | **81.8** | 9.5 | 1.8 | 3.0 | 0.7 |
+
+- The JEPA latent block carries ≈82–87 % of the gradient budget at the trained state on
+  every rung; the surrogate-physics term holds ≈6–10 % (below the 10–25 % design band),
+  consistent with the scalar-dependence weakness. The historical "base = 66 % physics"
+  row was an old-code artifact (recorded in AUDIT_REPORT_192D.md).
+
+### Symbol round-trip — 9 glyphs, Meep-fed, scenario A (full mask, all scalars unknown)
+
+| model | mean IoU | per-symbol best / worst | control (val, CST-fed) |
+|---|---|---|---|
+| S2 slim | **0.304 ± 0.109** | torii 0.510 / faravahar 0.220 | 0.776 |
+| S1 small | **0.306 ± 0.106** | torii 0.508 / faravahar 0.149 | 0.771 |
+| L1 wide | **0.310 ± 0.105** | torii 0.488 / faravahar 0.183 | 0.782 |
+| base (v2, seed0) | **0.311 ± 0.110** | torii 0.497 / faravahar 0.173 | 0.782 |
+
+- The symbols (swastika, cross, crescent, aum, khanda, dharmachakra, yin-yang, torii,
+  faravahar) sit far outside the dataset's blob morphology; recovery from their full-wave
+  Meep spectra is partial at best — ~0.30 IoU vs ~0.78 in-distribution control, uniform
+  across model sizes. Thin glyph-scale features are not uniquely pinned by the spectrum:
+  several symbols show low surrogate spectrum error at low IoU (the model finds *a*
+  design that explains the spectrum, not *the* glyph).
+- **Visual verdict (5-row grid, all four models):** the decodes are dataset-style blobs
+  (bowties / two-lobe masses), not glyphs — every OOD spectrum is mapped back onto the
+  learned design manifold. The higher-IoU symbols (torii, swastika, chakram) are simply
+  those whose gross silhouette is closest to that manifold (H / double-bar families).
+  The full-size base behaves identically to the small rungs → not a capacity limitation.
+- artifacts: `symbol_roundtrip_preview_with_base.png`,
+  `symbol_roundtrip_preview.png`, `symbol_designs.npz` / `_preview.png`,
+  `kaggle/symbol_designs` + `kaggle/symbol_meep` kernel outputs.
+
+### In-distribution round-trip reference — MetaDiT's own released test split (n = 200, true CST spectra)
+
+Same pipeline as the symbol round-trip (scenario A: full mask, all scalars unknown),
+fed the dataset's own released spectra; occupancy-stratified 200-item slice of
+`test_set.mat`.
+
+| model | IoU (n=200) | F1 | surrogate spec err |
+|---|---|---|---|
+| S2 slim | **0.777 ± 0.079** | 0.872 | 0.0896 |
+| S1 small | **0.776 ± 0.078** | 0.872 | 0.0891 |
+| L1 wide | **0.777 ± 0.080** | 0.872 | 0.0917 |
+| base (v2, seed0) | **0.781 ± 0.079** | 0.875 | 0.0868 |
+
+- The 0.78-vs-0.31 gap isolates the OOD effect: on MetaDiT's own data the model
+  recovers the true geometry from the true spectrum at ~0.78 IoU, uniform across model
+  sizes; on the generated symbols the same pipeline collapses to ~0.31. The full-split
+  metrics (MAE/gates in the tables above) were likewise always measured on MetaDiT's
+  released splits — the generated sets are extra OOD probes, not the benchmark.
+
+---
+
+## Task 1 (2026-10-07) — novel-geometry round-trip, rebuilt on a corrected Meep harness
+
+Everything below supersedes the earlier symbol-round-trip and Meep-based claims in this
+file. Those rested on an instrument that violated passivity and on a convention whose
+held-out error was worse than predicting zero. Both defects are described first because
+they invalidate the prior numbers rather than merely qualify them.
+
+### 0. Two defects found and fixed
+
+**The Meep harness produced unphysical spectra.** `_meep_novel.py` ran every design for a
+fixed 1100 time units in a lossless cell. The cell is PML-terminated in z and periodic in
+x/y, so a lossless slab traps energy the z-PML cannot absorb; the run stopped mid-ring
+and the flux at the monitor was still oscillating. Consequence: **36 of 43 designs across
+the symbol-decodes and batch40 kernels violated the passivity bound |T| <= 1**, up to
+**|T| = 4.7e8** for a passive dielectric. Three further defects: the mode parity channels
+were meaningless (`def`/`EVEN_Z`/`ODD_Z` came out byte-identical for every design, because
+`eig_parity` is not resolvable for a zero-thickness ModeRegion); there was no validity gate;
+and the rewrite had dropped the complex phase, so the output could not have been used to
+condition the model at all. Fixed with a lossy dielectric, field-decay termination plus a
+hard ringdown cap, a single meaningful mode channel, and a per-design `passivity_ok` flag.
+Runtime fell ~1500s -> ~110s per design.
+
+**The Meep->CST convention carried no signal.** The old `_meep_convention.json` was a
+2-parameter global phase rotation fitted on 4 items with residuals up to **3898**, one item
+explicitly discarded, fitted on the defective harness's output. Refitted on 19 usable
+validation geometries with the fixed harness, leave-one-out:
+
+| model | held-out err | corr | |
+|---|---|---|---|
+| phase, conj=False | 1.2079 | 0.680 | **the old parameterisation** |
+| phase, conj=True | 1.1815 | 0.680 | |
+| scalar gain, conj=False | 0.7502 | 0.533 | |
+| scalar gain, conj=True | 0.1278 | 0.698 | |
+| **full 2x2 map** | **0.1138** | **0.785** | **selected** |
+
+So the fixed harness reproduces MetaDiT's CST spectra to ~11% of the target standard
+deviation held out. In-sample 0.0895 vs 0.1138 held out, so it is not overfitting 19
+points. The old convention's 1.18 is worse than predicting zero — **every result built on
+it was uninterpretable, and the prior OOD-collapse claim is withdrawn.**
+
+### 1. Data status
+
+| set | designs | passivity failures | ringdown-capped |
+|---|---|---|---|
+| calibration (validation geometries) | 20 | 1 (peak 1.7e8) | 0 |
+| batch40 novel geometries | 40 | 2 (asym02 1.074, asym15 1.021) | 0 |
+| decoded, full mask | 38 | 3 | 0 |
+| decoded, 50% mask | 38 | 3 | 0 |
+
+Failures are **excluded, not repaired**. Two of the calibration failures previously hit the
+ringdown cap; raising `--max-ring` to 2500 removed that failure mode entirely.
+
+### 2. Decode and geometry metrics (base model, sched-fix step 69900)
+
+| mask | IoU vs true novel geometry | surrogate spec err | \|T\| corr |
+|---|---|---|---|
+| full | 0.674 | 0.280 | 0.664 |
+| 50% | 0.777 | 0.245 | 0.717 |
+
+### 3. Meep-vs-Meep physics, with a shuffled null
+
+Both sides measured with the same instrument, so the fitted convention cancels entirely.
+
+| subset | real err | shuffled | median err margin | win rate | sign test (corr) |
+|---|---|---|---|---|---|
+| full mask, all | 0.428 | 1.056 | -0.279 | 29/35 | p = 0.017 |
+| 50% mask, all | 0.347 | 1.142 | -0.291 | 27/35 | p = 0.041 |
+| **symmetric, full mask** | 0.444 | 1.431 | **-0.060** | — | **p = 1.00** |
+| asymmetric, full mask | 0.396 | 0.804 | -0.250 | — | p = 0.035 |
+| symmetric, 50% mask | 0.287 | 1.254 | -0.289 | — | p = 0.263 |
+
+**The symmetric + full-mask stratum is a null**: median |T| correlation margin +0.0025,
+sign test p = 1.0. Its mean margins (-0.99, +0.23) look favourable but are carried entirely
+by shuffled-error outliers of 12-14, with CI [-2.60, -0.0015]. The pooled result is
+carried by the asymmetric designs.
+
+### 4. Is that stratum ill-posed? (degeneracy check)
+
+Measured on MetaDiT's own validation split with no model involved: for each sampled
+geometry, find the OTHER geometry whose true CST spectrum is closest, then compare the two
+geometries.
+
+| stratum | NN/random spectrum distance | median IoU with that neighbour | frac IoU < 0.8 | frac < 0.5 |
+|---|---|---|---|---|
+| whole corpus (n=3000) | 0.034 | 0.663 | 0.871 | 0.198 |
+| occupancy band 1040-2240 (n=2820) | 0.036 | 0.671 | 0.862 | 0.161 |
+| least mirror-symmetric 300 | 0.054 | 0.662 | 0.897 | 0.167 |
+| **most mirror-symmetric 300** | **0.068** | **0.625** | 0.910 | 0.233 |
+
+**Verdict: partially, not fully, degenerate.** The spectrum is highly informative — the
+nearest-spectrum neighbour sits 29x closer than a random pair — so the condition is not
+ill-posed. But for ~87% of geometries the closest-spectrum neighbour is a *different*
+design (IoU < 0.8), and mirror symmetry makes this worse (median NN IoU 0.625 and 23.3%
+below 0.5, vs 0.662 and 16.7% for the least symmetric subset).
+
+The relevant calibration: **our model's IoU on that stratum is 0.674, at or slightly above
+the corpus's own nearest-neighbour IoU of 0.625-0.671.** The model is therefore performing
+at approximately the intrinsic identifiability limit of the spectrum->geometry map, not
+below it. The null is a real result under a weakly-identified condition — so the stratum is
+recorded as **weakly identified, not excluded by design**.
+
+### 5. Style statistics vs the real MetaDiT corpus
+
+| set | occ | holes | edge | mirror | components |
+|---|---|---|---|---|---|
+| real MetaDiT (n=402) | 0.428 | 0.55 | 0.125 | **1.000** | 1.12 |
+| our novel (40) | 0.426 | 0.35 | 0.097 | 0.859 | 1.00 |
+| JEPA decoded, full mask | 0.409 | **2.05** | 0.109 | 0.904 | **3.50** |
+| JEPA decoded, 50% mask | 0.408 | **1.97** | 0.114 | 0.883 | 1.95 |
+| MetaDiT-S (same input) | 0.398 | **0.21** | 0.121 | **1.000** | 1.47 |
+
+**The real corpus is exactly mirror-symmetric**: 300/300 random validation geometries are
+bit-identical under `fliplr`, under `flipud`, and under 180 degree rotation. This is
+architectural, not physical — MetaDiT's `restore_structure` builds its 64x64 output by
+mirroring a 32x32 quadrant, so every generation is mirror-symmetric by construction. Our
+decoder has no equivalent constraint.
+
+**Our novel designs are not drawn from the corpus distribution** (mirror 0.859 vs 1.000):
+`make_random_batch40.py` enforces only a partial mirror, so the OOD probe is more OOD than
+intended. The decodes fragment — up to 3.50 components and ~4x too many holes against the
+corpus — and carry visible speckle and horizontal seam artifacts.
+
+### 6. Same-input MetaDiT-S comparison
+
+MetaDiT-S conditioned on the identical `[2,301]` targets, 500 steps, cfg 4.0, seed 0.
+Cluster (2x A100 80GB) produced all 38 generations in 90.8s of sampling.
+
+| model | IoU vs original novel geometry |
+|---|---|
+| JEPA full mask | 0.674 |
+| JEPA 50% mask | **0.777** |
+| **MetaDiT-S diffusion** | **0.576** |
+
+The two models fail differently: we reconstruct the input more accurately; MetaDiT-S emits
+far cleaner, more corpus-like bodies (0.21 holes, 1.47 components, mirror exactly 1.000).
+
+**Caveats:** MetaDiT-S is stochastic and this is a single seed; a fair comparison needs
+several seeds per input. And the targets are our novel geometries (mirror 0.865), which are
+unlike anything in MetaDiT's corpus (mirror 1.000), which plausibly depresses its IoU.
+
+### 7. Verdict and what is still open
+
+- The harness and convention are now trustworthy: **0.1138** held-out against real CST.
+- On novel geometries the decode **beats a shuffled null** for asymmetric designs and under
+  a 50% mask, but **not** for symmetric designs under a full mask (p = 1.0).
+- That stratum is **weakly identified** rather than ill-posed, and the model sits at the
+  corpus's own nearest-neighbour identifiability limit there.
+- Against MetaDiT-S on identical input we are **better on IoU** (0.674 / 0.777 vs 0.576)
+  and **worse on geometry well-formedness** (fragmentation up to 3.50 components, ~4x too
+  many holes, visible speckle and horizontal seams against MetaDiT-S's 1.47 / 0.21).
+- **Superseded by this section:** the earlier symbol round-trip IoU ~0.31 and the
+  "decoded spectra do not match symbol spectra" finding. Both were measured with the
+  passivity-violating harness and the signal-free convention, so neither supports a claim.
+
+### 8. What is NOT established here
+
+- Nothing above says the JEPA beats MetaDiT. It beats MetaDiT-S on geometry IoU for a
+  single diffusion seed on 38 OOD targets, and loses to it on geometry well-formedness.
+  A multi-seed comparison is required before any such claim.
+- The base-model headline numbers (MAE 0.0490 +- 0.0013, gates A/B/C
+  0.9967/0.9772/0.9303) are unaffected by anything here: they are measured on MetaDiT's
+  released test split with true CST spectra and never touched the Meep harness.
+- The scalar path remains the recorded open weakness (0.505 / 0.529, at chance).
+- Task 1 covers the geometry-first direction only. The spectrum-first direction (arbitrary
+  target spectrum -> model -> geometry -> physics) has not been run.
+
+---
+
+## 2026-10-15 — v1/v2 re-scoring, the three-model comparison, imp1/imp2 (cluster: `paramsakti`)
+
+All numbers below were produced on the HPC cluster (`paramsakti`, `mm24r002`) with the fixed
+Meep harness; the Meep→CST convention is **0.1138** held out. **Supersedes**: every decode
+number earlier in this file that came from the `sched_fix` (v2, failed-gate) checkpoint, and
+the confounded MetaDiT scalar table. v1 = the retrained base (`checkpoints/unified/final.pt`
+on the cluster, 70k, 1 seed); v2 = `sched_fix` seed0.
+
+### 0. Scorer validation — why these numbers are comparable
+
+- Re-scoring **v2 from raw cluster data with the current scorers reproduced this ledger
+  exactly**: task 1 full `0.4284/1.0558`, half `0.3467/1.1419`; task 2 A `0.8487/0.6527`,
+  B `1.9729/0.5756`. The v1 numbers come from the same code path.
+- Cross-model comparisons use the **intersection** of each model's passivity-clean designs
+  and **one shared shuffled permutation** (per-model subsets are not comparable).
+
+### 1. Task 1 (geometry-first) physics — v1 / v2 / MetaDiT-S on the common 31 designs
+
+| model | real err ↓ | shuffled | med. margin err / corr | win rate err / corr | sign p err / corr |
+|---|---|---|---|---|---|
+| base v1 | 0.4629 | 1.2866 | −0.2282 / +0.1981 | 23/31 · 23/31 | 0.011 · 0.011 |
+| v2 | 0.4464 | 1.2928 | −0.3677 / +0.2239 | 23/31 · 21/31 | 0.011 · 0.071 |
+| MetaDiT-S | 0.5432 | 1.3614 | −0.2517 / +0.1958 | 24/31 · 22/31 | 0.0033 · 0.029 |
+
+- All three beat the shuffled null; **MetaDiT-S has the worst absolute agreement** (highest
+  error, lowest correlation) and the best per-design win rate. v1 and v2 are statistically
+  tied here.
+- **Subset sensitivity (recorded, not smoothed):** v1's full-mask result is p=0.296 on its own
+  33 designs but p=0.011 on the common 31 — two excluded designs carried large shuffled-error
+  outliers. The common-subset value is the fair one; the sign test remains underpowered for
+  small n (task 3 below, n=10).
+- Still open: the symmetric + full-mask stratification has not been recomputed for v1.
+
+### 2. Task 2 (spectrum-first) physics — three-way, same targets and null
+
+| model | A real err / corr | A shuffled | A med. margin err / corr | A p | B real | B shuffled | B margin | B p |
+|---|---|---|---|---|---|---|---|---|
+| v1 | 0.8607 / +0.4597 | 0.7353 / +0.5744 | +0.168 / −0.092 | 0.13 / 0.29 | 1.8362 | 0.6781 | +1.20 / −0.364 | 1.2e−7 |
+| v2 | 0.8487 / +0.4609 | 0.6527 / +0.6092 | +0.149 / −0.114 | 0.13 / 0.13 | 1.9729 | 0.5756 | +1.37 / −0.420 | 0.031 |
+| MetaDiT-S | 0.8368 / +0.4409 | 0.8038 / +0.5876 | +0.071 / −0.153 | 0.31 / 0.064 | 1.8393 | 0.7274 | +1.06 / −0.452 | 9.5e−7 |
+
+- **Negative for all three models** — none beats a mismatched target on the spectrum-first
+  task, and MetaDiT is marginally the worst on set A (largest negative correlation margin).
+  Single-shot arbitrary-spectrum inversion is therefore **unsolved in this comparison**, not a
+  weakness of our architecture relative to the reference.
+- Passivity of the decodes: set A 24/24 clean for v1 and MetaDiT; set B clean for v1 (24/24),
+  MetaDiT 21/24, v2 only 6/24.
+
+### 3. Task 3 (scalar sensitivity) — matched conditions for all three models
+
+Geometry rows (n=10, identical conditioning; IoU vs the true novel geometry):
+
+| model | true scalars | −20 % | +20 % | occupancy (−20 / +20) |
+|---|---|---|---|---|
+| JEPA v1 | 0.607 (given-scalars row) | 0.153 | 0.145 | 0.071 / 0.067 |
+| JEPA v2 | 0.622 | 0.280 | 0.288 | 0.125 / 0.133 |
+| MetaDiT-S | 0.728 | 0.435 | 0.472 | 0.380 / 0.375 |
+
+- MetaDiT tracks perturbed scalars through the spectrum far better; ours collapse to
+  near-empty (v1) or fragment (v2). Caveat on our side: the JEPA must also *predict* the
+  scalars in that regime (MetaDiT has no scalar input), so part of the gap is the
+  conditioning path, not tracking ability.
+- Physics (`_compare_phase3_physics.py`, same-instrument for the given-scalars rows):
+  - `jepa_v1_B_true` n=10: real err 0.396 / corr **+0.892** vs shuffled 1.384 / +0.576
+    (margins −0.99 err / +0.32 corr; win 6/10 · 6/10; sign p=0.75 — underpowered).
+  - `jepa_v2_B_true` n=9: real 0.420 / **+0.899** vs shuffled 0.900 / +0.636
+    (+0.26 corr margin; win 6/9 · 7/9; p=0.51/0.18).
+  - **Three perturbed-scalar rows are excluded**: every design failed the passivity gate
+    (peaks 1.02–1.10 for v2's sets, 1.17–2.11 for v1's +20 % set; all converged, none
+    capped). These decodes are the near-empty ones (occ 0.07–0.13).
+  - **CORRECTION (see §9): the explanation given here was wrong.** This passage originally
+    attributed the excess to the sample and reference runs ending on different field-decay
+    windows, and prescribed an identical window as the fix. The shared-window re-run was
+    executed and changed every peak by **< 0.001**, refuting it. The measured cause is that
+    the gate divides by a source spectrum spanning ~4.4 decades and mixes an eigenmode
+    coefficient ratio (not an energy quantity) into a passivity statement. Corrected
+    verdicts, and which rows survive, are in §9.
+  - `v1_spec_m20`'s null (real == shuffled): peaks 0.998–0.999, which §9 shows is the
+    *correct* value for a near-empty decode against an air reference, not an artefact.
+
+### 4. imp1 — mirror-parameterised (quadrant) decoder · 1 seed · preliminary
+
+Separate model (`configs/unified_imp1.yaml`, decoder emits a 32×32 quadrant and mirrors it,
+plus refinement blocks; 11,565,444 trainable vs base 11,403,012; base config builds
+byte-identically and every base checkpoint still strict-loads).
+
+| metric | base v1 (3 seeds) | imp1 s0 (1 seed) |
+|---|---|---|
+| MAE, scenario A | 0.0490 ± 0.0013 (full split) | 0.0514 (n=512) |
+| AAE | 29.51 | 30.92 |
+| gate A / B / C | 0.9967 / 0.9772 / 0.9303 | 0.9961 / 0.9609 / 0.9238 |
+| scalar 1 / 2 known | 0.505 / 0.529 | 0.559 / 0.527 |
+| occupancy IoU (masked) | ~0.75 | 0.7544 |
+| pred occ fraction (true) | 0.427 (0.425) | 0.422 (0.425) |
+
+- **Parity within single-seed noise** on A/B/C and MAE; no improvement established.
+  Guidance sweep: w=0 → 0.553, w=1 → 0.129 (best), w≥2 breaks down (7.2 / 11.8 / 14.9).
+- Seeds 1-2 are queued (the cluster allows one GPU job at a time).
+
+### 5. imp2 — leak-free (mirror-pair) masking · in flight
+
+- **Measured leak** under the shipped random placement: **0.67** of masked tokens have a
+  visible mirror partner at ratio 0.5 (the corpus is exactly mirror-symmetric by
+  construction). Any symmetric decoder exploits this path automatically (imp1 does so by
+  construction), which is why masked-region scores under leaky masks are not comparable.
+- `mask_placement: mirror_pairs` closes the masked set under {fliplr, flipud, rot180}:
+  **leak exactly 0.0 at every ratio**; calibration 0.25→0.27, 0.50→0.50, 0.75→0.75.
+- Tests: 8 new (incl. masked pixels provably cannot change `z_hat`/`scalar_pred`, and the
+  JEPA loss is invariant to the unmasked region) → suite **401 passed / 10 skipped**.
+- First ablation datum (`scripts/diagnostics/mirror_leak.py`, base v1, n=6, ratio 0.5):
+  masked-region IoU 0.5488 (leaky) → **0.6140** (leak-free) — base v1 does *not* exploit the
+  leak; imp1 is the arm the instrument exists for.
+- Training in flight (step ~37k/70k); its battery and the three-checkpoint leak ablation run
+  in the same job.
+
+### 6. Operational record for the next session
+
+- `paramsakti` QOS: **one concurrent GPU job per user** (`QOSMaxJobsPerUserLimit` otherwise);
+  `small` accepts several concurrent CPU jobs. GPU nodes are drained/reserved intermittently.
+- The home **quota (50 GB) filled** mid-run, killing 3 Meep workers with `[Errno 122]`; a
+  targeted resume job re-solved exactly those designs (`passivity_ok=True`, peaks 0.94–0.98).
+  27 GB of the quota is the operator's own conda environments (untouched).
+- Meep throughput on one 48-core node: ~7–40 min per 10-design set (memory-bandwidth bound;
+  the first set of a run also pays the empty-cell reference solves for new scalar combos).
+
+### 7. What is NOT established today
+
+- **Everything on v1 is one training seed** → preliminary by `ACCEPTANCE_PROTOCOL.md`; the
+  three-seed replication is queued, not done.
+- imp1 vs base v1: parity, not an improvement.
+- Task-3 perturbed-spectrum physics: **unmeasurable with the current harness** (reference/run
+  decay-window mismatch, aggravated by near-empty decodes). No model claim is made from it.
+- The mandated gate-8 (real/**null**/**shuffled**, stratified by mask ratio) still has no test.
+- Phase-2's negative result is now a *comparative* statement (ours and MetaDiT's, same
+  instrument) but remains single-seed per model.
+
+---
+
+## 2026-10-15 (later) — three seeds for imp1/imp2, the five-model physics table, corrected phase 2
+
+Adds to the block above. All three model variants were trained 70k × seeds {0,1,2} on the
+cluster, each with its own battery; all numbers here are from those runs.
+
+### 1. imp1 — mirror-parameterised (quadrant) decoder · 3 seeds · NEGATIVE
+
+| metric | imp1 (3 seeds) | base v1 (3 seeds) | verdict |
+|---|---|---|---|
+| MAE (n=512) | 0.0517 ± 0.0021 | 0.0490 ± 0.0013 (full split) | worse † |
+| gate A | 0.9928 ± 0.0030 | 0.9967 ± 0.0011 | **worse, CIs do not overlap** |
+| gate B | 0.9714 ± 0.0091 | 0.9772 ± 0.0040 | tied |
+| gate C | 0.9297 ± 0.0070 | 0.9303 ± 0.0110 | tied |
+| scalar 1 / 2 known | 0.523 ± 0.037 / 0.519 ± 0.007 | 0.505 / 0.529 | tied |
+| occ IoU (masked) | 0.7565 | ~0.750 | equal |
+
+**The mirror decoder is a clean negative on the battery** — identical on B/C and the scalars,
+consistently slightly worse on A and MAE. Per-seed MAE 0.0514 / 0.0497 / 0.0539; A 0.9961 /
+0.9922 / 0.9902.
+
+### 2. imp2 — leak-free (mirror-pair) masking · 3 seeds · a TRADE
+
+| metric | imp2 (3 seeds) | base v1 (3 seeds) | verdict |
+|---|---|---|---|
+| MAE (n=512) | 0.0501 ± 0.0009 | 0.0490 ± 0.0013 (full split) | inconclusive † |
+| gate A | 0.9928 ± 0.0030 | 0.9967 ± 0.0011 | base better (separated) |
+| **gate B** | **0.9824 ± 0.0020** | 0.9772 ± 0.0040 | **imp2 better: all 3 imp2 seeds ≥ base's best seed** |
+| gate C | 0.9251 ± 0.0100 | 0.9303 ± 0.0110 | tied |
+| scalar 1 / 2 known | 0.525 ± 0.011 / 0.539 ± 0.026 | 0.505 / 0.529 | higher means, overlapping |
+| occ IoU (masked) | 0.7540 ± 0.0007 | ~0.750 | equal |
+
+Per-seed imp2: MAE 0.0509 / 0.0492 / 0.0503; A 0.9922 / 0.9961 / 0.9902; B 0.9824 / 0.9805 /
+0.9844; C 0.9277 / 0.9336 / 0.9141.
+
+### 3. Mirror-leak ablation — the mechanism result
+
+Masked-region IoU, ratio 0.5, n=38, identical inputs; only the mask placement changes:
+
+| checkpoint | leaky masks (leak 0.431) | leak-free masks (leak 0.000) | Δ |
+|---|---|---|---|
+| base v1 | 0.7530 | 0.7363 | −0.0166 |
+| imp1 | 0.7516 | 0.7328 | −0.0187 |
+| imp2 seed 0 | 0.7138 | 0.7385 | **+0.0248** |
+| imp2 seed 1 | 0.7198 | 0.7459 | **+0.0261** |
+
+- The leak is real and inflates the leaky-mask scores of both models trained with it by
+  ~0.017–0.019 IoU. imp1's mirror-by-construction decoder does **not** exploit it more than
+  the baseline had already learned to.
+- imp2 is the only checkpoint better under leak-free evaluation and the worst under leaky
+  masks — both signs as predicted, replicated across its seeded runs.
+
+### 4. Task-1 physics, five models on the identical 28 designs
+
+Common passivity-clean intersection, one shared shuffled permutation:
+
+| model | real err | shuffled | med. margin err | real corr | med. margin corr | win err/corr | sign p err/corr |
+|---|---|---|---|---|---|---|---|
+| v2 | 0.4482 | 1.156 | −0.341 | **+0.777** | **+0.286** | 22/28 · 23/28 | 3.7e−3 · 9.1e−4 |
+| base v1 | 0.4519 | 1.201 | −0.264 | +0.766 | +0.236 | 22/28 · 21/28 | 3.7e−3 · 0.013 |
+| imp2 | 0.4754 | 1.182 | −0.343 | +0.755 | +0.181 | 21/28 · 20/28 | 0.013 · 0.036 |
+| imp1 | 0.5006 | 1.253 | **−0.346** | +0.657 | +0.132 | 22/28 · 19/28 | 3.7e−3 · 0.087 |
+| MetaDiT-S | 0.5497 | 0.962 | −0.275 | +0.606 | +0.183 | 24/28 · 22/28 | 1.8e−4 · 3.7e−3 |
+
+- **All five beat the shuffled null.** Ranking on absolute agreement: v2 ≈ base v1 > imp2 >
+  imp1 > MetaDiT-S; imp1's correlation is only marginally significant (p=0.087).
+- On the models' own sets, imp2's half-mask correlation (+0.810) is the best of the five.
+- Supersedes the earlier "v1 full-mask is not significant" caveat: on matched subsets it is
+  significant (p=6e−5 at n=30, p=3.7e−3 at n=28).
+
+### 5. Phase 2 re-specified — the targets were unreachable, and fixing that does not rescue it
+
+- **The defect:** the original set A sat **1.87** from the nearest realizable spectrum in the
+  evaluator's normalized-L1 units against a corpus self-NN density of ~0.33 (27× further), and
+  70 % of the way to the "unrelated spectra" scale (2.73); set B sat at 4.27, beyond unrelated.
+  Every prior phase-2 decode was scored against a target no corpus geometry can realize.
+  Roughness — the generator's original screen — does not detect this.
+- **The fix:** `_make_feasible_spectra.py` screens on two metrics (normalized L1 and a
+  scale-free correlation) and accepts A′ only near the manifold: **l1n 0.348 (corpus 0.331),
+  corr 0.96**; B′ remains infeasible (l1n 4.49) as the control.
+- **The result (same instrument, same null):**
+
+| arm | real err / corr | shuffled | median margin err / corr | sign p |
+|---|---|---|---|---|
+| JEPA v1 (n=19) | 0.714 / +0.502 | 0.706 / +0.652 | +0.060 / −0.075 | 0.65 / 0.17 |
+| JEPA v2 (n=19) | 0.691 / +0.549 | 0.702 / +0.625 | +0.093 / −0.119 | 0.36 / 0.65 |
+| MetaDiT-S (n=23) | 0.722 / +0.402 | 0.689 / +0.617 | +0.033 / −0.176 | 0.40 / 0.40 |
+
+- Absolute agreement improves substantially on feasible targets (v1 0.861 → 0.714; v2 0.849 →
+  0.691), so the unreachable benchmark *was* inflating the numbers. **But every model still
+  fails the fair control** — a mismatched realizable target is explained just as well — and
+  MetaDiT's correlation margin is the worst of the three.
+- **Corrected verdict:** the phase-2 negative is a property of the single-shot
+  spectrum→geometry formulation, not of our architecture and not of the benchmark's targets.
+
+### 6. What is NOT established (additions)
+
+- ~~imp1/imp2 battery numbers are 3 seeds but on the n=512 benchmark subset †; the full-split
+  (17,489) re-measure is owed before their MAE is compared with base's 0.0490.~~
+  **Closed by §7** (2026-10-16): imp1 0.0524 ± 0.0014, imp2 0.0522 ± 0.0028 on the full split,
+  both worse than base v1's 0.0490 ± 0.0013.
+- imp1's and imp2's physics used seed-0 checkpoints only; the other seeds have no Meep pass.
+  *(still true)*
+- imp2's gate-B edge (all three seeds ≥ base's best) is small and offset by gate A: a trade,
+  not an improvement. *(still true)*
+- ~~The task-3 harness fix and the gate-8 stratified test remain open, as in the block above.~~
+  **Both closed** (2026-10-16): gate 8 is answered for every arm (§8) and the task-3 passivity
+  gate was corrected and its surviving row characterised (§9, §10). The task-3 harness fix that
+  was *prescribed here* (an identical ringdown window) turned out to be the wrong diagnosis —
+  see §9.
+
+### 7. Variants re-measured on the full test split (resolves †)
+
+Scenario A, the whole 17,489-item test split — the same protocol as the baseline's
+0.0490 ± 0.0013 (base seeds 0.0500 / 0.0494 / 0.0476):
+
+| variant | MAE (3 seeds) | per-seed | vs base v1 |
+|---|---|---|---|
+| **imp1** | **0.0524 ± 0.0014** | 0.0531 / 0.0508 / 0.0533 | **+7.0 %; every imp1 seed worse than every base seed** |
+| **imp2** | **0.0522 ± 0.0028** | 0.0519 / 0.0496 / 0.0551 | +6.5 %; 2 of 3 seeds above base's range |
+
+- **Both variants are worse than base v1 on fidelity** once measured on the full split.
+  imp1's deficit is a complete per-seed separation and lines up with its CI-separated gate-A
+  deficit — the mirror decoder is a coherent negative.
+- imp2's spread (0.0496–0.0551) is twice base's; its gate-B edge (0.9824 vs 0.9772, every seed
+  ≥ base's best) is therefore bought with MAE: a trade, not an improvement.
+- Method note: the n=512 subset read understated both variants' deficit (imp2's seed 2 reads
+  0.0503 on the subset and 0.0551 on the full split) — subset comparisons flatter.
+- Supersedes the "inconclusive †" rows in §§1–2 above; the gate and scalar columns there stand.
+
+### 8. Gate 8 — stratified real / null / shuffled (the plan's critical gap)
+
+`scripts/diagnostics/gate8_stratified.py`, n=512 per evaluation seed × seeds {3,4,5}
+(1,536 pooled samples per stratum), paired per-sample win rate `real < shuffled` against the
+0.75 threshold, bootstrap CI on the paired difference (5,000 resamples). Strata: *easy*
+= mask ratio 0.25 with all scalars known; *hard* = mask ratio 1.00 with all scalars unknown
+(the mandated gate).
+
+| checkpoint | easy win rate | easy paired diff | **hard win rate** | hard paired diff (95 % CI) |
+|---|---|---|---|---|
+| **base v1** | 0.8945 | +0.1786 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
+| imp1 s0 | 0.8717 | +0.1674 | **0.9935** | +0.4964 [+0.4373, +0.5511] |
+| imp2 s0 | 0.9023 | +0.2051 | **0.9948** | +0.5000 [+0.4244, +0.5711] |
+
+- **The gate passes for all three checkpoints, decisively.** Gate 8 — "real must beat shuffled
+  in physics-consistency, stratified by regime, gated on the hard stratum" — was the validation
+  plan's *critical* gap (the suite covered real-vs-null only, unstratified). Answer: in the
+  hard stratum the true spectrum beats a deranged one on 99.4–99.7 % of samples, with the CI
+  nowhere near 0.5. The goal-ignoring collapse the plan was built to catch is **not present**.
+- **The hard stratum is where conditioning is strongest, not weakest** (mean error real 0.129
+  vs shuffled 0.62 vs null 0.53): with every geometry token and all three scalars masked, the
+  spectrum is the only signal the predictor has and it clearly uses it. The easy stratum's
+  lower win rate (0.87–0.90) reflects the visible context carrying the answer, not a defect.
+- Real-vs-null alone would have been the weaker instrument here: null distance is +0.42 to
+  +0.43 in the hard stratum while the shuffled margin is +0.50 — the two agree in direction,
+  but only the shuffled control rules out the generic "predictions move when any input moves"
+  explanation.
+- Ranking on the hard gate: base v1 0.9974 > imp2 0.9948 > imp1 0.9935 — ordering consistent
+  with the fidelity results (base best), and all three far above threshold.
+
+**Completed 2026-10-16 across the whole ladder** (same instrument, n=512 × eval seeds
+{3,4,5} = 1,536 pooled per stratum, threshold 0.75), which closes the "not established" gap
+recorded below:
+
+| arm | trainable | easy win | **hard win** | hard paired margin (95 % CI) |
+|---|---|---|---|---|
+| **S0 tiny** | 2,193,476 | 0.8776 | **0.9935** | +0.4915 [+0.4160, +0.5626] |
+| S1 small | 4,233,092 | 0.8809 | 0.9935 | +0.5062 [+0.4667, +0.5473] |
+| S2 slim | 8,143,364 | 0.8867 | 0.9902 | +0.4925 [+0.4200, +0.5614] |
+| base v1 | 11,403,012 | 0.8945 | **0.9974** | +0.5082 [+0.4966, +0.5206] |
+| imp1 s0 | 11,565,444 | 0.8717 | 0.9935 | +0.4964 [+0.4373, +0.5511] |
+| imp2 s0 | 11,403,012 (mask change only) | 0.9023 | 0.9948 | +0.5000 [+0.4244, +0.5711] |
+| **v2 (sched_fix)** | 11,403,012 | 0.8822 | **0.9915** | +0.4997 [+0.4571, +0.5413] |
+| L1 wide | 19,897,220 | 0.8848 | 0.9922 | +0.4952 [+0.4203, +0.5658] |
+
+- **Every arm passes, and the hard-stratum rate is nearly flat across a 9.1× parameter range**
+  (0.9902–0.9974 from 2.19 M to 19.90 M; binomial SE ≈ 0.0021 at n=1,536, so only base-vs-S2/L1
+  separates at ~2–3σ and the rest tie). Goal-conditioning quality is therefore
+  **capacity-insensitive** on this ladder — the same shape as the physics gate, which was flat
+  across the size rungs. A smaller model is not paying for its size in spectrum conditioning.
+- **v2 is the useful counter-case**: the arm whose length-proportional staging *failed* its MAE
+  gate (0.0531 vs 0.0490) still passes gate 8 at 0.9915, i.e. the schedule change cost fidelity
+  without damaging spectrum conditioning. Its easy stratum is the weakest of the eight
+  (+0.1490, CI [+0.1395, +0.1587]), which is consistent with it being the weaker arm overall.
+- **v2's checkpoint identity was confirmed, not assumed from a filename.** The local copy is
+  `schedfix_ckpt/schedfix/seed0.pt` (both local copies byte-identical, md5 `a3ac6228`), its
+  architecture key-matches the shipped config (0 missing trainable keys, 0 unexpected, 0 shape
+  mismatches), the ledger already calls it "`sched_fix` (v2)", and its full-split scenario-A MAE
+  reproduces the recorded v2 seed-0 value **exactly (0.0507)** rather than base v1's seed values
+  (0.0500 / 0.0494 / 0.0476). The MAE and gate-8 numbers above therefore belong to a checkpoint
+  whose provenance is traceable on four independent grounds.
+- **Capacity does show up in absolute error, not in the win rate.** S0's hard-stratum real error
+  is 0.1424 against base's 0.1289 (and its MAE is 0.0564 vs 0.0490), so the *ranking/consistency*
+  of the conditioning survives shrinking while the *magnitudes* degrade — worth stating, because
+  a flat win rate alone could be misread as "size does not matter".
+- S0's checkpoint came from the Kaggle kernel output
+  (`akashkesav/metasurface-jepa-scale-s0-tiny`), key-diffed against
+  `configs/scaling/unified_s0_tiny.yaml` before use: 0 missing trainable keys, 0 unexpected keys,
+  0 shape mismatches (only the 106 frozen released-encoder tensors absent, as by design).
+- The easy stratum (0.87–0.90, no CI anywhere near threshold) behaves as before: with most of
+  the geometry visible the context carries the answer, so the *relative* margin is smaller even
+  though the absolute error is much lower.
+- Still not established: nothing on this ladder — the table now covers every rung S0–L1 plus
+  base, both variants and the `sched_fix` (v2) arm, and the original scaling-arms caveat is
+  closed. The hard-stratum numbers remain eval-seed means of one checkpoint per arm, not 3
+  training seeds.
+
+### 9. CORRECTION — the task-3 passivity gate was measuring itself, not the models
+
+**The claim this replaces.** §3 explained the |T| > 1 rows as a measurement artefact in which
+the sample and its empty-cell reference "end on different field-decay windows", and prescribed
+"an identical ringout window for the run/reference pair" as the fix. That was a hypothesis
+stated as a finding. It was then implemented and tested, and it is **wrong**.
+
+**Refutation.** The measured window mismatch was real and large — the affected designs ring
+for up to 470 time units while the reference adopted from `runs/t1/ref.json` stops at 105.2, a
+4.5× difference — so the hypothesis was plausible. Four sets (`v1/v2 × spec_m20/spec_p20`)
+were re-run with one shared explicit post-source window (`--ring-fixed 493.5`), sample and
+reference integrated over the identical window. Result: **every peak moved by less than
+0.001** (v2 spec_m20: 1.0218–1.0309 before, 1.0217–1.0308 after; v1 spec_m20: 0.9985–0.9994
+before, 0.9984–1.0006 after). The excess is not window-related.
+
+**The measured cause, from the stored curves only (no new FDTD).**
+
+1. *The denominator is a source spectrum spanning ~4.4 decades.* Every stored reference — two
+   files, two scalar combos — is the **identical** smooth curve: 2.77e-4 of its band median at
+   ω = 0.10, 12.17× at ω = 0.1517, 1.11e-3 at ω = 0.20. It does not move with (l, h, r), which
+   is what an empty air cell must look like: it is the source's own spectrum. The gate takes
+   `max` over the whole band, so it includes frequencies where the denominator is 1e-4 of the
+   band centre — where the ratio is noise over noise. Measured at every recorded peak, the
+   denominator sat at 2.8e-4 to 4.8e-4 of its band median.
+2. *The channel that exceeds 1 is not an energy quantity.* The harness scores
+   `max(flux ratio, eigenmode-coefficient ratio)`. The second is `a_s/a_e` from
+   `get_eigenmode_coefficients`, which MEEP normalises by the mode of the geometry at the
+   monitor — different for an air cell and for a cell containing a slab — so it is not a
+   transmission coefficient and |T| ≤ 1 does not apply to it. It is exactly the channel that
+   exceeds 1 at *well-conditioned* frequencies for v2 (depth 2.1–2.7× median).
+
+**Corrected verdicts** (flux channel only, i.e. the energy statement; denominator floor 1e-2
+of band median, throat of the band excluded; floor swept 0 → 5e-2 and the verdicts are stable):
+
+| set | flux peak range | verdict vs 1.02 | what changed |
+|---|---|---|---|
+| `v1_B_true` | 0.918–0.985 | pass | unchanged |
+| `v1_spec_m20` | 0.998–0.999 | pass | was "benign artefact" — it is the correct value for a near-empty decode vs air |
+| **`v1_spec_p20`** | **1.026–1.193** | **still fails** | survives every correction; 1.026 even at the 5e-2 floor |
+| `v2_B_true` | 0.908–0.976 | pass | the 1.2584 outlier was a band-edge denominator |
+| `v2_spec_m20` | 0.996–0.997 | **pass** | its 1.022–1.031 excess was entirely mode-channel |
+| `v2_spec_p20` | 0.989–0.994 | **pass** | its 1.070–1.096 excess was entirely mode-channel |
+
+So **two of the three excluded rows are recovered** (both v2 rows — the models are fine; the
+gate was not), one row (`v1_spec_p20`) remains a genuine finding at 1.026–1.193, and the
+`v1_spec_m20` "pinned null" is reclassified as a correct measurement rather than an artefact.
+
+**What was not established at the time of writing.** Whether `v1_spec_p20`'s excess is
+physics or the instrument's own offset. The control below settles it (job `642465`, the
+harness applied to an **empty** cell, i.e. sample and reference physically identical, so the
+reading is the statistic's own error).
+
+**Control result (job `642465`, 3 of 4 runs; the fourth adds nothing).** The empty cell —
+sample and reference physically identical — reads **exactly 1.0000**, reproducibly:
+
+| run | raw max | mode channel | flux-only @1e-2 | flux-only @5e-2 |
+|---|---|---|---|---|
+| `m20_a` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| `m20_b` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| `p20_a` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+Run-to-run spread: **0.0000**. Three consequences:
+
+1. **The statistic is exact for an identical system**, so the 1.02 tolerance *is* resolvable
+   and the gate is not noise-limited. The `v1_spec_p20` excess is therefore a **real measured
+   difference**, not an offset of the instrument — it is the one row of the three that
+   survives every correction.
+2. The mode channel also reads exactly 1.0000 on identical geometry, which confirms the
+   explanation above: its excesses appear only when the geometry *differs* between sample and
+   reference, i.e. they come from the per-geometry normalisation, not from noise.
+3. What remains open is the *origin* of `v1_spec_p20`'s difference and whether it should be
+   attributed to the model at all. It is not an instrument offset, but a slab changes the
+   field profile reaching the PML, so a PML-reflection systematic is still the leading
+   explanation for a few-percent flux excess. The test is a single `v1_spec_p20` design re-run
+   at higher resolution: if the excess shrinks with resolution it is a solver-setup artefact
+   and the row stays unquotable; if it holds it is a property of those decodes and becomes a
+   real finding about v1's +20 % scalar row. No passivity claim on this row in either
+   direction until that run is in.
+
+**Harness status.** `--ring-fixed` (shared window) is retained: it is correct practice for
+paired comparisons and is now guarded so protocols can never be mixed, even though it is not
+the fix for this. The gate itself still needs the two corrections above wired in (flux-only
+scoring, conditioned-band evaluation) before any future run's `passivity_ok` is trustworthy.
+
+### 10. The surviving `v1_spec_p20` excess — resolution axis exhausted, row not quotable
+
+`v1_spec_p20` is the one row that survives every correction, so its origin decides whether it
+is a finding about the model or about the solver. The empty-cell control rules out instrument
+offset (identical system reads exactly 1.0000), leaving discretisation/boundary effects. One
+variable was varied — resolution — on three designs spanning the observed range, with the
+res-32 replicas reproducing the stored values bit-for-bit first (so the comparison is
+same-code).
+
+| design | res 32 | res 48 | res 64 | vs 1.02 |
+|---|---|---|---|---|
+| `sym00` (mildest) | 1.0300 | 1.0311 | (not run) | still over |
+| `sym03` (worst) | 1.1063 | 1.0835 | (not run — see below) | still over |
+| `sym05` | 1.1639 | **1.0701** | **1.0929** | still over at all three |
+
+Corrected statistic (flux-only, conditioned band). The raw statistic is unstable at every
+resolution — `sym03` falls 2.1141 → 1.3086 while `sym05` rises 1.1748 → 1.3186 → 1.9108 —
+which is further evidence that the raw number measures the band edges rather than the sample.
+
+- **The resolution axis is now exhausted, and it does not converge.** Read from two designs the
+  pattern looked like convergence to 1, and the first draft of this section proposed a mechanism
+  for it (the PML is a fixed 0.5 length units, i.e. 16/24/32 pixels at res 32/48/64, so a
+  thicker absorber should reflect less). The next two measurements refuted both: `sym00` is
+  **exactly stable** (1.0300 → 1.0311, i.e. unchanged) and `sym05` is **non-monotone**
+  (1.1639 → 1.0701 → **1.0929**, and at the strict 5e-2 floor 1.0214 → 1.0722). A boundary
+  effect that shrinks with absorber thickness cannot produce a stable 3 % on one design and an
+  up-tick on another.
+- **What survives every measurement**: the excess is above the 1.02 tolerance at **every**
+  resolution tested (32/48/64) and on **every** design tested (1.026–1.19 at floor 1e-2), it is
+  not an offset of the instrument (identical-system control reads exactly 1.0000), and it is a
+  measurement-side quantity on near-empty decodes (air reference vs a lossy near-empty sample,
+  which cannot transmit more than air). It is therefore **not quotable as a property of the
+  model**, and the row stays **excluded** — no claim about v1's +20 % scalar row in either
+  direction.
+- **Disclosure: `sym03`'s res-64 run was skipped by my own guard.** The follow-up job skipped
+  any design whose output file already existed, and the first job had left `res64_k3.json` as a
+  reference-only file (written before its design run was cancelled) — a reference-only file is
+  indistinguishable from a completed run by existence alone. I have **not** re-run it: with
+  `sym00` stable and `sym05` non-monotone, a third design on this axis cannot settle the
+  question, and 4 h of FDTD for another point in the same band is not a good trade. The record
+  says what was measured and what was skipped, rather than implying four points.
+- **The proper fix is not more resolution points.** `|T| <= 1` is a statement about the
+  *incident* field, and this harness has no incident monitor: it normalises by an empty-cell
+  run, which is a different physical system (and, at the band edges, a poorly conditioned one).
+  Adding a flux monitor *before* the sample and normalising by it makes the passivity statement
+  well-posed without any conditioning heuristic. That is a harness change which invalidates
+  comparability with every existing t3 curve (they would need re-running), so it is recorded
+  here as the recommended next step rather than adopted unilaterally.
+
+## 2026-10-19 — imp2 through phases 2 and 3 (the three-phase comparison)
+
+Until now imp2 had only ever been run through phase 1, so the requested three-phase comparison
+did not exist. Filled in on the cluster with the same instruments as the v1/v2/MetaDiT numbers:
+same worker (`worker.sh`), same shared empty-cell reference (`runs/t1/ref.json`), same
+`--max-ring 2500`, and the same **corrected A′/B′ targets** — regenerated locally and verified
+against this ledger's recorded screen (A′ l1n 0.3480 / corr 0.9592, B′ 4.4850, corpus 0.3307)
+before use, so imp2's phase 2 is scored on exactly the targets the other three arms were.
+
+| phase | metric | base v1 | imp2 | reading |
+|---|---|---|---|---|
+| **1** geometry-first (28 designs) | real err / corr | **0.4519 / +0.766** | 0.4754 / +0.755 | base ahead |
+| | vs shuffled, corr margin | **+0.236** (p 0.013) | +0.181 (p 0.036) | both beat the null |
+| | win rate err · corr | **22/28 · 21/28** | 21/28 · 20/28 | base ahead |
+| **2** spectrum-first (A′, n clean) | real err / corr | 0.714 / +0.502 | **0.689 / +0.547** | imp2 marginally better on absolute |
+| | vs shuffled, corr margin | −0.075 (p 0.17) | **−0.133 (p 0.0413)** | **imp2 fails significantly; base does not** |
+| | B′ control (infeasible) | spells failure | 1.7985 vs 0.6509 (p 3e−5) | both, as designed |
+| **3** scalar sensitivity | given-scalars err / corr (n=9-10) | **0.396 / +0.892** | 0.5639 / +0.850 | base clearly ahead |
+| | given-scalars win err · corr | 6/10 · 6/10 | 7/9 · **5/9** (p=1) | imp2's corr is at chance |
+| | geometry-side IoU (−20 % / +20 %) | 0.153 / 0.145 | 0.095 / 0.083 | imp2 collapses harder |
+
+- **Phase 1 is essentially parity, with base slightly ahead** — same shape as the battery.
+- **Phase 2 is a negative for both, and imp2's is the more clearly negative of the two.** Its
+  absolute agreement is a touch better (0.689 vs 0.714) but the fair control is decisive: a
+  *mismatched* target explains imp2's decode **significantly better** than the real one
+  (correlation margin −0.133, p=0.041), whereas base's failure is not significant (−0.075,
+  p=0.17). So on this phase imp2 is not an improvement; the evidence against it is stronger.
+- **Phase 3 is where imp2 loses clearly.** Given the true scalars it is worse on both error and
+  correlation, its correlation win rate is exactly chance (5/9, p=1), and under perturbed
+  scalars its geometry-side collapse is deeper (IoU 0.095/0.083 against base's 0.153/0.145).
+  Two of its three perturbed rows are unmeasurable, for the reasons this ledger already
+  documented for the other arms: `spec_m20` reads **identically** to its shuffled null
+  (3.6031 vs 3.6031, the pinned-decode pathology of §3), and `spec_p20` has **0/10**
+  passivity-clean designs (raw peaks 1.024–1.733) and is excluded outright.
+- Passivity census of imp2's five sets (raw peaks, pre-correction definition): A′ 20/24 clean
+  with 3 ringdown-capped and one catastrophic peak (1.5e8), B′ 16/24, `B_true` 9/10 (max 37.9),
+  `spec_m20` 10/10 (pinned at 0.999–1.000 — the benign form), `spec_p20` 0/10. Those failures
+  are the known band-edge/mode-channel artefact of §9–§10, not new model defects.
+- **Net: imp2 does not beat base on any phase.** Phase 1 is a tie within noise, phases 2 and 3
+  are both worse — which matches its battery verdict (§2 of the 2026-10-15 block: gate B better,
+  gate A and MAE worse) and leaves its **leak-ablation result** as the one thing it genuinely
+  contributes.
+
+### Follow-up — is the phase-2 *target generation* wrong? No, and the error decomposes
+
+The operator suspected the target generation. Three checks say it is sound, and the third
+reframes the failure:
+
+| check | measurement | verdict |
+|---|---|---|
+| passivity | A′ peak \|T\| **0.994** (corpus 1.000); B′ clipped at 1.000 | no impossible targets |
+| causality | real-weight linear combination of causal responses ⇒ causal (KK is linear) | consistent |
+| structural realism | roughness **0.91×** corpus, peak/median **1.02×**, spectral features **1.33×**; NN distance 0.348 vs the corpus's own self-density 0.331 | as deep in the corpus as real samples |
+| decode not degenerate | imp2's A′ decodes at **occupancy 0.397** (corpus ≈0.427); surrogate error **0.427** plausible vs **3.21** implausible | model separates the two classes |
+
+**The error then decomposes, and neither obvious culprit dominates.** For the *same* decoded
+geometry, measured against its Meep result:
+
+| leg | imp2, A′ | imp2, B′ (control) |
+|---|---|---|
+| surrogate → target (the model's own fit) | 0.427 | 3.211 |
+| **surrogate → Meep** (same geometry) | **0.515** (median 0.425) | 0.288 |
+| target → Meep (the phase-2 number) | 0.689 | 1.799 |
+
+- The surrogate disagrees with full wave by **0.515** on geometries it is asked to judge, and the
+  model misses the target by 0.427 *in surrogate space*: two comparable legs, summing to the
+  observed 0.689. So phase 2's failure is **not** the target generator and **not** the surrogate
+  alone — the instrument's own transfer error is the same size as the effect being measured, which
+  is precisely why a shuffled target is indistinguishable from the real one.
+- The B′ control validates the instrument: surrogate misfit is only 0.288 there while the target
+  error is 1.80, i.e. the surrogate is sound and the geometry genuinely cannot radiate a garbage
+  target.
+- **Consequence:** phase 2 as constructed cannot resolve inversion quality. Reducing one leg is
+  not enough — the practical route is **Meep-in-the-loop refinement** (which bypasses the
+  surrogate leg entirely), not a better target generator or a larger model.
+- Caveat: the Meep→CST convention's 0.1138 held-out error applies to every number in the table
+  equally, so it cannot create this decomposition, but it is part of the floor.
+
+## 2026-10-28 — the seed test: Meep-as-judge candidate selection · NEGATIVE
+
+The last experiment on the spectrum→geometry line (operator request, 2026-10-26): if the
+surrogate leg is what kills phase 2, then measuring candidates with full wave and *selecting*
+on the measurement should bypass it. That is the Meep-in-the-loop route the 2026-10-19 block
+named as the way forward. It was run; it does not rescue the formulation.
+
+- cluster `paramsakti`, job `657870`, 18 tasks, **90/90 solves completed**, 15:58–20:39, no srun
+  failures; 13/90 designs fail passivity (9 of those ringdown-capped, peaks to 8.5e10 — the known
+  band-edge/mode artefact of §9–§10, not new), concentrated at the higher guidance strengths
+- decode `_seedtest_decode.py` — frozen base v1, 18 targets from the A′ screened set
+  (l1n 0.348 vs the corpus's own 0.331), **5 candidates per target** by CFG guidance strength
+  `w ∈ {0.5, 0.75, 1.0, 1.25, 1.5}` (`z_null + w·(z_real − z_null)`)
+- solve `_seedtest_job.sh` — same worker, shared empty-cell reference (`runs/t1/ref.json`) and
+  `--max-ring 2500` as every phase-2 number, so the errors are on that scale
+- score `_seedtest_score.py` (selection), `_seedtest_diag.py` (pool geometry), `_seedtest_retrieval.py`
+  and `_seedtest_fe.py` (all-pairs retrieval, target fixed effects)
+
+### The control had to be rebuilt before any budget was spent
+
+The first draft decoded a *separate* set from shuffled targets and selected per slot. That
+control is degenerate: a derangement across slots makes the shuffled statistic an exact
+permutation of the real one, so the means are identical **by construction** and the sign test
+has no power — which is exactly what the decode printed (identical real/shuffled numbers at
+every `w`). The corrected form keeps the **same five geometries** and shuffles only the target
+the errors are scored against, which also halved the cost (180 → 90 solves). A model carrying
+no target information gives a margin of zero in expectation under this control.
+
+### 1. Selection — null
+
+| quantity | value |
+|---|---|
+| real mean / median err | 0.6342 / 0.6106 |
+| shuffled mean / median err | 0.6749 / 0.5324 |
+| paired margin | **+0.0408**, 95 % CI **[−0.1210, +0.2216]** |
+| median margin | +0.0087 |
+| win rate | **10/18** |
+| sign test | **p = 0.81** |
+| guidance chosen | w050 ×8, w100 ×5, w125 ×3, w075 ×2 |
+
+Per guidance strength, no selection (passivity-clean `n` varies):
+
+| w | vs own target | vs shuffled | margin |
+|---|---|---|---|
+| 0.50 | 0.8176 | 0.8222 | +0.0045 |
+| 0.75 | 0.7707 | 0.7542 | −0.0166 |
+| 1.00 | 0.7444 | 0.8437 | +0.0993 |
+| 1.25 | 0.7887 | 0.8306 | +0.0419 |
+| 1.50 | 0.8498 | 0.8066 | −0.0432 |
+
+The single-shot reference (w = 1.0, n = 14 clean) is the same null: margin +0.0993, 7/14 wins,
+p = 1. n = 18 can only exclude large effects, so the next check is the well-powered form of the
+same question.
+
+### 2. All-pairs retrieval — also null, at 1,386 pairs
+
+Every one of the 77 passivity-clean designs was scored against **all 18 targets** (not just its
+own), so the question becomes: is the target a design was decoded for its best match among the
+18? Per-target difficulty is removed by a two-way (design × target) fixed-effects decomposition,
+and the p-value comes from 20,000 derangement permutations of the own-target labels.
+
+| quantity | value |
+|---|---|
+| designs × targets | 77 × 18 = **1,386 pairs** |
+| mean rank of own target (raw) | 10.08 (uniform 9.50) |
+| mean rank of own target (fixed effects) | **9.36** |
+| permutation null | 9.51 ± 0.99 |
+| p (better than chance) | **0.44** |
+| own target is the residual-best | 5/77 (chance 4.3) |
+
+So the geometry decoded for target k is an ordinary member of k's row: no target-specific
+information is detectable at this sample size.
+
+### 3. Why — the candidate pool varies along a target-agnostic axis
+
+The null is not an artefact of having nothing to select between. The five candidates of a target
+*are* distinct, and their measured errors *do* spread:
+
+| check | value |
+|---|---|
+| within-target IoU (same slot, different `w`) | **0.849** (min 0.445) |
+| between-target IoU (same `w`, adjacent slot) | **0.694** (min 0.248) |
+| within-target std of the five measured errors | 0.1202 |
+| mean selection margin (§1) | +0.0408 |
+| spread ÷ margin | **2.9×** (0.1202 ÷ 0.0408) |
+| rank corr, real vs shuffled error vectors | **+0.088** |
+| same argmin, real vs shuffled | 8/17 |
+
+The pool has real geometric diversity and real error spread; what it does not have is a
+*target-specific* axis. Guidance strength mostly trades global fill (mean occupancy 0.469 at
+`w`=0.5 → 0.384 at `w`=1.5), which is why the error ranking of the five candidates barely
+depends on which target they are scored against.
+
+### 4. Guidance strength costs physicality
+
+Passivity-clean designs out of 18:
+
+| w | 0.50 | 0.75 | 1.00 | 1.25 | 1.50 |
+|---|---|---|---|---|---|
+| clean | **18/18** | 17/18 | 14/18 | 13/18 | 15/18 |
+
+Higher guidance buys spectrum push at the cost of realizable designs — an argument against
+treating CFG strength as a free diversity knob for this decoder.
+
+### Verdict
+
+The 2026-10-19 block concluded that phase 2 could not be resolved because the surrogate leg
+(0.515) was the same size as the effect, and that the practical route was **Meep-in-the-loop
+refinement**. This is that experiment, run with the measurement as the judge and the surrogate
+leg removed from the selection loop entirely. The answer is still null, and the well-powered
+retrieval form of the question is null too.
+
+That closes the line rather than leaving it open: the limitation is the single-shot
+spectrum→geometry map itself, not the surrogate that was judging it. No mechanism is added in
+response — per `AGENTS.md`, a failed gate is recorded, not worked around.

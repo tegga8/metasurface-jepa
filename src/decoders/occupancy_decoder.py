@@ -62,14 +62,32 @@ class OccupancyDecoder(nn.Module):
         hidden:          token embedding dimension (192).
         base_dim:        first conv feature count (hidden // 2 by default).
         scalar_hidden:   hidden width of the shared scalar-conditioning MLP.
+        variant:         "base"     — 16→32→64 upsample chain (shipped base v1;
+                                      the default, byte-identical state dict).
+                         "quadrant" — emit a 32×32 quadrant and build the 64×64
+                                      field by mirroring it, i.e. the corpus's own
+                                      output parameterisation (MetaDiT's
+                                      restore_structure mirrors a 32×32 quadrant,
+                                      which is why 100% of the released corpus is
+                                      bit-identical under fliplr/flipud and why
+                                      MetaDiT's bodies are clean: holes 0.21 /
+                                      mirror 1.000 against our 1.63 / 0.916).
+                                      Disclosed trade-off: outputs cannot be
+                                      asymmetric, so asymmetric OOD probes are
+                                      capped by construction (the released
+                                      dataset has no asymmetric designs).
+        depth:           number of FiLM blocks in the quadrant variant (1
+                         upsample + depth-1 refinement blocks at 32×32).
 
     No 3-channel geometry head: the output is occupancy logits [B,1,64,64].
     """
 
-    def __init__(self, hidden=192, base_dim=96, scalar_hidden=128):
+    def __init__(self, hidden=192, base_dim=96, scalar_hidden=128,
+                 variant="base", depth=2):
         super().__init__()
         self.hidden = hidden
         self.base_dim = base_dim
+        self.variant = variant
 
         # Shared small scalar-conditioning MLP feeding per-block FiLM heads.
         # INPUT CONVENTION (architecture_v5.md §3.2, audit B10): 6 numbers —
@@ -82,10 +100,20 @@ class OccupancyDecoder(nn.Module):
             nn.Linear(scalar_hidden, scalar_hidden),
         )
 
-        # 16x16 → 32x32 → 64x64.
-        self.block1 = _FilmBlock(hidden, base_dim, scalar_hidden)
-        self.block2 = _FilmBlock(base_dim, base_dim // 2, scalar_hidden)
-        self.head = nn.Conv2d(base_dim // 2, 1, kernel_size=3, padding=1)
+        if variant == "base":
+            # 16x16 → 32x32 → 64x64.
+            self.block1 = _FilmBlock(hidden, base_dim, scalar_hidden)
+            self.block2 = _FilmBlock(base_dim, base_dim // 2, scalar_hidden)
+            self.head = nn.Conv2d(base_dim // 2, 1, kernel_size=3, padding=1)
+        elif variant == "quadrant":
+            # 16x16 → 32x32, then refine at 32x32; the head emits the quadrant.
+            self.block1 = _FilmBlock(hidden, base_dim, scalar_hidden)
+            self.extra = nn.ModuleList([
+                _FilmBlock(base_dim, base_dim, scalar_hidden, scale_factor=1)
+                for _ in range(max(0, int(depth) - 1))])
+            self.head = nn.Conv2d(base_dim, 1, kernel_size=3, padding=1)
+        else:
+            raise ValueError(f"unknown decoder variant: {variant!r}")
 
     def forward(self, z, scalars):
         """Decode occupancy logits from predicted tokens.
@@ -113,9 +141,29 @@ class OccupancyDecoder(nn.Module):
 
         s = self.scalar_mlp(scalars)  # (B, scalar_hidden)
 
-        x = self.block1(x, s)
-        x = self.block2(x, s)
-        return self.head(x)
+        if self.variant == "base":
+            x = self.block1(x, s)
+            x = self.block2(x, s)
+            return self.head(x)
+
+        x = self.block1(x, s)          # (B, base_dim, 32, 32)
+        for blk in self.extra:
+            x = blk(x, s)
+        return mirror_quadrant(self.head(x))
+
+
+def mirror_quadrant(q):
+    """Build a 64×64 field from its top-left 32×32 quadrant by mirroring.
+
+    [ q        fliplr(q) ]
+    [ flipud(q) rot180(q)]  — exactly the corpus's own construction
+    (external/metadit/metric.py::restore_structure), so outputs live on the
+    same manifold as the released dataset by construction.
+    """
+    top = torch.cat([q, torch.flip(q, dims=[3])], dim=3)
+    bottom = torch.cat([torch.flip(q, dims=[2]), torch.flip(q, dims=[2, 3])],
+                       dim=3)
+    return torch.cat([top, bottom], dim=2)
 
 
 # Backward-compatible alias: the unified path's active decoder.

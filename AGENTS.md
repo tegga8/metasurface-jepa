@@ -92,6 +92,37 @@ remains:
   three variants — S1 small (`hidden 128 / geo 4 / pred 6`), S2 slim (`pred 4`), L1 wide
   (`hidden 256`) — each scored by the canonical battery at 70k × 3 seeds against the existing
   full-fidelity baseline. Not a general search; no variant ships without its recorded gate result.
+- **2026-10-05 — Phase 6 capacity study: S0 "tiny" added (~20 % of base trainable).** Operator
+  directive: "okay 20 percent it is of the original model make it as a part of the runs as
+  well". Fourth size rung `configs/scaling/unified_s0_tiny.yaml` (`hidden 96 / geo 4 / pred 4 /
+  scalar 64`; audited live **2,193,284 trainable = 19.2 %** of the base's 11,402,628; 0.46× step
+  cost), same protocol as the other rungs (70k × 3 seeds, canonical battery).
+- **2026-10-05 — length-proportional staging: `*_frac` keys supersede the 10k-era absolutes.**
+  Operator directive: "physics ramp is bad — review this and fix a better schedule". Review finding:
+  the physics/mask/multi-target windows were tuned at 10k steps (physics off 20 % / ramp 30 %) but
+  shipped as ABSOLUTE steps — in the 70k runs they compressed to off 2.9 % / ramp 4.3 % (physics
+  fully on from step ~5k for 93 % of training). Fix: `resolve_staging_steps()` — when a `*_frac`
+  key is present it overrides the absolute step with `round(total_steps × frac)`; shipped fractions
+  reproduce the 10k schedule bit-identically and give 70k runs off 14k / ramp 21k (full at 35k = the
+  designed 50 % mark). All runs completed before this commit used the v1 (compressed) schedule and
+  remain comparable among themselves; runs after it are the v2 schedule and are judged by their own
+  controlled arm (`kaggle/sched_fix`, gate: no regression vs the base 0.0490 ± 0.0013 /
+  0.9967-0.9772-0.9303). **Measured outcome (2026-10-06): gate FAILED — v2 0.0531 ± 0.0019
+  vs v1 0.0490 ± 0.0013 (every v2 seed worse than every v1 seed), gate C 0.905 vs 0.930.
+  The v2 schedule is NOT adopted; the shipped configs revert to the v1 absolutes and
+  `resolve_staging_steps` stays in code for future retunes. Recorded in
+  `docs/benchmarking/RESULTS.md` (Phase 6b).**
+- **2026-10-06 — Kaggle account routing: GPU work moves to `anosvol` via the WSL CLI.**
+  Operator directive: "the kaggle on this windows session is about to run out of usage on
+  the gpu — run it in the wsl kaggle". Effective state: the WSL CLI
+  (`~/meep_env/bin/kaggle`) is authenticated as **anosvol** (fresh OAuth login 2026-10-06;
+  the previous WSL anosvol token had been overwritten during the 2026-10-05 akashkesav
+  setup and was re-established by re-login). The Windows CLI remains **akashkesav** — use
+  it for status/output fetches of its existing kernels (its GPU quota is nearly
+  exhausted). `~/kaggle-akash` (WSL wrapper, outside the repo) runs the CLI temporarily as
+  akashkesav by swapping in the Windows token and syncing refreshes back. This supersedes
+  the akashkesav-only routing of new compute for GPU work; CPU-only kernels may run under
+  either account.
 - **2026-10-04 — split-ratio study: the dataset is re-split (data-contract change).** Operator
   directive: "no change in the dataset size … train and test split like 50:25:25 or 60:20:20 or
   40:40:20 rather than 80/20". The released 80:10:10 split remains the paper-referenced protocol;

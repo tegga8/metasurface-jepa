@@ -1,0 +1,19 @@
+{
+  "split": "test",
+  "test_index": 11749,
+  "n_test": 17489,
+  "MAE": 0.01141002681106329,
+  "AAE": 6.868836402893066,
+  "occupancy_iou": 1.0,
+  "occupancy_f1": 1.0,
+  "pred_occupancy_fraction": 0.49609375,
+  "true_occupancy_fraction": 0.49609375,
+  "scalars": {
+    "l_true": 2.5500001907348633,
+    "h_true": 0.5899999737739563,
+    "r_true": 4.599999904632568,
+    "l_pred": 2.6314187049865723,
+    "h_pred": 0.5823228359222412,
+    "r_pred": 4.516162872314453
+  }
+}

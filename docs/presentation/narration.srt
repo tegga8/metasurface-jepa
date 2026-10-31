@@ -1,0 +1,398 @@
+1
+00:00:00,000 --> 00:00:05,832
+A metasurface is a flat sheet, patterned at a scale smaller than the
+wavelength of light.
+
+2
+00:00:06,152 --> 00:00:14,936
+Each of those tiny structures delays the wave as it passes, so a sheet
+thinner than a human hair can focus, steer, or colour light.
+
+3
+00:00:15,256 --> 00:00:20,968
+Flat lenses, holograms, colour printing and beam steering all rely on them.
+
+4
+00:00:21,288 --> 00:00:29,592
+Designing one means choosing its geometry cell by cell: sixty four by sixty
+four, each cell empty or filled.
+
+5
+00:00:29,912 --> 00:00:34,880
+Here is the response we want: how the wave comes back, at every frequency.
+
+6
+00:00:35,200 --> 00:00:43,648
+The physics only runs the other way. From a structure we can compute the
+response; from the response, the structure is not unique.
+
+7
+00:00:43,968 --> 00:00:49,128
+Can a machine learn to design a structure from the electromagnetic behaviour
+we ask for?
+
+8
+00:00:50,700 --> 00:00:59,124
+In the forward direction the physics is well posed: give it a geometry and
+three global parameters, and it returns a spectrum.
+
+9
+00:00:59,444 --> 00:01:05,996
+The three parameters are the lattice period l, the meta-atom height h, and
+the refractive index r.
+
+10
+00:01:06,316 --> 00:01:13,348
+Inverse design reverses that arrow. We are handed the spectrum and must
+infer geometry and parameters.
+
+11
+00:01:13,668 --> 00:01:21,996
+The map is many to one. These two designs, from the released test set,
+produce spectra that differ by about one percent.
+
+12
+00:01:22,316 --> 00:01:28,508
+So the model must use the target response, the visible structure, and
+whichever parameters it knows.
+
+13
+00:01:30,100 --> 00:01:37,804
+The data is the released MetaDiT corpus: one hundred seventy four thousand,
+eight hundred eighty three samples.
+
+14
+00:01:38,124 --> 00:01:47,220
+Each sample pairs a sixty four by sixty four occupancy map with three global
+scalars and a two by three hundred one complex spectrum.
+
+15
+00:01:47,540 --> 00:01:52,556
+The release packs that into three image channels; the model factors it
+apart.
+
+16
+00:01:52,876 --> 00:02:02,044
+Geometry becomes one binary map, the scalars become three numbers with known
+flags, and the two uncertainties become separable.
+
+17
+00:02:03,633 --> 00:02:10,689
+Rather than predicting missing pixels directly, the model predicts the
+representation of the missing information.
+
+18
+00:02:11,009 --> 00:02:17,561
+Cut the geometry into a sixteen by sixteen grid of patches. Each patch
+becomes a token.
+
+19
+00:02:17,881 --> 00:02:25,633
+Hide some of them. A student network sees only what is visible, plus the
+target spectrum, plus whatever scalars are known.
+
+20
+00:02:25,953 --> 00:02:33,177
+A teacher sees the complete geometry and the true parameters, and produces a
+latent representation of the answer.
+
+21
+00:02:33,497 --> 00:02:38,201
+The student is asked to match that representation at the hidden positions.
+
+22
+00:02:38,521 --> 00:02:47,665
+That is the JEPA loss: the squared distance in latent space, with variance
+and covariance terms that keep the representation from collapsing.
+
+23
+00:02:47,985 --> 00:02:53,505
+Only afterwards does a decoder convert those latents back into physical
+geometry.
+
+24
+00:02:55,100 --> 00:03:00,692
+Here is the complete network. One width throughout: one hundred ninety two
+dimensions.
+
+25
+00:03:01,012 --> 00:03:10,516
+The occupancy encoder is a four by four patch embedding with stride four:
+sixty four squared pixels become two hundred fifty six tokens.
+
+26
+00:03:10,836 --> 00:03:15,444
+Six transformer blocks follow, each modulated by the scalars.
+
+27
+00:03:15,764 --> 00:03:24,284
+The scalar encoder is small: six inputs, a value and a known flag each,
+through a one hundred twenty eight wide trunk.
+
+28
+00:03:24,604 --> 00:03:28,540
+It emits six modulation pairs, and one summary token.
+
+29
+00:03:28,860 --> 00:03:35,292
+The modulation is FiLM: the feature is scaled and shifted, gamma times the
+feature plus beta.
+
+30
+00:03:35,612 --> 00:03:44,228
+The target spectrum passes through the released encoder, frozen and never
+trained, giving local features at all three hundred one points.
+
+31
+00:03:44,548 --> 00:03:52,588
+Two readouts: a mean-pooled global condition of three hundred eighty four
+dimensions, and sixteen learned goal tokens.
+
+32
+00:03:52,908 --> 00:04:03,924
+Fusion concatenates two hundred fifty six occupancy tokens, sixteen goal
+tokens projected to one hundred ninety two, and the scalar token: two
+hundred seventy three.
+
+33
+00:04:04,244 --> 00:04:12,020
+And now the spectrum is in the same space as the geometry: sixteen goal
+tokens, and a global physics condition.
+
+34
+00:04:12,340 --> 00:04:19,804
+The predictor holds two hundred fifty seven queries: one for every occupancy
+position, and one scalar query.
+
+35
+00:04:20,124 --> 00:04:32,628
+Each of its eight blocks does three things: the queries attend to each
+other, then read all two hundred seventy three context tokens — spectral
+goals included — then pass through an MLP.
+
+36
+00:04:32,948 --> 00:04:38,108
+The result is two hundred fifty six occupancy latents and one scalar latent.
+
+37
+00:04:39,633 --> 00:04:44,793
+The teacher is not trained by backpropagation. It is a moving average of the
+student.
+
+38
+00:04:45,113 --> 00:04:54,401
+After every optimiser step the teacher blends in the student, with tau
+rising from zero point nine nine six to zero point nine nine nine.
+
+39
+00:04:54,721 --> 00:04:59,857
+That slow copy is a stable target, and no gradient crosses the boundary.
+
+40
+00:05:00,177 --> 00:05:07,569
+Three targets come out of it: a stable geometry target, a
+spectrum-conditioned geometry target, and a scalar target.
+
+41
+00:05:07,889 --> 00:05:14,993
+The objective has three groups. First, latent learning: invariance,
+variance, covariance.
+
+42
+00:05:15,313 --> 00:05:23,689
+Second, direct supervision: occupancy cross-entropy, scalar error on the
+unknowns, and two cosine latent targets.
+
+43
+00:05:24,009 --> 00:05:29,385
+Third, the physics term — a hybrid objective, not pure self-supervision.
+
+44
+00:05:30,967 --> 00:05:32,839
+The latents become a design.
+
+45
+00:05:33,159 --> 00:05:46,215
+The occupancy decoder reshapes the two hundred fifty six tokens into a
+sixteen by sixteen grid, then upsamples to sixty four by sixty four. It
+predicts occupancy only, one channel.
+
+46
+00:05:46,535 --> 00:05:55,103
+The scalar decoder predicts the three parameters. Known parameters keep
+their supplied values; unknown ones use the prediction.
+
+47
+00:05:55,423 --> 00:06:05,455
+Only here, at the surrogate boundary, are the three geometry channels
+assembled: refractive index over five, height, and lattice period over
+three.
+
+48
+00:06:05,775 --> 00:06:10,959
+A frozen electromagnetic surrogate maps that geometry to a spectrum.
+
+49
+00:06:11,279 --> 00:06:18,263
+The weights are frozen, but the gradient flows back through the input, so
+the physics error trains the decoder.
+
+50
+00:06:18,583 --> 00:06:23,287
+Full-wave simulation is a separate evaluation tool, not part of training.
+
+51
+00:06:24,867 --> 00:06:35,787
+Training varies the problem: occupancy masked at twenty five, fifty, seventy
+five or one hundred percent, and scalars all known, mixed, or unknown.
+
+52
+00:06:36,107 --> 00:06:48,035
+Each step samples data, draws a mask, drops scalars, runs student and
+teacher, totals the losses, backpropagates, updates the student, then moves
+the teacher.
+
+53
+00:06:48,355 --> 00:06:55,291
+Physics ramps in from step two thousand to five thousand; the multi-target
+terms from step one thousand.
+
+54
+00:06:55,611 --> 00:07:05,403
+At inference the teacher and every loss are gone. The student and the frozen
+spectrum path remain, and the surrogate is only needed to score the result.
+
+55
+00:07:07,000 --> 00:07:10,048
+One model, three different conditioning problems.
+
+56
+00:07:10,368 --> 00:07:20,400
+Scenario A is pure inverse design. Every occupancy token is hidden and all
+three scalars are unknown, so only the target spectrum is given.
+
+57
+00:07:20,720 --> 00:07:30,464
+Scenario B hides half the geometry and gives one known scalar. The model
+combines partial structure, one parameter, and the target response.
+
+58
+00:07:30,784 --> 00:07:40,600
+Scenario C is a retrofit: a quarter of the geometry is hidden, the
+parameters are known, and the visible pixels must survive untouched.
+
+59
+00:07:40,920 --> 00:07:45,792
+Measured on that property, the visible region changes by exactly zero.
+
+60
+00:07:47,333 --> 00:07:58,925
+The model is small: eleven point four million trainable parameters.
+MetaDiT-S carries thirty two point six million — nearly three times as many
+— for higher error.
+
+61
+00:07:59,245 --> 00:08:03,277
+One forward pass, against five hundred denoising steps.
+
+62
+00:08:03,597 --> 00:08:14,733
+Three training seeds give a test MAE of zero point zero four nine zero, plus
+or minus zero point zero zero one three, and an AAE of twenty nine point
+five.
+
+63
+00:08:15,053 --> 00:08:28,589
+The gates ask: is the error with the correct target lower than with a
+shuffled one? The win fractions are zero point nine nine six seven, zero
+point nine seven seven two, and zero point nine three zero three.
+
+64
+00:08:28,909 --> 00:08:39,661
+The controlled ablation changes only the objective. Without the JEPA latent
+machinery, MAE rises to zero point zero nine two two, nearly twice as large.
+
+65
+00:08:39,981 --> 00:08:51,693
+Against our own reproduction of MetaDiT-S, same split and same surrogate,
+the unified model reaches zero point zero four nine zero against zero point
+zero eight zero three.
+
+66
+00:08:53,300 --> 00:09:01,292
+Why does this work? Because the spectrum is many to one: it fixes the
+response, not every pixel of the structure.
+
+67
+00:09:01,612 --> 00:09:07,876
+A generator that draws pixels spends capacity on detail the physics does not
+fix.
+
+68
+00:09:08,196 --> 00:09:16,548
+JEPA instead predicts a representation under the physics condition, and a
+variance term forbids the trivial answer of predicting nothing.
+
+69
+00:09:16,868 --> 00:09:26,132
+The hardest stratum shows why: with everything masked, the true spectrum
+beats a shuffled one on ninety nine point seven percent of items.
+
+70
+00:09:26,452 --> 00:09:32,284
+So one small network, in a single pass, turns a desired response into a
+design.
+
+71
+00:09:32,604 --> 00:09:44,004
+The same argument travels to inverse design in other fields, to scientific
+surrogates, and to world models — predict the state that matters, not every
+pixel of the future.
+
+72
+00:09:45,600 --> 00:09:48,720
+None of this is a diagram. These are the files.
+
+73
+00:09:49,040 --> 00:09:56,120
+The occupancy encoder is one convolution, then six blocks, each followed by
+the scalar modulation.
+
+74
+00:09:56,440 --> 00:10:04,456
+The forward pass builds the two token sets: two hundred seventy three
+context tokens, two hundred fifty seven queries.
+
+75
+00:10:04,776 --> 00:10:13,344
+Every GCLCT block is these lines: normalise, condition, self-attend,
+cross-attend, then an MLP.
+
+76
+00:10:13,664 --> 00:10:19,664
+And the physics loss decodes, assembles the three channels, and calls the
+frozen surrogate.
+
+77
+00:10:19,984 --> 00:10:22,984
+Every number in this film comes from these files.
+
+78
+00:10:24,599 --> 00:10:31,463
+One model, one width, three input streams, and a target that lives in
+representation space.
+
+79
+00:10:31,783 --> 00:10:39,559
+Eleven point four million parameters, one forward pass, and lower error than
+a diffusion model three times its size.
+
+80
+00:10:39,879 --> 00:10:47,103
+From a desired response, to a learned representation, to a candidate
+geometry, and back through physics.
+
+81
+00:10:47,423 --> 00:10:50,783
+Learning the representations behind physical design.
+

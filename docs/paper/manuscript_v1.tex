@@ -683,9 +683,11 @@ post-hoc symmetrisation would hide rather than prevent.
 \clearpage
 \begin{table}[h]
 \centering
-\caption{Controlled ablations on the canonical battery, measured on the full-resolution decoder configuration so that one factor changes at a time (test split for MAE, validation
-split for the scenario gates, three seeds each). Every row changes exactly one factor
-against the shipped model.}
+\caption{Controlled ablations on the canonical battery. These runs use the
+non-conditioned decoder, that is the full-resolution decoder without the symmetry constraint,
+because that is the configuration in which the ablations were trained; the shipped model of
+Table~\ref{tab:benchmark} differs from these arms only by that decoder. Every row changes one
+factor against its own control: test-split MAE, validation-split scenario gate A, three seeds.}
 \label{tab:ablation}
 \begin{tabular}{@{}llccc@{}}
 \toprule

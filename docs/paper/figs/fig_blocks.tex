@@ -1,0 +1,136 @@
+\documentclass[tikz,border=4pt]{standalone}
+\usepackage{amsmath,amssymb}
+\usetikzlibrary{arrows.meta,positioning,calc,backgrounds,decorations.pathreplacing}
+
+% pseudo-3D: two offset faces behind a node, one light direction for all blocks
+\newcommand{\pseudo}[1]{%
+  \begin{scope}[on background layer]
+    \fill[black!20] ($(#1.south east)+(0.16,0.11)$) -- ($(#1.north east)+(0.16,0.11)$)
+      -- (#1.north east) -- (#1.south east) -- cycle;
+    \fill[black!10] ($(#1.north west)+(0.16,0.11)$) -- ($(#1.north east)+(0.16,0.11)$)
+      -- (#1.north east) -- (#1.north west) -- cycle;
+    \draw[line width=0.35pt, black!55] ($(#1.north west)+(0.16,0.11)$)
+      -- ($(#1.north east)+(0.16,0.11)$) -- ($(#1.south east)+(0.16,0.11)$);
+    \draw[line width=0.35pt, black!55] (#1.north east) -- ($(#1.north east)+(0.16,0.11)$);
+    \draw[line width=0.35pt, black!55] (#1.south east) -- ($(#1.south east)+(0.16,0.11)$);
+  \end{scope}%
+}
+
+\begin{document}
+\begin{tikzpicture}[
+  >={Stealth[length=1.8mm]},
+  box/.style={draw, rounded corners=1.5pt, align=center, font=\scriptsize,
+              inner sep=2.6pt, minimum height=6mm, line width=0.45pt},
+  op/.style={box, fill=blue!10},
+  film/.style={box, fill=orange!14},
+  tok/.style={box, fill=green!10},
+  outb/.style={box, fill=white, line width=0.8pt},
+  sum/.style={circle, draw, inner sep=0.5pt, font=\scriptsize, line width=0.45pt},
+  ar/.style={->, line width=0.5pt, black!85},
+  byp/.style={->, line width=0.45pt, black!60},
+  bus/.style={line width=0.5pt, black!85},
+  lab/.style={font=\scriptsize, inner sep=1pt},
+  hdr/.style={font=\small\bfseries, black!80},
+]
+
+% ==================== (a) occupancy encoder ====================
+\node[hdr, anchor=east] at (-0.45,0) {(a) occupancy encoder};
+\node[box, inner sep=1pt] (img) at (0,0) {\includegraphics[width=6mm]{occ_sample.png}};
+\node[lab, below=0pt of img] {$64\times64$};
+\node[op, right=4.5mm of img] (cv) {conv $4\!\times\!4$\\stride 4};
+\node[tok, right=3.5mm of cv] (tk) {256 tokens\\$\mathbb{R}^{256\times192}$};
+\node[op, right=3.5mm of tk] (sa) {LN\\MHSA};
+\node[sum, right=2.8mm of sa] (p1) {$+$};
+\node[op, right=2.8mm of p1] (ml) {LN\\MLP};
+\node[sum, right=2.8mm of ml] (p2) {$+$};
+\node[film, right=2.8mm of p2] (fi) {FiLM};
+\node[outb, right=3.2mm of fi] (zx) {$\mathbf{z}_x$\\$\mathbb{R}^{256\times192}$};
+
+\draw[ar] (img) -- (cv);
+\draw[ar] (cv) -- (tk);
+\draw[ar] (tk) -- (sa);
+\draw[ar] (sa) -- (p1);
+\draw[ar] (p1) -- (ml);
+\draw[ar] (ml) -- (p2);
+\draw[ar] (p2) -- (fi);
+\draw[ar] (fi) -- (zx);
+
+\draw[byp] (tk.south) -- ++(0,-2.4mm) -| (p1.south);
+\draw[byp] (p1.south) -- ++(0,-4.6mm) -| (p2.south);
+
+\draw[decorate, decoration={brace, amplitude=3pt}, black!55]
+  ([yshift=4mm]sa.north west) -- ([yshift=4mm]sa.north -| fi.east)
+  node[midway, above=3pt, lab] {$\times\,6$};
+
+% ==================== (b) fusion ====================
+\node[hdr, anchor=east] at (-0.85,-2.85) {(b) fusion};
+\node[tok] (t1) at (0,-2.05) {256 occ.};
+\node[tok] (t2) at (0,-2.85) {16 goal};
+\node[tok] (t3) at (0,-3.65) {1 scalar};
+
+% token bus: all three reach a common vertical line, then one arrow onward
+\coordinate (b1) at ($(t1.east)+(1.55cm,0)$);
+\coordinate (b2) at ($(t2.east)+(1.55cm,0)$);
+\coordinate (b3) at ($(t3.east)+(1.55cm,0)$);
+\node[op, right=5mm of b2] (cc) {concat\\$\mathbb{R}^{273\times192}$};
+
+\draw[bus] (t1.east) -- (b1);
+\draw[bus] (t2.east) -- (b2);
+\draw[bus] (t3.east) -- (b3);
+\draw[bus] (b1) -- (b3);
+\draw[ar] (b2) -- (cc.west);
+
+\node[op, right=4mm of cc] (fs) {LN\\MHSA};
+\node[sum, right=2.8mm of fs] (q1) {$+$};
+\node[op, right=2.8mm of q1] (fm) {LN\\MLP};
+\node[sum, right=2.8mm of fm] (q2) {$+$};
+\node[outb, right=3.2mm of q2] (fo) {$\mathbf{f}$\\$\mathbb{R}^{273\times192}$};
+
+\draw[ar] (cc) -- (fs);
+\draw[ar] (fs) -- (q1);
+\draw[ar] (q1) -- (fm);
+\draw[ar] (fm) -- (q2);
+\draw[ar] (q2) -- (fo);
+
+\draw[byp] (cc.south) -- ++(0,-2.4mm) -| (q1.south);
+\draw[byp] (q1.south) -- ++(0,-4.6mm) -| (q2.south);
+
+\draw[decorate, decoration={brace, amplitude=3pt}, black!55]
+  ([yshift=4mm]fs.north west) -- ([yshift=4mm]fs.north -| q2.east)
+  node[midway, above=3pt, lab] {$\times\,2$};
+
+% ==================== (c) GCLCT block ====================
+\node[hdr, anchor=east] at (-0.45,-5.75) {(c) one GCLCT block};
+\node[box] (qq) at (0,-5.75) {257\\queries};
+\node[film, right=3.4mm of qq] (c1) {LN\\FiLM$(\mathbf{c})$};
+\node[op, right=3.2mm of c1] (csa) {self\\attn};
+\node[sum, right=2.8mm of csa] (r1) {$+$};
+\node[film, right=2.8mm of r1] (c2) {LN\\FiLM$(\mathbf{c})$};
+\node[op, right=3.2mm of c2] (cca) {cross\\attn};
+\node[sum, right=2.8mm of cca] (r2) {$+$};
+\node[film, right=2.8mm of r2] (c3) {LN\\FiLM$(\mathbf{c})$};
+\node[op, right=3.2mm of c3] (cml) {MLP};
+\node[sum, right=2.8mm of cml] (r3) {$+$};
+\node[outb, right=3.2mm of r3] (zo) {$\hat{\mathbf{z}}$\\$\mathbb{R}^{256\times192}$};
+
+\foreach \a/\b in {qq/c1, c1/csa, csa/r1, r1/c2, c2/cca, cca/r2, r2/c3, c3/cml, cml/r3, r3/zo}
+  \draw[ar] (\a) -- (\b);
+
+\draw[byp] (qq.south) -- ++(0,-2.4mm) -| (r1.south);
+\draw[byp] (r1.south) -- ++(0,-4.6mm) -| (r2.south);
+\draw[byp] (r2.south) -- ++(0,-6.8mm) -| (r3.south);
+
+\node[lab, below=11mm of cca] {kv $=$ fused tokens ($273$)};
+\draw[byp] ([yshift=-9mm]cca.south) -- (cca.south);
+
+\draw[decorate, decoration={brace, amplitude=3pt}, black!55]
+  ([yshift=4mm]c1.north west) -- ([yshift=4mm]c1.north -| r3.east)
+  node[midway, above=3pt, lab] {$\times\,8$};
+
+% ==================== pseudo-3D faces ====================
+\foreach \n in {img,cv,tk,sa,ml,fi,zx,t1,t2,t3,cc,fs,fm,fo,qq,c1,csa,c2,cca,c3,cml,zo} {
+  \pseudo{\n}
+}
+
+\end{tikzpicture}
+\end{document}

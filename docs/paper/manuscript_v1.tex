@@ -222,11 +222,14 @@ on this representation; converting it would put our targets in a different domai
 from the surrogate's training data.
 
 The corpus stores each design in the broadcast form
-$(G\,r/5,\ G\,h,\ l/3)$, where $G$ is the indicator of
-the occupied set. This is convenient for the surrogate and destructive for learning:
-the third channel is constant over the cell, so $l$ is readable from any pixel, and a
-masked-region objective over the tensor is partly answerable without the region's
-neighbours. We therefore factorise every sample before it reaches the network,
+\begin{equation}
+(G\,r/5,\ \ G\,h,\ \ l/3),
+\end{equation}
+where $G$ is the binary occupancy map defined above, so the first two channels are
+constant on material and exactly zero elsewhere while the third is constant over the whole
+cell. This is convenient for the surrogate and destructive for learning: $l$ is readable
+from any pixel, and a masked-region objective over the tensor is partly answerable without
+the region's neighbours. We therefore factorise every sample before it reaches the network,
 \begin{equation}
 (G, l, h, r) \;\longleftrightarrow\;
 \big(G\in\{0,1\}^{1\times64\times64},\ (l,h,r)\in\mathbb{R}^3\big),

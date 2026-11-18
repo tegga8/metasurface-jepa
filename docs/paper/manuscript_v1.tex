@@ -223,11 +223,15 @@ from the surrogate's training data.
 
 The corpus stores each design in the broadcast form
 \begin{equation}
-(G\,r/5,\ \ G\,h,\ \ l/3),
+\mathbf{x}_0 = G\odot(r/5),\qquad
+\mathbf{x}_1 = G\odot h,\qquad
+\mathbf{x}_2 = l/3,
 \end{equation}
-where $G$ is the binary occupancy map defined above, so the first two channels are
-constant on material and exactly zero elsewhere while the third is constant over the whole
-cell. This is convenient for the surrogate and destructive for learning: $l$ is readable
+where $G$ is the binary occupancy map defined above and $\odot$ is the element-wise
+product. The operation is a mask, not a channel-wise transform: at every pixel inside the
+material the first channel holds $r/5$ and the second holds $h$, and at every pixel outside
+it both hold exactly zero, while the third channel carries the same value $l/3$ at every
+pixel of the cell. This is convenient for the surrogate and destructive for learning: $l$ is readable
 from any pixel, and a masked-region objective over the tensor is partly answerable without
 the region's neighbours. We therefore factorise every sample before it reaches the network,
 \begin{equation}

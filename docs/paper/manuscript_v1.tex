@@ -508,7 +508,7 @@ The physics weight is the one coefficient that was measured rather than chosen. 
 sweep over five values showed a non-monotone response: small weights
 ($0.03$ and $0.1$) made the pure-inverse error \emph{worse} than training with no
 physics at all, while large weights improved it, and the best swept value was still
-improving at the top of the range. The shipped value is therefore a lower bound on
+improving at the top of the range. The value used here is therefore a lower bound on
 the optimum rather than a located maximum, and it is reported as such.
 
 Two conventions govern reproduction. The physics term normalises prediction and target
@@ -664,7 +664,7 @@ C retrofit & 0.250 & all three & $\mathbf{0.064 \pm 0.002}$ & $0.930 \pm 0.007$ 
 \end{table}
 
 The conditioning result is stronger than the 512-sample protocol above. On the hard
-stratum, full occupancy mask with all three parameters unknown, the shipped model's seed-0
+stratum, full occupancy mask with all three parameters unknown, the constrained model's seed-0
 checkpoint gives a paired win rate of $99.35\%$ over 1{,}536 pooled evaluation samples,
 against a decision threshold of $0.75$. The 1{,}536 are evaluation samples drawn under
 three evaluation seeds, not independently trained models.
@@ -685,7 +685,7 @@ post-hoc symmetrisation would hide rather than prevent.
 \centering
 \caption{Controlled ablations on the canonical battery. These runs use the
 non-conditioned decoder, that is the full-resolution decoder without the symmetry constraint,
-because that is the configuration in which the ablations were trained; the shipped model of
+because that is the configuration in which the ablations were trained; the base model of
 Table~\ref{tab:benchmark} differs from these arms only by that decoder. Every row changes one
 factor against its own control: test-split MAE, validation-split scenario gate A, three seeds.}
 \label{tab:ablation}
@@ -696,7 +696,7 @@ Factor & Variant & Trainable & MAE $\downarrow$ & Gate A $\uparrow$ \\
 model size & S0 tiny & 2.19M & $0.0564 \pm 0.0003$ & 0.997 \\
  & S1 small & 4.23M & $0.0542 \pm 0.0028$ & 0.992 \\
  & S2 slim & 8.14M & $0.0518 \pm 0.0009$ & 0.995 \\
- & shipped & 11.57M & $\mathbf{0.0524 \pm 0.0014}$ & $\mathbf{0.993}$ \\
+ & base (unconstrained) & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{0.9967}$ \\
  & L1 wide & 19.90M & $0.0531 \pm 0.0036$ & 0.996 \\
 \midrule
 objective & JEPA & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{0.9967}$ \\

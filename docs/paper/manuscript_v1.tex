@@ -275,15 +275,26 @@ meet only at the fusion stage.
 
 \subsubsection{Scalar branch}
 The branch receives six numbers per sample,
-$\mathbf{s}=[l,k_l,h,k_h,r,k_r]$, where $k_\bullet\in\{0,1\}$ states whether that
-parameter is observed. Unknown values are set to zero and the flag carries the
+\begin{equation}
+\mathbf{s} = [\, l,\ k_l,\ h,\ k_h,\ r,\ k_r \,],
+\end{equation}
+where $k_\bullet\in\{0,1\}$ states whether that parameter is observed. Unknown values are set to zero and the flag carries the
 distinction between ``absent'' and ``equal to zero'', so the encoder never has to infer
 missingness from a magnitude. A two-layer perceptron with GELU activations,
-$6\!\to\!128\!\to\!128$, produces two outputs.
+\begin{equation}
+6 \;\longrightarrow\; 128 \;\longrightarrow\; 128,
+\end{equation}
+produces two outputs.
 
-The first is a set of FiLM coefficients $(\gamma_b,\beta_b)\in\mathbb{R}^{192}\times
-\mathbb{R}^{192}$, one pair per occupancy-encoder block, applied as
-$\mathbf{x}\mapsto\gamma_b\odot\mathbf{x}+\beta_b$.
+The first is a set of FiLM coefficients, one pair per occupancy-encoder block,
+\begin{equation}
+(\gamma_b,\ \beta_b) \;\in\; \mathbb{R}^{192}\times\mathbb{R}^{192},
+\qquad b = 1,\dots,6,
+\end{equation}
+applied as
+\begin{equation}
+\mathbf{x} \;\mapsto\; \gamma_b\odot\mathbf{x}+\beta_b .
+\end{equation}
 
 One pair per block, rather than one pair shared across depth, is what lets the
 parameters act differently at different scales of abstraction: an early block sees
@@ -335,7 +346,11 @@ which is frozen. It maps the $2\times301$ complex response to $301$ tokens of wi
 $256$. Two read-outs are taken. The mean token, projected to $384$ dimensions, gives
 the global condition $\mathbf{c}$, which summarises the overall electromagnetic
 behaviour the design must achieve. Sixteen learned queries cross-attend to the frequency
-tokens and give $\mathbf{a}\in\mathbb{R}^{16\times384}$; each query specialises to a
+tokens and give
+\begin{equation}
+\mathbf{a} \in \mathbb{R}^{16\times384},
+\end{equation}
+where each query specialises to a
 different aspect of the response, so fine structure survives instead of being averaged
 into a single vector. Both read-outs are projected to width $192$ downstream.
 
@@ -440,7 +455,11 @@ cross-attention over the $273$ fused tokens. The stack repeats eight times.}
 Two exponential-moving-average targets are maintained, one for the occupancy encoder
 and one for the scalar encoder, with momentum ramped linearly from $0.996$ to $0.999$
 over the run. Three quantities are produced under no gradient. The first is the plain
-geometry target $\mathbf{z}_y=\mathrm{EMA}_{\mathrm{occ}}(G)$, computed on
+geometry target
+\begin{equation}
+\mathbf{z}_y = \mathrm{EMA}_{\mathrm{occ}}(G),
+\end{equation}
+computed on
 the complete, unmasked cell and modulated by the scalar target. The second is a
 spectrum-conditioned target, obtained by additionally modulating the target encoder
 with a frozen FiLM whose coefficients come from $\mathbf{c}$; matching it requires the
@@ -683,11 +702,11 @@ post-hoc symmetrisation would hide rather than prevent.
 \clearpage
 \begin{table}[h]
 \centering
-\caption{Controlled ablations on the canonical battery. These runs use the
-non-conditioned decoder, that is the full-resolution decoder without the symmetry constraint,
-because that is the configuration in which the ablations were trained; the base model of
-Table~\ref{tab:benchmark} differs from these arms only by that decoder. Every row changes one
-factor against its own control: test-split MAE, validation-split scenario gate A, three seeds.}
+\caption{Controlled ablations on the canonical battery. Unless stated otherwise every arm
+uses the \textbf{unconstrained} decoder, the full-resolution decoder without the symmetry
+constraint; the last block isolates the decoder change against the constrained model that
+Table~\ref{tab:benchmark} reports. Each block changes one factor against its own control.
+Values are test-split MAE and validation-split scenario gate A, mean over three seeds.}
 \label{tab:ablation}
 \begin{tabular}{@{}llccc@{}}
 \toprule
@@ -696,15 +715,18 @@ Factor & Variant & Trainable & MAE $\downarrow$ & Gate A $\uparrow$ \\
 model size & S0 tiny & 2.19M & $0.0564 \pm 0.0003$ & 0.997 \\
  & S1 small & 4.23M & $0.0542 \pm 0.0028$ & 0.992 \\
  & S2 slim & 8.14M & $0.0518 \pm 0.0009$ & 0.995 \\
- & base (unconstrained) & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{0.9967}$ \\
+ & base & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{0.9967}$ \\
  & L1 wide & 19.90M & $0.0531 \pm 0.0036$ & 0.996 \\
 \midrule
 objective & JEPA & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{0.9967}$ \\
- & conventional supervised & 11.57M & $0.0922 \pm 0.0195$ & 0.979 \\
+ & supervised only & 11.40M & $0.0922 \pm 0.0195$ & 0.9792 \\
 \midrule
-train split & 60/20/20 & 11.57M & $0.0544 \pm 0.0013$ & 0.994 \\
- & 50/25/25 & 11.57M & $0.0552 \pm 0.0018$ & 0.991 \\
- & 40/40/20 & 11.57M & $0.0619 \pm 0.0006$ & 0.992 \\
+train split & 60/20/20 & 11.40M & $0.0544 \pm 0.0013$ & 0.994 \\
+ & 50/25/25 & 11.40M & $0.0552 \pm 0.0018$ & 0.991 \\
+ & 40/40/20 & 11.40M & $0.0619 \pm 0.0006$ & 0.992 \\
+\midrule
+decoder & unconstrained (base) & 11.40M & $0.0490 \pm 0.0013$ & 0.9967 \\
+ & constrained & 11.57M & $0.0524 \pm 0.0014$ & 0.993 \\
 \botrule
 \end{tabular}
 \end{table}

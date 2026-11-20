@@ -47,7 +47,7 @@
 \author*[1]{\fnm{Ponappa} \sur{K.}}\email{kponappa@iiitdmj.ac.in}
 
 \affil*[1]{\orgname{PDPM Indian Institute of Information Technology, Design and Manufacturing, Jabalpur,
-482005, Madhya Pradesh, India.}}
+482005, Madhya Pradesh, India}}
 
 \abstract{
 Inverse design of metasurfaces is difficult for a reason that is usually stated too
@@ -59,17 +59,18 @@ parameters with known/unknown flags, so the geometry and the parameters can be m
 independently and the model is never handed a parameter disguised as a pixel. The
 spectrum enters through a frozen released encoder and drives two separate pathways, a
 token-level goal that the predictor attends to and a global physics condition applied as a
-per-block FiLM modulation; a second copy of that modulation is frozen on the target
-encoder, so the objective cannot make the target spectrum-free in order to reduce the
-loss. Finally, the released corpus is exactly invariant under the four-fold mirror group
-(verified over all 174{,}883 patterns), so the occupancy decoder predicts one
-$32\times32$ quadrant and mirrors it, which makes every generated design admissible by
-construction. The result is a deterministic, goal-constrained generative model rather
-than a regressor: $11.6$M trainable parameters, $3.2\times$ fewer than the released
-MetaDiT-S baseline, with a held-out test error of $0.0524\pm0.0014$ MAE against $0.0801$.
-On a paired real-versus-deranged-goal test, which no output-averaging model can pass by
-accident, the true goal wins on $99.3\%$ of pure-inverse samples, $97.1\%$ with partial
-geometry and $93.0\%$ in retrofit.
+per-block FiLM modulation; a second, fixed copy of that modulation sits on the target
+encoder, so the target modulation itself cannot adapt to remove the spectral condition.
+The decoder predicts the full $64\times64$ cell. Because the released corpus is exactly
+invariant under the four-fold mirror group (verified over all 174{,}883 patterns), we also
+train a symmetry-constrained variant that predicts one $32\times32$ quadrant and mirrors
+it, and we report the measured trade-off rather than a free gain: exact symmetry in every
+output, at a small and reproducible cost in spectral error. The result is a deterministic,
+goal-conditioned generative model rather than a regressor: $11.4$M trainable parameters,
+about $2.9\times$ fewer than the released MetaDiT-S baseline, with a held-out test error
+of $0.0490\pm0.0013$ MAE against $0.0803$ measured under the same protocol. On a paired
+real-versus-deranged-goal test the true goal wins on $99.7\%$ of pure-inverse samples,
+$97.7\%$ with partial geometry and $93.0\%$ in retrofit.
 }
 
 \maketitle
@@ -96,14 +97,18 @@ This paper treats inverse design as representation learning. We adapt a
 joint-embedding predictive architecture (JEPA), in which a student predicts the latent
 representation of a masked region from visible context while an
 exponential-moving-average teacher supplies the target~\cite{ijepa}. Applied here, the
-occupancy encoder sees a partially masked occupancy map and nothing else, so the
-geometry representation is built without the spectrum; the spectrum then conditions
+occupancy encoder sees a partially masked occupancy map together with scalar FiLM
+conditioning, and never the spectrum, so the geometry representation is built without any
+spectral information; the spectrum then conditions
 latent completion through two pathways, sixteen goal tokens entering the fusion stage
 and a global physics vector modulating every predictor block. The teacher sees the
 complete geometry and is additionally modulated by the true spectrum, so matching it
 requires the goal to have entered the prediction.
 
-Our model differs from a textbook JEPA in three ways. The design is factorised into an
+Our model differs from a textbook JEPA in three ways. The lattice constant $l$ and the thickness $h$ are in micrometres and the refractive index
+$r$ is dimensionless; the spectrum is sampled at $301$ frequencies with real and imaginary
+parts, and every statistic in this paper is computed on that released sampling. The design
+is factorised into an
 occupancy map, three flagged parameters and the spectrum, with the three-channel
 broadcast tensor assembled only at the surrogate boundary, so spatial and parameter
 masking stay independent. The spectrum enters through a frozen released encoder that
@@ -307,9 +312,10 @@ One pair per block, rather than one pair shared across depth, is what lets the
 parameters act differently at different scales of abstraction: an early block sees
 local patch statistics where the lattice constant matters most, while a late block
 sees a global summary where thickness and refractive index dominate. The modulation is applied
-after the block's residual sum, not inside the attention, so the attention weights
-themselves remain a function of the geometry alone and the parameter path stays
-separable for later inspection. The head is initialised with zero
+after the block's residual sum, not inside the attention. Only the first block's attention
+therefore sees geometry alone; every later block attends over a representation the
+parameters have already modulated, so later attention weights do depend on the scalar
+inputs. The parameter path stays separable from the attention weights for inspection. The head is initialised with zero
 weights and with $\gamma$ biased to one, so the modulation is the identity at step zero
 and the network is free to leave it there. The second output is a $192$-dimensional
 summary token that enters the fusion stage; it is trained by its own read-out term,
@@ -350,7 +356,8 @@ the predictor, never as an input to this encoder.
 \subsubsection{Spectrum branch}
 The spectrum is processed by the released MetaDiT spectrum encoder~\cite{metadit},
 which is frozen. It maps the $2\times301$ complex response to $301$ tokens of width
-$256$. Two read-outs are taken. The mean token, projected to $384$ dimensions, gives
+$256$. Only that encoder is frozen: the read-out layers below, which produce the global
+condition and the goal tokens, are trained. Two read-outs are taken. The mean token, projected to $384$ dimensions, gives
 the global condition $\mathbf{c}$, which summarises the overall electromagnetic
 behaviour the design must achieve. Sixteen learned queries cross-attend to the frequency
 tokens and give
@@ -427,10 +434,11 @@ The output splits into $256$ predicted geometry latents $\hat{\mathbf{z}}$ and o
 scalar latent $\hat{\mathbf{s}}_\Sigma$.
 
 Three properties of this stack are worth stating explicitly. First, the condition enters
-through a projection from 384 to 192 dimensions, one per block, and every projection is
-zero-initialised together with its gate, so at step zero each block is exactly the
-identity and the model begins as a plain latent-completion transformer; the conditioning
-is learned, not imposed. Second, the queries are not the context: the $273$ fused tokens
+through a single shared linear projection from 384 to 192 dimensions, applied once before
+the stack; it is not zero-initialised. What is zero-initialised, together with its gate, is
+each block's own FiLM generator, so at step zero every block is exactly the identity and
+the model begins as a plain latent-completion transformer: the conditioning is learned, not
+imposed, and it starts silent. Second, the queries are not the context: the $273$ fused tokens
 are keys and values, while the $257$ queries are a fixed-size set that is rewritten at
 every block. This is what keeps cost independent of cell size once the context exists, and
 it is why the predictor can hold more than half of the trainable parameters without
@@ -439,9 +447,11 @@ position, and it is the one that becomes the scalar prediction; putting it in th
 attention stack means the parameters are inferred with the same evidence as the geometry
 rather than by a separate head reading a pooled vector.
  The scalar latent is routed through a small
-three-headed perceptron to $(l,h,r)$; its final bias is initialised to the dataset
-means rather than to zero, because a zero output drives the frozen surrogate's
-activation into a dead region and no gradient reaches the branch.
+three-headed perceptron to $(l,h,r)$; its final bias is initialised to the approximate
+in-distribution constants $(2.75,\ 0.75,\ 4.25)$ rather than to zero, so that a new run
+starts near the data rather than in the surrogate's dead region, where a zero geometry
+gives no usable gradient. These are approximate initial values and not the measured means
+of the corpus, which are $(2.750,\ 0.828,\ 4.489)$.
 
 \begin{figure}[h]
 \centering
@@ -477,19 +487,22 @@ EMA scalar branch, which forces the scalar path to carry its conditioning.
 The exponential-moving-average target is what makes the objective non-degenerate.
 If the target were the student's own output, the loss could be driven to zero by
 collapsing both branches to a constant; the moving average makes the target lag,
-so a collapsed student is always behind a slightly less collapsed teacher. The
+so the target moves more slowly than the student. An EMA teacher is not by itself an
+anti-collapse mechanism: it supplies a slowly moving target, and the explicit anti-collapse
+terms are the variance and covariance regularisers of Section~\ref{sec:losses}. The
 momentum ramp matters for the same reason: too fast a teacher at the start gives a
 target that moves with the student and the lag disappears, which is why the
 momentum is tied to the total step count rather than fixed.
 
-The prediction and both targets are projected by an MLP with batch normalisation owned
-by the objective rather than by the model, and three VICReg terms are evaluated on the
+The ordinary geometry prediction and the spectrum-free EMA geometry target are projected by
+one MLP with batch normalisation owned by the objective; the spectrum-conditioned target and
+the scalar target are compared by cosine similarity instead, without that projector rather than by the model, and three VICReg terms are evaluated on the
 masked tokens: an invariance mean-squared error, a variance hinge with threshold one,
 and an off-diagonal covariance penalty~\cite{vicreg}. Keeping the projector in the
 objective means the latent the encoder produces is the one that is regularised, not a
 private projection of it.
 
-\subsection{Losses}
+\subsection{Losses}\label{sec:losses}
 
 The total objective is a weighted sum of nine terms,
 \begin{equation}
@@ -544,16 +557,28 @@ floor of $10^{-3}$ rather than amplify noise. The same term is skipped on batche
 goal was dropped for guidance, because there the target would be the condition that was
 removed. Gradients reach the surrogate input but never its parameters: the surrogate is
 frozen, excluded from the optimiser, and asserted to receive no gradient at every step.
+Between the decoder and the surrogate the occupancy is thresholded at $0.5$ in the forward
+pass while the backward pass runs through the soft field, a straight-through estimator. The
+hard forward is not cosmetic: the released surrogate's activations give a nearly dead
+gradient on soft occupancy fields, so the soft-forward path alone yields a physics term
+that looks healthy and trains nothing. This is the default in the training configuration
+and is enforced rather than optional when the physics weight is positive.
 
-Training uses AdamW~\cite{adamw} with a cosine schedule, batch size two with gradient
-accumulation, and clipping at unit norm. Three curricula are applied. The masked
+Training uses AdamW~\cite{adamw} with a cosine schedule, batch size two with no gradient
+accumulation, $70{,}000$ optimiser steps, learning rate $3\times10^{-4}$, weight decay
+$10^{-4}$, $100$ warm-up steps and clipping at unit norm, for training seeds $0$, $1$ and
+$2$. At batch two and this corpus the run is approximately one pass over the $139{,}906$
+training samples, so it is one epoch rather than many. The checked-in configuration file
+carries a shorter default; the reported runs used the command-line override to $70{,}000$
+steps, and reproducing from the default without that override will not reproduce these
+numbers. Three curricula are applied. The masked
 fraction is sampled per sample and its distribution is ramped from an easy to a hard
 mixture over the first 3{,}000 steps. The physics weight is held at zero for 2{,}000
 steps and ramped in over 3{,}000, so the representation forms before the surrogate
 acts. The multi-target weights ramp in from step 1{,}000. The goal is dropped with
 probability $0.1$ so the model learns both conditional and unconditional predictions.
 
-\subsection{Symmetry prior in the decoder}
+\subsection{Decoder: base model and a symmetry-constrained variant}
 
 We verified the symmetry of the released data rather than assuming it: in all three
 splits, every occupancy map is invariant under both reflections,
@@ -566,8 +591,13 @@ with no exceptions over 174{,}883 patterns. The data therefore occupy the fixed-
 of the four-fold mirror group, and a decoder that predicts all $64\times64$ pixels spends
 three quarters of its output degrees of freedom on directions the data never use.
 
-We make the symmetry structural rather than learned. The occupancy decoder predicts one
-$32\times32$ quadrant $Q$ and assembles the cell by reflection,
+The base decoder, which every headline result in this paper uses, upsamples the
+$16\times16$ token grid to $32\times32$ with a FiLM block, applies two resolution-preserving
+FiLM blocks, and ends in a $3\times3$ head that returns all $64\times64$ cells. It carries no
+assumption about the geometry and can represent an asymmetric cell.
+
+We also train a variant that makes the symmetry structural rather than learned. This
+variant predicts one $32\times32$ quadrant $Q$ and assembles the cell by reflection,
 \begin{equation}
 \hat{G} \;=\;
 \begin{pmatrix}
@@ -580,16 +610,16 @@ Q & \mathrm{fliplr}(Q)\\[2pt]
 so Eq.~\eqref{eq:sym} holds for every output and every input. The quadrant comes from a
 $192\!\to\!96$ FiLM block at $16\!\to\!32$ resolution, two resolution-preserving FiLM
 blocks and a $3\times3$ head; the mirroring has no parameters and costs nothing at
-inference.
+inference. The variant therefore holds one quarter of the decoder's output degrees of
+freedom, and its parameter count is $11.57$M against the base model's $11.40$M.
 
 This bounds the model as well as helping it. Because symmetry is a property of the
-function class, an asymmetric design cannot be represented at all: on a corpus that
-contained asymmetric unit cells the decoder would fail silently, returning a symmetric
-approximation with a higher loss rather than an error. The constraint is therefore
-justified by the measurement above and is not a general assumption about metasurfaces;
-lifting it requires only using the unconstrained decoder variant, which we retain for that
-purpose. Within this corpus it changes the admissibility of the output, not the spectral
-accuracy, as Section~\ref{sec4} reports.
+function class, an asymmetric design cannot be represented at all: on a corpus containing
+asymmetric unit cells the variant would fail silently, returning a symmetric approximation
+with a higher loss rather than an error. It is therefore a statement about this corpus, not
+about metasurfaces in general, and it is not free. Section~\ref{sec4} measures the cost:
+the variant is about $7\%$ worse in test MAE than the base decoder, with essentially
+unchanged occupancy IoU. We report it as a variant for that reason, not as an improvement.
 
 \subsection{Inference}
 
@@ -641,36 +671,48 @@ The per-sample error distribution has a heavy tail, so a mean-based verdict on a
 batch is unstable. We gate on a paired statistic instead: for each sample we compare the
 error obtained with the true goal against the error obtained with a derangement of the
 batch's goals, and report the fraction of samples on which the true goal wins. The
-threshold is $0.75$, i.e.\ the true goal must be measurably better, not merely better
+threshold is $0.75$, i.e.\ the true goal must beat the deranged goal on at least three
 more often than not. A deranged goal is a stronger control than an absent one, because
 it preserves the statistics of the condition while destroying its correspondence.
 
 \subsection{Results}
 
-Over three training seeds on the full held-out test split, the model reaches a mean
-absolute error of $0.0524\pm0.0014$ and an accumulated error of $31.6\pm0.8$, against
-$0.0801$ and $48.25$ for MetaDiT-S~\cite{metadit}. It does so with $11.6$M trainable
-parameters against $37.2$M, a factor of $3.2$ (Table~\ref{tab:benchmark}).
+Over three training seeds on the full held-out test split ($n=17{,}489$) the base model
+reaches a mean absolute error of $0.0490\pm0.0013$, with a $95\%$ Student-$t$ interval of
+$[0.0459,0.0521]$, and an accumulated error of $29.51\pm0.74$. The locally reproduced
+MetaDiT-S model, scored on the same split by the same released surrogate, reaches $0.0803$
+and $48.34$; the $0.0801$ and $48.25$ that MetaDiT's paper reports come from its own
+scoring setup and are cited as the published reference, not as the like-for-like number.
+The comparison is therefore $0.0490$ against $0.0803$ (Table~\ref{tab:benchmark}). On
+trainable parameters the base model has $11.40$M against $32.57$M for the MetaDiT model
+specification, a factor of $2.9$; the $37.20$M sometimes quoted for MetaDiT-S includes its
+frozen released spectrum encoder and is a deployed count, not a trainable one, and we do
+not mix the two conventions.
 
 \begin{table}[h]
 \centering
-\caption{Held-out test split, pure inverse design. Mean $\pm$ standard deviation over
-three training seeds for our model; single released checkpoint for the baseline.}
+\caption{Held-out test split, pure inverse design, $n=17{,}489$. Mean $\pm$ standard
+deviation over three training seeds for our models; single released checkpoint for the
+baseline. Parameter counts are trainable parameters only; the $37.20$M deployed count for
+MetaDiT-S includes its frozen released spectrum encoder.}
 \label{tab:benchmark}
 \begin{tabular}{@{}lccc@{}}
 \toprule
 Model & Trainable parameters & MAE $\downarrow$ & AAE $\downarrow$ \\
 \midrule
-Ours (this work) & 11.57M & $\mathbf{0.0524 \pm 0.0014}$ & $\mathbf{31.6 \pm 0.8}$ \\
-MetaDiT-S~\cite{metadit} (reproduced) & 37.20M & 0.0803 & 48.34 \\
+Ours, base & 11.40M & $\mathbf{0.0490 \pm 0.0013}$ & $\mathbf{29.51 \pm 0.74}$ \\
+Ours, symmetry variant & 11.57M & $0.0524 \pm 0.0014$ & $31.6 \pm 0.8$ \\
+MetaDiT-S~\cite{metadit} (reproduced) & 32.57M & 0.0803 & 48.34 \\
 \botrule
 \end{tabular}
 \end{table}
 
 Table~\ref{tab:gates} reports the paired statistic for the three regimes on the
 validation split, 512 samples per seed. The true goal beats a deranged goal on
-$99.3\%$ of pure-inverse samples, $97.1\%$ of partial samples and $93.0\%$ of retrofit
-samples, all above the $0.75$ threshold. The ordering follows the amount of information
+$99.67\%$ of pure-inverse samples, $97.72\%$ of partial samples and $93.03\%$ of retrofit
+samples, all above the predeclared $0.75$ paired win-rate threshold, which is an
+acceptance criterion rather than a significance test (seed values: $0.9961/0.9961/0.9980$,
+$0.9805/0.9727/0.9785$ and $0.9375/0.9355/0.9180$). The ordering follows the amount of information
 supplied: the more of the answer that is given, the smaller the residual role of the
 spectrum, and retrofit is the regime with the lowest error and the weakest gate.
 
@@ -680,31 +722,35 @@ spectrum, and retrofit is the regime with the lowest error and the weakest gate.
 three seeds).}\label{tab:gates}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
-Regime & Masked fraction & Parameters revealed & Spectrum error $\downarrow$ & Gate $\uparrow$ \\
+Regime & Masked fraction & Parameters revealed & Normalised spectral error $\downarrow$ & Gate $\uparrow$ \\
 \midrule
-A pure inverse & 1.000 & none & $0.136 \pm 0.005$ & $\mathbf{0.993 \pm 0.003}$ \\
-B partial & 0.492 & one & $0.102 \pm 0.003$ & $0.971 \pm 0.009$ \\
-C retrofit & 0.250 & all three & $\mathbf{0.064 \pm 0.002}$ & $0.930 \pm 0.007$ \\
+A pure inverse & 1.000 & none & $0.136 \pm 0.005$ & $\mathbf{0.9967 \pm 0.0011}$ \\
+B partial & 0.492 & one & $0.102 \pm 0.003$ & $0.9772 \pm 0.0040$ \\
+C retrofit & 0.250 & all three & $\mathbf{0.064 \pm 0.002}$ & $0.9303 \pm 0.0110$ \\
 \botrule
 \end{tabular}
 \end{table}
 
 The conditioning result is stronger than the 512-sample protocol above. On the hard
-stratum, full occupancy mask with all three parameters unknown, the constrained model's seed-0
-checkpoint gives a paired win rate of $99.35\%$ over 1{,}536 pooled evaluation samples,
-against a decision threshold of $0.75$. The 1{,}536 are evaluation samples drawn under
-three evaluation seeds, not independently trained models.
+stratum, full occupancy mask with all three parameters unknown, the base model's seed-0
+checkpoint gives a paired win rate of $99.74\%$ over 1{,}536 pooled evaluation samples,
+against the same $0.75$ threshold; the symmetry variant on its seed-0 checkpoint gives
+$99.35\%$. The 1{,}536 are evaluation samples drawn under three evaluation seeds on a
+single trained checkpoint, not additional trained models.
 
 Occupancy $F_1$ on the occupied class is $0.88$ in the pure inverse regime and rises to
 $0.92$ in retrofit. The predicted occupancy fraction is $0.43$ against a true $0.43$,
 with a per-sample spread of the same order as the data's own, which rules out the
 constant-output collapse that a pixel metric would miss.
 
-Every generated design satisfies Eq.~\eqref{eq:sym} exactly, whereas an unconstrained
-decoder on identical inputs produced asymmetric outputs. The constraint does not by
-itself lower spectral error, and it leaves occupancy IoU essentially unchanged; its
-benefit is that the output is admissible, which removes a class of failures that a
-post-hoc symmetrisation would hide rather than prevent.
+The variant trades accuracy for structure. Every design it generates satisfies
+Eq.~\eqref{eq:sym} exactly, by construction, whereas the base decoder on identical inputs
+produced asymmetric outputs. That guarantee costs about $7\%$ in test MAE, $0.0524$ against
+$0.0490$, while occupancy IoU on the occupied class is essentially unchanged; the constraint
+therefore acts on the admissibility of the output and not on spectral fidelity, and it is not
+a free improvement. On the scalar-dependence probe the two models are indistinguishable in
+that both sit near chance: $0.523$ and $0.519$ for the variant against $0.505$ and $0.529$ for
+the base model, all far below the $0.75$ threshold.
 
 \clearpage
 \begin{table}[h]
@@ -713,7 +759,10 @@ post-hoc symmetrisation would hide rather than prevent.
 uses the \textbf{unconstrained} decoder, the full-resolution decoder without the symmetry
 constraint; the last block isolates the decoder change against the constrained model that
 Table~\ref{tab:benchmark} reports. Each block changes one factor against its own control.
-Values are test-split MAE and validation-split scenario gate A, mean over three seeds.}
+Values are test-split MAE and validation-split scenario gate A, mean over three seeds.
+The train-split rows change both the amount of data and the number of optimiser steps,
+which was scaled with training-set size, so they measure data allocation rather than the
+isolated effect of corpus size.}
 \label{tab:ablation}
 \begin{tabular}{@{}llccc@{}}
 \toprule
@@ -741,10 +790,11 @@ decoder & unconstrained (base) & 11.40M & $0.0490 \pm 0.0013$ & 0.9967 \\
 \subsection{Qualitative comparison}
 
 Figure~\ref{fig:designs} shows ten held-out test spectra decoded under all three regimes
-together with the released baseline's output for the pure inverse regime. The baseline
-produces coarser, stair-stepped shapes, a consequence of generating a $32\times32$
-quadrant; our decoder produces the same symmetry at full $64\times64$ resolution. In
-retrofit the visible pixels dominate and the difference narrows, as expected. Two
+together with the released baseline's output for the pure inverse regime. Both models generate a $32\times32$ quadrant in the figure: the released MetaDiT
+generator and our symmetry variant share that construction, so no resolution advantage is
+claimed here. The differences visible in the figure are of boundary detail and of how
+strongly the target spectrum is followed, not of output grid. In retrofit the visible pixels
+dominate and the difference narrows, as expected. Two
 failure modes visible in the figure are worth naming: where the target admits several
 designs the model returns a smooth compromise rather than one of the sharp alternatives,
 and fine notches are rounded off, the qualitative counterpart of the conditional-mean
@@ -758,10 +808,14 @@ design, retrofit, and the released baseline under the pure inverse regime. Each 
 is one test sample; white denotes occupied material.}\label{fig:designs}
 \end{figure}
 
-Three limitations should be read alongside these numbers. Supplied scalar parameters are
+Four limitations should be read alongside these numbers. Supplied scalar parameters are
 not demonstrably used: the paired scalar-dependence statistics sit at $0.505$ and $0.529$
 against a decision threshold of $0.75$, so the evidence supports strong spectral dependence
-but not reliable parameter conditioning. The
+but not reliable parameter conditioning, and the two must not be conflated. Because every
+released pattern is mirror-symmetric, an ordinary random mask can leave the mirror partner
+of a masked patch visible, so masked-region scores partly measure copying: on the diagnostic
+set, masked-region IoU falls from $0.7516$ under ordinary masks to $0.7328$ under
+mirror-leak-free masks. The
 benchmark is scored by the same frozen surrogate that supplies the physics term during
 training, so it is a consistency measurement and not an independent physical validation; no
 full-wave evaluation is reported here. And the model is deterministic: it returns one design
@@ -776,16 +830,19 @@ the measured spectra chose between them did not establish target-specific select
 We have presented a factorised, goal-conditioned JEPA for metasurface inverse design
 that treats masking of the geometry and of the parameters as independent operations,
 conditions a latent-completion transformer on a frozen spectrum encoder through both
-FiLM and attention tokens, and encodes the corpus's exact mirror symmetry in its
-decoder. With $3.2\times$ fewer trainable parameters than the released baseline it
-reaches a test-split MAE of $0.0524$ and passes the paired gate in all three regimes.
+FiLM and attention tokens, and decodes the full cell. With about $2.9\times$ fewer
+trainable parameters than the released baseline it reaches a test-split MAE of $0.0490$
+and clears the paired win-rate threshold in all three regimes. A symmetry-constrained
+decoder variant that predicts one quadrant and mirrors it is reported alongside: it makes
+every output satisfy the corpus symmetry exactly, at a measured cost of about $7\%$ in MAE.
 
 Three directions follow from the results. Output fidelity is the most immediate: the
 decoder holds a small fraction of the parameters and the generated boundaries are
 smoother than the recorded designs, which points at the output parameterisation rather
 than the latent as the current bottleneck. Multi-modality is the second: the model is
-deterministic, so for spectra with several admissible designs it returns an average of
-them, and a stochastic or multi-hypothesis decoder is the natural remedy. External
+deterministic and returns one candidate per target, so it cannot represent several
+admissible designs for the same spectrum, however much the returned shapes resemble a
+compromise between them; a stochastic or multi-hypothesis decoder is the natural remedy. External
 validity is the third: every number here comes from one released corpus and one frozen
 surrogate, and evaluation on independently acquired experimental data, together with
 an independent full-wave solver~\cite{meep,maxim} rather than the surrogate that also

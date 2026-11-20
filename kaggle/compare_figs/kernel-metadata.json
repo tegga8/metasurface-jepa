@@ -1,0 +1,20 @@
+{
+  "id": "anosvol/metasurface-jepa-compare-figs",
+  "title": "metasurface-jepa compare figs",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["metasurface", "jepa", "figures"],
+  "dataset_sources": [
+    "anosvol/metadit-aaai2026-staging",
+    "anosvol/metasurface-jepa-192d-full-epoch-ckpt",
+    "anosvol/metasurface-jepa-imp1-ckpt"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

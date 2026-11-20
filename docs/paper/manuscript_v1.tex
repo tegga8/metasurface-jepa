@@ -126,7 +126,7 @@ accurate but slow, or build a differentiable approximation of the forward map an
 descend through it. Learned approaches instead amortise the solver into a model that is
 evaluated once per query, and differ in what that model is trained to output: a point
 estimate of the design~\cite{tandem,structuralcolor}, a distribution over
-designs~\cite{genmodel}, or a ranking over a fixed library~\cite{moclip}. Point
+designs~\cite{genmodel}, or a ranking over a fixed library. Point
 estimates inherit the ambiguity of the inverse map and tend to return an average of
 competing answers. Distributions avoid that but need sampling and a noise schedule, and
 their conditioning can be underused because the training objective is satisfied by the
@@ -151,6 +151,15 @@ gates. We use all of these, but assign them distinct jobs: FiLM carries the
 global condition at every block, goal tokens carry fine structure through attention, and
 a frozen modulation on the target makes the conditioning impossible to remove.
 
+Learned representations already exist for this domain. MOCLIP trains a shared
+structural-spectral latent space with a contrastive objective on a large experimentally
+acquired corpus, and uses it as a foundation model for inverse design~\cite{moclip}. The
+difference from the present work is the training signal, not the modality: MOCLIP aligns a
+geometry with its spectrum, whereas we predict the latent of a masked region from the
+visible remainder, with the spectrum entering only as a condition on that prediction. That
+makes the partial-observation setting, where an incomplete cell and a partly known parameter
+vector are given and the rest is completed, the object of study rather than a by-product.
+
 Metasurfaces are the setting in which these ideas are tested here. A metasurface is a
 planar array of sub-wavelength scatterers whose response is set by geometry, so the
 design is an image and the forward map is an electromagnetic solve. The field has
@@ -158,7 +167,10 @@ adopted learned inverse design quickly, first with tandem
 networks~\cite{tandem,structuralcolor}, then with generative
 models~\cite{genmodel}, and most recently with large-scale pipelines in which the
 bottleneck is the cost of evaluating candidates rather than the network
-itself~\cite{largescale,vr,roadmap,revisit}. Two properties of the domain shape the
+itself~\cite{largescale,vr,roadmap,revisit}. A current line puts the solver inside the
+generator instead of beside it, either as a physics loss on the training signal or as a
+second stage that repairs the structural output, both of which are evaluation settings
+different from the one used here~\cite{mxdiffusion}. Two properties of the domain shape the
 design space: the parameters that matter are few and physically interpretable, and the
 solver is accurate but far too slow to sit inside a training loop, which is why a frozen
 surrogate is standard. The circularity that follows, where a model is scored by the same
@@ -180,7 +192,9 @@ to $64\times64$, so its output is symmetric by construction. We keep the data, t
 and the surrogate unchanged so that numbers are comparable, and change three things: the
 design is factorised into occupancy and explicit parameters instead of a broadcast
 tensor; the generator is a deterministic JEPA instead of a diffusion process; and the
-spectral conditioning is made structurally non-nullifiable. The first change addresses a
+spectral conditioning is held by a fixed target-side modulation, which keeps the target
+modulation itself from adapting the condition away rather than making that impossible. The
+first change addresses a
 specific weakness of the broadcast form, in which $l/3$ is constant over the cell, so
 the lattice constant is readable from a single pixel and a masked-region objective is
 partly answerable without the region's neighbours. The second and third address the
@@ -202,13 +216,20 @@ modulated by a frozen FiLM driven by $\mathbf{c}$, produces the spectrum-conditi
 and an EMA copy of the scalar branch produces the target FiLM and the scalar latent. The
 teacher never receives gradients. The student input panel is a real held-out sample with the masked tokens drawn in
 grey and the visible material in white, so what the encoder hides is visible in the
-figure itself; the teacher receives the complete pattern.}
+figure itself; the teacher receives the complete pattern. The occupancy decoder is drawn with
+its stages: a $192\!\to\!96$ FiLM block taking $16^2$ tokens to $32^2$, two
+resolution-preserving FiLM blocks, and a $3\times3$ head returning the full $64^2$ cell. The
+symmetry-constrained variant replaces the last stages with a $32^2$ quadrant and a
+parameter-free mirror; it is reported as a variant in Section~\ref{sec4}.}
 \label{fig:arch}
 \end{figure}
 
 \subsection{Dataset and semantic factorisation}
 
-We use the released MetaDiT corpus~\cite{metadit}, unchanged. Each sample contains a
+We use the released MetaDiT corpus~\cite{metadit}, unchanged. The underlying free-form
+meta-atom dataset, its simulation protocol and its sweep over lattice constant, thickness and
+refractive index originate in the study of An~\emph{et al.}~\cite{an2020}. Each sample
+contains a
 $64\times64$ binary occupancy map $G$, three scalar parameters, lattice constant $l$,
 meta-atom thickness $h$ and meta-atom refractive index $r$, and the complex transmission spectrum
 on 301 frequency samples. Measured over the corpus, $l\in[2.5,3.0]$,
@@ -463,7 +484,9 @@ transform whose coefficients come from the scalar branch. (b) Fusion: the three 
 are concatenated into $273$ tokens and passed through two transformer blocks. (c) One GCLCT
 block: an affine-free layer norm and a FiLM modulation from the global spectrum condition
 before each sub-layer, with a residual sum after every sub-layer; the middle sub-layer is the
-cross-attention over the $273$ fused tokens. The stack repeats eight times.}
+cross-attention over the $273$ fused tokens. The stack repeats eight times, and its $257$
+queries split into $256$ spatial outputs $\hat{\mathbf z}\in\mathbb{R}^{256\times192}$ plus
+one scalar output $\hat{\mathbf s}_\Sigma\in\mathbb{R}^{1\times192}$.}
 \label{fig:blocks}
 \end{figure}
 
@@ -471,18 +494,42 @@ cross-attention over the $273$ fused tokens. The stack repeats eight times.}
 
 Two exponential-moving-average targets are maintained, one for the occupancy encoder
 and one for the scalar encoder, with momentum ramped linearly from $0.996$ to $0.999$
-over the run. Three quantities are produced under no gradient. The first is the plain
-geometry target
+over the run. Three quantities are produced under no gradient, and they are named
+separately here because they are not compared by the same term. The plain geometry target
+applies only the scalar modulation of the teacher, on the complete unmasked cell,
 \begin{equation}
-\mathbf{z}_y = \mathrm{EMA}_{\mathrm{occ}}(G),
+\mathbf{z}_y = E_{\mathrm{EMA}}\big(G;\;\mathrm{FiLM}_{s,\mathrm{EMA}}(
+\mathbf{s}_{\mathrm{true}})\big).
 \end{equation}
-computed on
-the complete, unmasked cell and modulated by the scalar target. The second is a
-spectrum-conditioned target, obtained by additionally modulating the target encoder
-with a frozen FiLM whose coefficients come from $\mathbf{c}$; matching it requires the
-goal, and freezing the modulation removes the objective's ability to make the target
-spectrum-free again. The third is a scalar target $\mathbf{z}_y^{\mathrm{sc}}$ from the
-EMA scalar branch, which forces the scalar path to carry its conditioning.
+The spectrum-conditioned target applies the fixed spectral modulation on top of it,
+\begin{equation}
+\mathbf{z}_y^{\mathrm{spec}} = E_{\mathrm{EMA}}\big(G;\;
+\mathrm{FiLM}_{s,\mathrm{EMA}}(\mathbf{s}_{\mathrm{true}}),\;
+\mathrm{FiLM}_{\mathrm{spec}}(\mathbf{c})\big),
+\end{equation}
+and the scalar target is the EMA summary of the known parameters,
+\begin{equation}
+\mathbf{z}_y^{\mathrm{sc}} = \mathrm{Summary}_{\mathrm{EMA}}(
+\mathbf{s}_{\mathrm{true}}).
+\end{equation}
+The correspondence to the objective is then: $\mathcal{L}_{\mathrm{inv}}$,
+$\mathcal{L}_{\mathrm{var}}$ and $\mathcal{L}_{\mathrm{cov}}$ compare the predicted
+occupancy latents with $\mathbf{z}_y$ through the shared projector, on masked tokens;
+$\mathcal{L}_{\mathrm{cond}}$ compares the projected prediction with
+$\mathbf{z}_y^{\mathrm{spec}}$ by cosine similarity; and
+$\mathcal{L}_{\mathrm{scal\text{-}t}}$ compares the predicted scalar latent with
+$\mathbf{z}_y^{\mathrm{sc}}$, again by cosine similarity. $\mathcal{L}_{\mathrm{occ}}$,
+$\mathcal{L}_{\mathrm{scalar}}$, $\mathcal{L}_{\mathrm{sum}}$ and
+$\mathcal{L}_{\mathrm{phys}}$ are the direct occupancy, scalar, known-scalar and
+surrogate terms and involve no target encoder at all.
+
+The target-side spectral modulation is a separate, frozen set of linear FiLM heads,
+initialised with weight standard deviation $0.1$, scale bias one and shift bias zero. It is
+not a copy of the trainable GCLCT conditioning, and freezing it prevents the target
+modulation itself from adapting to remove the spectral condition. That is a weaker
+guarantee than impossibility: the vector $\mathbf{c}$ it consumes comes from trainable
+read-out layers, so whether the model actually uses the condition is decided by the paired
+evaluation of Section~\ref{sec4}, not by the architecture.
 
 The exponential-moving-average target is what makes the objective non-degenerate.
 If the target were the student's own output, the loss could be driven to zero by
@@ -494,11 +541,13 @@ momentum ramp matters for the same reason: too fast a teacher at the start gives
 target that moves with the student and the lag disappears, which is why the
 momentum is tied to the total step count rather than fixed.
 
-The ordinary geometry prediction and the spectrum-free EMA geometry target are projected by
-one MLP with batch normalisation owned by the objective; the spectrum-conditioned target and
-the scalar target are compared by cosine similarity instead, without that projector rather than by the model, and three VICReg terms are evaluated on the
-masked tokens: an invariance mean-squared error, a variance hinge with threshold one,
-and an off-diagonal covariance penalty~\cite{vicreg}. Keeping the projector in the
+The ordinary geometry prediction and the spectrum-free target are projected by one MLP with
+batch normalisation owned by the objective, a $192\to192\to192$ stack with ReLU between the
+linear layers, and three VICReg terms are evaluated on the masked tokens: an invariance
+mean-squared error, a variance hinge with threshold one, and an off-diagonal covariance
+penalty~\cite{vicreg}. Variance is averaged over the two branches and the covariance
+penalties are summed. The projector belongs to the objective rather than to the model, so the
+projection is not part of the representation that is evaluated. Keeping the projector in the
 objective means the latent the encoder produces is the one that is regularised, not a
 private projection of it.
 
@@ -862,14 +911,22 @@ served as the training signal, would test the representation rather than the sco
 \noindent\textbf{Consent for Publication.} Not applicable.
 
 \vspace{0.3em}
-\noindent\textbf{Materials Availability.} All materials necessary to reproduce the experiments are described within the manuscript.
+\noindent\textbf{Materials Availability.} The model implementation, the training and
+evaluation scripts, the configuration of every reported run and the trained checkpoints of the
+three base-model seeds are archived with the code below. The released corpus and the frozen
+surrogate are third-party artifacts and are not redistributed; both are obtained from the
+MetaDiT release~\cite{metadit}, whose underlying dataset is described by An~\emph{et
+al.}~\cite{an2020}.
 
 \vspace{0.3em}
 \noindent\textbf{Author Contributions.} All authors contributed to the conception and design of the study and also, all authors reviewed and approved the final manuscript.
 
 \vspace{0.3em}
-\noindent\textbf{Data and Code Availability.} The source code, datasets, and supplementary materials supporting the findings of this study are maintained at
-\url{https://github.com/tegga8/metasurface-jepa}.
+\noindent\textbf{Data and Code Availability.} The source code, the configurations and the
+evaluation scripts supporting the findings of this study are maintained at
+\url{https://github.com/tegga8/metasurface-jepa}, branch \texttt{work-192d}. The exact state
+used for the experiments reported here is the commit that accompanies this manuscript; the
+repository records the commit hash of each training run alongside its results ledger.
 
 \begingroup\small
 \begin{thebibliography}{99}\bibitem{metadit} H.~Li \emph{et al.}, ``MetaDiT: enabling fine-grained constraints in
@@ -921,6 +978,17 @@ meta-optics reshaping virtual reality,'' \emph{Nat. Commun.}, vol.~13, art.~2409
 A.~Fratalocchi, ``MOCLIP: a foundation model for large-scale nanophotonic inverse
 design,'' \emph{Nat. Commun.}, vol.~17, art.~9902, 2026.
 \href{https://doi.org/10.1038/s41467-026-76714-x}{doi:10.1038/s41467-026-76714-x}.
+
+\bibitem{mxdiffusion} S.~Mondal, T.~Park, S.~Biswas, A.~X.~Wang, and W.~Cai, ``MxDiffusion: a
+physics-aware Maxwell's law-guided diffusion model strategy for inverse photonic metasurface
+design,'' \emph{Nano Lett.}, 2026.
+\href{https://doi.org/10.1021/acs.nanolett.6c00943}{doi:10.1021/acs.nanolett.6c00943}.
+
+\bibitem{an2020} S.~An, C.~Fowler, B.~Zheng, M.~Y.~Shalaginov, H.~Tang, H.~Li, L.~Zhou,
+J.~Ding, A.~M.~Agarwal, C.~Rivero-Baleine, M.~Kang, K.~A.~Richardson, T.~Gu, J.~Hu, and
+H.~Zhang, ``Deep learning modeling approach for metasurfaces with high degrees of freedom,''
+\emph{Opt. Express}, vol.~28, no.~21, pp.~31932--31942, 2020.
+\href{https://doi.org/10.1364/OE.401960}{doi:10.1364/OE.401960}.
 
 \bibitem{ijepa} M.~Assran \emph{et al.}, ``Self-supervised learning from images with a
 joint-embedding predictive architecture,'' in \emph{Proc. IEEE/CVF Conf. Comput. Vis.

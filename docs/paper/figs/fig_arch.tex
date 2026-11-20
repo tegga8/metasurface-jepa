@@ -60,9 +60,10 @@
 \node[lab, above=1pt of cf] {global physics};
 
 % ---------------- decoders and outputs ----------------
-\node[dec] (od) at (14.3, 1.0) {occupancy decoder\\$192\!\to\!96$, $16\!\to\!32$};
-\node[dec] (sd) at (14.3,-1.6) {scalar decoder\\$192\!\to\!64\!\to\!3$};
-\node[outbox] (des) at (17.4, 1.0) {design $\hat G$\\$64\times64$};
+\node[dec, align=center] (od) at (14.4, 1.15) {occupancy decoder\\$192\!\to\!96$ FiLM: $16^2\!\to\!32^2$\\$2\times$ FiLM blocks at $32^2$\\$3\times3$ head $\Rightarrow 64^2$};
+\node[dec] (sd) at (14.4,-1.7) {scalar decoder\\$192\!\to\!64\!\to\!3$};
+\node[outbox] (des) at (17.7, 1.15) {design $\hat G$\\$64\times64$};
+\node[lab, below=2pt of od, align=center] {variant: $32^2$ quadrant $\Rightarrow$ mirror};
 \node[outbox] (prm) at (17.4,-1.6) {$\hat l,\hat h,\hat r$};
 
 % ---------------- teacher ----------------

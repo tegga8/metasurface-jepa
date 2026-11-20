@@ -111,7 +111,7 @@
 \node[film, right=2.8mm of r2] (c3) {LN\\FiLM$(\mathbf{c})$};
 \node[op, right=3.2mm of c3] (cml) {MLP};
 \node[sum, right=2.8mm of cml] (r3) {$+$};
-\node[outb, right=3.2mm of r3] (zo) {$\hat{\mathbf{z}}$\\$\mathbb{R}^{256\times192}$};
+\node[outb, right=3.2mm of r3, align=center] (zo) {$\hat{\mathbf{z}}$ $\mathbb{R}^{256\times192}$\\[1pt]$\hat{\mathbf{s}}_\Sigma$ $\mathbb{R}^{1\times192}$};
 
 \foreach \a/\b in {qq/c1, c1/csa, csa/r1, r1/c2, c2/cca, cca/r2, r2/c3, c3/cml, cml/r3, r3/zo}
   \draw[ar] (\a) -- (\b);

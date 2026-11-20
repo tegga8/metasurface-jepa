@@ -914,8 +914,11 @@ from the recorded benchmark run.}\label{fig:designs}
 \centering
 \includegraphics[width=0.86\textwidth]{figs/spectra_compare.png}
 \caption{What the decoded designs actually do. The frozen forward surrogate evaluates each
-decoded design in the pure inverse regime and its response is plotted against the target
-spectrum for three held-out items, real part above and imaginary part below. All three
+decoded design in regime A, the pure inverse case with a full occupancy mask and all three
+parameters unknown, and its response is plotted against the target spectrum for three
+held-out items, real part above and imaginary part below. This is the only regime in which
+the released baseline is defined, and no gate statistic is plotted here: the curves show
+the spectra, not the paired win fractions of Table~\ref{tab:gates}. All three
 models reproduce the broad shape, and all three smooth over the narrow resonances, which are
 the features that carry the phase information the designs are supposed to set. MetaDiT-S
 departs most at the sharp dips. This is a consistency measurement against the surrogate that

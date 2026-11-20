@@ -103,8 +103,8 @@
 \draw[tarr] (tgt) -- (lss);
 \draw[tarr] (gc.east) -- ++(0.40,0) -- ++(0,-4.9) -| (lss.north);
 \draw[tarr] (cf.south) -- ++(0,-0.9) -| ([xshift=-9mm]toe.north);
-\draw[tarr] (se.north -| {2.10},0) -- (oe.south -| {2.10},0);
-\node[lab, left=2pt] at ({2.10},-0.62) {FiLM $(\gamma_b,\beta_b)$};
+\draw[tarr] (se.north -| {2.62},0) -- ({2.28},0 |- se.north) -- ({2.28},0 |- oe.south);
+\node[lab, left=2pt] at ({2.28},-0.62) {FiLM $(\gamma_b,\beta_b)$};
 
 % ---------------- bands ----------------
 \coordinate (sNE) at ($(des.north east)+(0.36,0.28)$);

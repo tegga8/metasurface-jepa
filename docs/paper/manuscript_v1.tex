@@ -170,7 +170,10 @@ bottleneck is the cost of evaluating candidates rather than the network
 itself~\cite{largescale,vr,roadmap,revisit}. A current line puts the solver inside the
 generator instead of beside it, either as a physics loss on the training signal or as a
 second stage that repairs the structural output, both of which are evaluation settings
-different from the one used here~\cite{mxdiffusion}. Two properties of the domain shape the
+different from the one used here~\cite{mxdiffusion}. Stepwise pipelines follow the same
+logic, decomposing the task into a pattern generator, a parameter-inference stage and a
+transmittance predictor and reporting an error on their own protocol rather than on a
+held-out split of this corpus~\cite{metasr}; we therefore do not rank against it. Two properties of the domain shape the
 design space: the parameters that matter are few and physically interpretable, and the
 solver is accurate but far too slow to sit inside a training loop, which is why a frozen
 surrogate is standard. The circularity that follows, where a model is scored by the same
@@ -866,8 +869,13 @@ of a masked patch visible, so masked-region scores partly measure copying: on th
 set, masked-region IoU falls from $0.7516$ under ordinary masks to $0.7328$ under
 mirror-leak-free masks. The
 benchmark is scored by the same frozen surrogate that supplies the physics term during
-training, so it is a consistency measurement and not an independent physical validation; no
-full-wave evaluation is reported here. And the model is deterministic: it returns one design
+training, so it is a consistency measurement and not an independent physical validation. A
+limited full-wave check of the symmetry variant with Meep~\cite{meep} on 28 novel designs
+gave a normalised real-goal error of $0.5006$ against $1.253$ for a shuffled goal, better on
+22 of 28 designs (sign test, $p=0.0037$), while the correlation-based criterion reached 19 of
+28 ($p=0.087$) and is not persuasive. That is one checkpoint, a small design set and fixed
+scalar values, so it is an indication and not full-test-set physical validation, and no
+full-wave result is claimed for the base model. And the model is deterministic: it returns one design
 per target rather than a distribution over the admissible set, so the several-valid-answers
 structure of the problem is acknowledged in the objective but not represented in the output.
 A separate experiment in which guidance strength generated five candidates per target and
@@ -983,6 +991,10 @@ design,'' \emph{Nat. Commun.}, vol.~17, art.~9902, 2026.
 physics-aware Maxwell's law-guided diffusion model strategy for inverse photonic metasurface
 design,'' \emph{Nano Lett.}, 2026.
 \href{https://doi.org/10.1021/acs.nanolett.6c00943}{doi:10.1021/acs.nanolett.6c00943}.
+
+\bibitem{metasr} L.~Gu \emph{et al.}, ``A novel stepwise generative-discriminative reasoning
+framework for metasurface inverse design,'' \emph{Opt. Laser Technol.}, 2026.
+\href{https://doi.org/10.48550/arXiv.2604.26244}{doi:10.48550/arXiv.2604.26244}.
 
 \bibitem{an2020} S.~An, C.~Fowler, B.~Zheng, M.~Y.~Shalaginov, H.~Tang, H.~Li, L.~Zhou,
 J.~Ding, A.~M.~Agarwal, C.~Rivero-Baleine, M.~Kang, K.~A.~Richardson, T.~Gu, J.~Hu, and

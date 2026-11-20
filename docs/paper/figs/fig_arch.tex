@@ -86,8 +86,8 @@
 \draw[ar] (se.east) -- (fu.west |- se.east);
 
 \draw[ar] (fu.east) -- (gc.west);
-\draw[ar] (gc.east) -- ++(0.7,0) |- (od.west);
-\draw[ar] (gc.east) -- ++(0.7,0) |- (sd.west);
+\draw[ar] (gc.east) -- ++(0.40,0) |- (od.west);
+\draw[ar] (gc.east) -- ++(0.40,0) |- (sd.west);
 \draw[ar] (od) -- (des);
 \draw[ar] (sd) -- (prm);
 
@@ -101,9 +101,10 @@
 \draw[tarr] (toe) -- (tgt);
 \draw[tarr] (tse.east) -- ++(0.6,0) |- (tgt.west);
 \draw[tarr] (tgt) -- (lss);
-\draw[tarr] (gc.east) -- ++(0.7,0) -- ++(0,-4.9) -| (lss.north);
+\draw[tarr] (gc.east) -- ++(0.40,0) -- ++(0,-4.9) -| (lss.north);
 \draw[tarr] (cf.south) -- ++(0,-0.9) -| ([xshift=-9mm]toe.north);
-\draw[tarr] (se.north west) -- ++(0,0.65) -- ++(-1.25,0) -- ++(0,1.60) -- ++(2.35,0) -- (oe.south);
+\coordinate (filmEntry) at ({1.55},1.35);
+\draw[tarr] (se.west) -- ({1.55},-1.9) -- (filmEntry) -- (filmEntry -| oe.west);
 
 % ---------------- bands ----------------
 \coordinate (sNE) at ($(des.north east)+(0.36,0.28)$);

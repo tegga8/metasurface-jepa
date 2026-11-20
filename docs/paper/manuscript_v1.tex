@@ -57,7 +57,7 @@ this directly and make the conditioning non-negotiable, at three levels. The des
 factorised into a single-channel $64\times64$ occupancy map and three explicit physical
 parameters with known/unknown flags, so the geometry and the parameters can be masked
 independently and the model is never handed a parameter disguised as a pixel. The
-spectrum enters through a frozen released encoder and drives two separate pathways, a
+spectrum enters through the frozen MetaDiT spectrum encoder~\cite{metadit} and drives two separate pathways, a
 token-level goal that the predictor attends to and a global physics condition applied as a
 per-block FiLM modulation; a second, fixed copy of that modulation sits on the target
 encoder, so the target modulation itself cannot adapt to remove the spectral condition.
@@ -111,11 +111,12 @@ parts, and every statistic in this paper is computed on that released sampling. 
 is factorised into an
 occupancy map, three flagged parameters and the spectrum, with the three-channel
 broadcast tensor assembled only at the surrogate boundary, so spatial and parameter
-masking stay independent. The spectrum enters through a frozen released encoder that
+masking stay independent. The spectrum enters through the frozen MetaDiT spectrum encoder~\cite{metadit}, which
 drives both a global FiLM path~\cite{film} and sixteen attention tokens, and the FiLM that acts on
-the target is frozen so the conditioning cannot be optimised away. Finally, the
-occupancy decoder predicts a single quadrant and mirrors it, which is exact for this
-corpus and makes every output admissible.
+the target is frozen so the conditioning cannot be optimised away. Finally, the base decoder predicts every cell of the $64\times64$ grid, and a second,
+symmetry-constrained variant predicts one quadrant and mirrors it, which is exact for this
+corpus; both are reported, because the constraint buys guaranteed symmetry at a measurable
+cost in error rather than for free.
 
 \section{Background and Related Work}\label{sec2}
 
@@ -220,9 +221,9 @@ and an EMA copy of the scalar branch produces the target FiLM and the scalar lat
 teacher never receives gradients. The student input panel is a real held-out sample with the masked tokens drawn in
 grey and the visible material in white, so what the encoder hides is visible in the
 figure itself; the teacher receives the complete pattern. The occupancy decoder is drawn with
-its stages: a $192\!\to\!96$ FiLM block taking $16^2$ tokens to $32^2$, two
-resolution-preserving FiLM blocks, and a $3\times3$ head returning the full $64^2$ cell. The
-symmetry-constrained variant replaces the last stages with a $32^2$ quadrant and a
+its stages: a $192\!\to\!96$ FiLM block taking $16\times16$ tokens to $32\times32$, two
+resolution-preserving FiLM blocks, and a $3\times3$ head returning the full $64\times64$ cell. The
+symmetry-constrained variant replaces the last stages with a $32\times32$ quadrant and a
 parameter-free mirror; it is reported as a variant in Section~\ref{sec4}.}
 \label{fig:arch}
 \end{figure}
@@ -242,8 +243,8 @@ occupied class is neither rare nor dominant and pixel accuracy would be a mislea
 metric. The released split is used as published: 139{,}906 training, 17{,}488
 validation and 17{,}489 test samples.
 
-The spectrum is kept complex, as two real channels of 301 samples each, rather
-than reduced to an amplitude. Amplitude alone loses the phase relation between
+The spectrum is kept complex, as two real channels of $301$ samples each, rather than
+collapsed to one real-valued magnitude per frequency. Amplitude alone loses the phase relation between
 frequencies, and two designs that differ only in resonant phase can have nearly
 identical amplitude curves while producing different transmitted fields. Keeping
 both channels also matches the interface of the released encoder, which was trained
@@ -332,10 +333,11 @@ applied as
 \mathbf{x} \;\mapsto\; \gamma_b\odot\mathbf{x}+\beta_b .
 \end{equation}
 
-One pair per block, rather than one pair shared across depth, is what lets the
-parameters act differently at different scales of abstraction: an early block sees
-local patch statistics where the lattice constant matters most, while a late block
-sees a global summary where thickness and refractive index dominate. The modulation is applied
+One pair per block, rather than one pair shared across the depth of the encoder, gives the
+scalar path more capacity than a single shared modulation, so each block can in principle use
+the parameters differently. We do not claim that early and late blocks specialise in this way,
+because that was not measured; what is measured is that the modulation is present, and the
+scalar-dependence result of Section~\ref{sec4} shows that it is not yet used reliably. The modulation is applied
 after the block's residual sum, not inside the attention. Only the first block's attention
 therefore sees geometry alone; every later block attends over a representation the
 parameters have already modulated, so later attention weights do depend on the scalar
@@ -358,8 +360,9 @@ G\in\{0,1\}^{1\times64\times64}
 \end{equation}
 that is, $256$ tokens of width $192$. Masking is applied at token granularity: a token
 whose $4\times4$ block is masked is replaced by a learned mask token before the
-positional embedding is added, so the encoder never sees the hidden pixels in any form,
-not even indirectly through a patch statistic.
+positional embedding is added, so the encoder never sees the hidden pixels in any form, not even indirectly: the whole $4\times4$ patch is
+replaced before the convolution runs, so no statistic of the hidden pixels, not even their mean
+or their variance, can reach the encoder.
 
 The ordering matters: the mask token is substituted before the positional
 embedding is added, so a masked position still carries its location but nothing
@@ -412,15 +415,14 @@ The three branches are concatenated after projection to a common width,
 \end{equation}
 with $256$ occupancy tokens, $16$ goal tokens and one scalar-summary token. The fusion
 module is a two-layer transformer; its role is to let goal tokens exchange information
-with the geometry before prediction while keeping the goal an attributable block of the
-context.
+with the geometry before prediction while keeping the goal tokens separable from the geometry so that their effect can be
+measured on its own.
 
 Three details matter for what follows. The sixteen goal tokens are projected from 384 to
 192 dimensions by a single linear map before concatenation, while the occupancy tokens
-arrive already at width 192 from the encoder, so the concatenation is dimensionally
-uniform but semantically asymmetric: the geometry block carries spatial position through
-its own positional embedding, whereas the goal and summary blocks carry none, because a
-goal token has no location. The fusion stack is deliberately shallow, two blocks, because
+arrive already at width 192 from the encoder, so the concatenation has a single width but two kinds of content: the geometry tokens carry
+spatial position through their own positional embedding, whereas the goal and summary tokens
+carry none, because neither has a location. The fusion stack is deliberately shallow, two blocks, because
 its job is not to reason about the design but to let the goal tokens read enough geometry
 to become useful context. Deeper fusion was not needed: the heavy reasoning happens in
 the predictor, and a deeper fusion stack would compete with it for capacity while adding
@@ -610,8 +612,7 @@ goal was dropped for guidance, because there the target would be the condition t
 removed. Gradients reach the surrogate input but never its parameters: the surrogate is
 frozen, excluded from the optimiser, and asserted to receive no gradient at every step.
 Between the decoder and the surrogate the occupancy is thresholded at $0.5$ in the forward
-pass while the backward pass runs through the soft field, a straight-through estimator. The
-hard forward is not cosmetic: the released surrogate's activations give a nearly dead
+pass while the backward pass runs through the soft field, a straight-through estimator. The hard forward is not a detail of bookkeeping: the released surrogate's activations give a nearly dead
 gradient on soft occupancy fields, so the soft-forward path alone yields a physics term
 that looks healthy and trains nothing. This is the default in the training configuration
 and is enforced rather than optional when the physics weight is positive.
@@ -639,9 +640,11 @@ G \;=\; \mathrm{fliplr}(G) \;=\; \mathrm{flipud}(G)
 \;=\; \mathrm{rot}_{180}(G),
 \label{eq:sym}
 \end{equation}
-with no exceptions over 174{,}883 patterns. The data therefore occupy the fixed-point set
-of the four-fold mirror group, and a decoder that predicts all $64\times64$ pixels spends
-three quarters of its output degrees of freedom on directions the data never use.
+with no exceptions over 174{,}883 patterns. The data therefore occupy the fixed-point set of the four-fold mirror group. That group has
+four elements, the identity, a left-right reflection, an up-down reflection, and their
+composition, a $180^{\circ}$ rotation; a pattern fixed by the group is unchanged by all four.
+A decoder that predicts all $64\times64$ pixels therefore spends three quarters of its output
+degrees of freedom on directions the data never use.
 
 The base decoder, which every headline result in this paper uses, upsamples the
 $16\times16$ token grid to $32\times32$ with a FiLM block, applies two resolution-preserving
@@ -783,12 +786,56 @@ C retrofit & 0.250 & all three & $\mathbf{0.064 \pm 0.002}$ & $0.9303 \pm 0.0110
 \end{tabular}
 \end{table}
 
+\begin{table}[h]
+\centering
+\caption{Behaviour at matched inputs. Ten held-out samples, one checkpoint per model, so
+these numbers are illustrative and not the ranking basis, which is
+Table~\ref{tab:benchmark}. The spectral error is the standard-deviation-normalised $L_1$
+distance between the surrogate response of the decoded design and the target, and the
+spectral correlation is taken over the $602$ real and imaginary components. MetaDiT-S is
+conditioned on the spectrum alone, so it has no partial or retrofit entry.}
+\label{tab:scenarios}
+\footnotesize
+\begin{tabular}{@{}llccc ccc@{}}
+\toprule
+Model & Regime & Masked & Known & MAE $\downarrow$ & Norm.\ spectral & Spectral & IoU \\
+ & & fraction & scalars & & error $\downarrow$ & corr.\ $\uparrow$ & $\uparrow$ \\
+\midrule
+Base (unconstrained) & A & 1.00 & none & 0.0413 & 0.0720 & 0.990 & 0.790 \\
+ & B & 0.50 & one & 0.0487 & 0.0844 & 0.986 & 0.857 \\
+ & C & 0.25 & three & 0.0237 & 0.0407 & 0.995 & 0.889 \\
+\midrule
+Symmetry variant & A & 1.00 & none & 0.0320 & 0.0549 & 0.992 & 0.783 \\
+ & B & 0.50 & one & 0.0566 & 0.0992 & 0.980 & 0.856 \\
+ & C & 0.25 & three & 0.0310 & 0.0530 & 0.991 & 0.888 \\
+\midrule
+MetaDiT-S~\cite{metadit} & A & 1.00 & none & 0.0549 & 0.0960 & 0.986 & 0.739 \\
+\botrule
+\end{tabular}
+\end{table}
+
 The conditioning result is stronger than the 512-sample protocol above. On the hard
 stratum, full occupancy mask with all three parameters unknown, the base model's seed-0
 checkpoint gives a paired win rate of $99.74\%$ over 1{,}536 pooled evaluation samples,
 against the same $0.75$ threshold; the symmetry variant on its seed-0 checkpoint gives
 $99.35\%$. The 1{,}536 are evaluation samples drawn under three evaluation seeds on a
 single trained checkpoint, not additional trained models.
+
+Table~\ref{tab:scenarios} sets the two decoders and the released baseline side by side on
+the same ten held-out samples and the same three regimes. All three models follow the target
+in the pure inverse regime, with spectral correlations between $0.986$ and $0.992$, so the
+difference between them is not whether the spectrum is reproduced but how much of the
+geometry is recovered: on these samples the occupancy IoU is $0.79$ for the base model and
+$0.74$ for MetaDiT, while the two agree closely on the spectral error. In partial and retrofit
+the supplied information dominates and the errors fall, as expected; MetaDiT has no entry
+there because it is conditioned on the spectrum alone and receives neither a visible region
+nor any parameter.
+
+The ten-sample ordering should not be read as a ranking. Here the symmetry variant happens to
+reach the lowest pure-inverse error, while on the full test split of
+Table~\ref{tab:benchmark} it is the worse of the two by about $7\%$; with ten samples that
+reversal is exactly the noise one expects, which is why the full split is the ranking basis
+and this table is an illustration of behaviour, not a comparison of means.
 
 Occupancy $F_1$ on the occupied class is $0.88$ in the pure inverse regime and rises to
 $0.92$ in retrofit. The predicted occupancy fraction is $0.43$ against a true $0.43$,
@@ -804,7 +851,6 @@ a free improvement. On the scalar-dependence probe the two models are indistingu
 that both sit near chance: $0.523$ and $0.519$ for the variant against $0.505$ and $0.529$ for
 the base model, all far below the $0.75$ threshold.
 
-\clearpage
 \begin{table}[h]
 \centering
 \caption{Controlled ablations on the canonical battery. Unless stated otherwise every arm

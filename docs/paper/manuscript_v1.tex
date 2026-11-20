@@ -831,11 +831,10 @@ the supplied information dominates and the errors fall, as expected; MetaDiT has
 there because it is conditioned on the spectrum alone and receives neither a visible region
 nor any parameter.
 
-The ten-sample ordering should not be read as a ranking. Here the symmetry variant happens to
-reach the lowest pure-inverse error, while on the full test split of
-Table~\ref{tab:benchmark} it is the worse of the two by about $7\%$; with ten samples that
-reversal is exactly the noise one expects, which is why the full split is the ranking basis
-and this table is an illustration of behaviour, not a comparison of means.
+The ten-sample ordering is not a ranking: here the variant reaches the lowest pure-inverse
+error, while on the full split of Table~\ref{tab:benchmark} it is the worse of the two by
+about $7\%$. At ten samples that reversal is expected noise, so the full split remains the
+ranking basis.
 
 Occupancy $F_1$ on the occupied class is $0.88$ in the pure inverse regime and rises to
 $0.92$ in retrofit. The predicted occupancy fraction is $0.43$ against a true $0.43$,
@@ -892,18 +891,35 @@ together with the released baseline's output for the pure inverse regime. Both m
 generator and our symmetry variant share that construction, so no resolution advantage is
 claimed here. The differences visible in the figure are of boundary detail and of how
 strongly the target spectrum is followed, not of output grid. In retrofit the visible pixels
-dominate and the difference narrows, as expected. Two
-failure modes visible in the figure are worth naming: where the target admits several
-designs the model returns a smooth compromise rather than one of the sharp alternatives,
-and fine notches are rounded off, the qualitative counterpart of the conditional-mean
-argument in Section~\ref{sec2}.
+dominate and the difference narrows, as expected. Two failure modes are visible: where the target admits several designs the model returns one
+smooth compromise rather than a sharp alternative, and fine notches are rounded off.
+Figure~\ref{fig:spectra} shows the spectral counterpart, where the broad shape is reproduced
+and the narrow resonances are not, consistent with regression towards the conditional mean.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{figs/designs.pdf}
-\caption{Ten held-out test spectra. Rows: ground truth, pure inverse design, partial
-design, retrofit, and the released baseline under the pure inverse regime. Each column
-is one test sample; white denotes occupied material.}\label{fig:designs}
+\includegraphics[width=0.82\textwidth]{figs/compare_grid.png}
+\caption{Ten held-out test items. Rows: ground truth; the base model in the pure
+inverse, partial and retrofit regimes; the symmetry variant in the same three regimes; and
+the released baseline in the pure inverse regime, the only regime it is defined for. Each
+column is one test item and white denotes occupied material. The pure inverse row shows the
+compromise shapes that a deterministic decoder returns where several designs fit; the
+partial and retrofit rows recover the visible region because it is retained, and the
+baseline's row is visibly more blocky, a consequence of its $32\times32$ quadrant. The
+masked samples of regimes B and C are drawn once for this figure; the metric tables come
+from the recorded benchmark run.}\label{fig:designs}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{figs/spectra_compare.png}
+\caption{What the decoded designs actually do. The frozen forward surrogate evaluates each
+decoded design in the pure inverse regime and its response is plotted against the target
+spectrum for three held-out items, real part above and imaginary part below. All three
+models reproduce the broad shape, and all three smooth over the narrow resonances, which are
+the features that carry the phase information the designs are supposed to set. MetaDiT-S
+departs most at the sharp dips. This is a consistency measurement against the surrogate that
+also supplies the training signal, not an independent physical validation.}\label{fig:spectra}
 \end{figure}
 
 Four limitations should be read alongside these numbers. Supplied scalar parameters are

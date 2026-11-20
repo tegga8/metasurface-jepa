@@ -103,8 +103,8 @@
 \draw[tarr] (tgt) -- (lss);
 \draw[tarr] (gc.east) -- ++(0.40,0) -- ++(0,-4.9) -| (lss.north);
 \draw[tarr] (cf.south) -- ++(0,-0.9) -| ([xshift=-9mm]toe.north);
-\coordinate (filmTop) at ({1.30},2.70);
-\draw[tarr] (se.west) -- ({1.30},-1.9) -- (filmTop) -- ({3.5},2.70) -- (oe.north);
+\draw[tarr] (se.west) -- ({2.00},-1.9) -- ({2.00},-0.55) -- ({2.00},1.50) -- (oe.south -| {2.00});
+\node[lab, left=1pt] at ({2.00},-0.62) {FiLM $(\gamma_b,\beta_b)$};
 
 % ---------------- bands ----------------
 \coordinate (sNE) at ($(des.north east)+(0.36,0.28)$);

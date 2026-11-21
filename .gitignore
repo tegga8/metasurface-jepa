@@ -48,3 +48,14 @@ Thumbs.db
 .idea/
 .vscode/
 .ipynb_checkpoints/
+# scratch and local build artifacts
+.firecrawl/
+/_*.py
+/_*.sh
+/_*.txt
+/_*.npz
+/_*.png
+*.aux
+*.out
+docs/paper/manuscript_*_highlighted.pdf
+Arc_doc.zip

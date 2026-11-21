@@ -1,4 +1,4 @@
-import os, sys, json, glob, subprocess
+import os, sys, json, glob, subprocess, traceback
 
 import numpy as np
 import torch
@@ -6,6 +6,21 @@ import yaml
 
 OUT = "/kaggle/working"
 REPO = "/kaggle/working/repo"
+
+try:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "timm", "pyyaml"], check=True)
+    print("deps installed")
+except Exception:
+    traceback.print_exc()
+
+
+def _hook(t, v, tb):
+    with open(os.path.join(OUT, "error.txt"), "w") as f:
+        f.write("".join(traceback.format_exception(t, v, tb)))
+    sys.__excepthook__(t, v, tb)
+
+
+sys.excepthook = _hook
 
 if not os.path.isdir(REPO):
     subprocess.run(["git", "clone", "--depth", "1",

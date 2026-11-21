@@ -793,10 +793,11 @@ these numbers are illustrative and not the ranking basis, which is
 Table~\ref{tab:benchmark}. The spectral error is the standard-deviation-normalised $L_1$
 distance between the surrogate response of the decoded design and the target, and the
 spectral correlation is taken over the $602$ real and imaginary components. MetaDiT-S is
-conditioned on the spectrum alone, so it has no partial or retrofit entry. The two of our
-models are the same single checkpoints as in Fig.~\ref{fig:designs}: the variant is its
-seed-0 run and the base model is a separate 70\,000-step run trained with internal seed 42,
-so these are not the three-seed means of Table~\ref{tab:benchmark}.}
+conditioned on the spectrum alone, so it has no partial or retrofit entry. Every number in this table comes from one run of the same ten items, so the table and the
+figures agree with each other. The checkpoints are the same as in Fig.~\ref{fig:designs}: the
+variant is its seed-0 run, and the base model is a 70\,000-step run trained with internal seed
+42; neither is one of the three seeds behind Table~\ref{tab:benchmark}, and the masks are a
+single independent draw rather than the benchmark's.}
 \label{tab:scenarios}
 \footnotesize
 \begin{tabular}{@{}llccc ccc@{}}
@@ -804,15 +805,15 @@ so these are not the three-seed means of Table~\ref{tab:benchmark}.}
 Model & Regime & Masked & Known & MAE $\downarrow$ & Norm.\ spectral & Spectral & IoU \\
  & & fraction & scalars & & error $\downarrow$ & corr.\ $\uparrow$ & $\uparrow$ \\
 \midrule
-Base (unconstrained) & A & 1.00 & none & 0.0413 & 0.0720 & 0.990 & 0.790 \\
- & B & 0.50 & one & 0.0487 & 0.0844 & 0.986 & 0.857 \\
- & C & 0.25 & three & 0.0237 & 0.0407 & 0.995 & 0.889 \\
+Base (unconstrained) & A & 1.00 & none & 0.0369 & 0.0637 & 0.991 & 0.788 \\
+ & B & 0.50 & one & 0.0587 & 0.1007 & 0.981 & 0.926 \\
+ & C & 0.25 & three & 0.0198 & 0.0340 & 0.996 & 0.962 \\
 \midrule
-Symmetry variant & A & 1.00 & none & 0.0320 & 0.0549 & 0.992 & 0.783 \\
- & B & 0.50 & one & 0.0566 & 0.0992 & 0.980 & 0.856 \\
- & C & 0.25 & three & 0.0310 & 0.0530 & 0.991 & 0.888 \\
+Symmetry variant & A & 1.00 & none & 0.0320 & 0.0550 & 0.992 & 0.783 \\
+ & B & 0.50 & one & 0.0597 & 0.1042 & 0.982 & 0.928 \\
+ & C & 0.25 & three & 0.0127 & 0.0218 & 0.997 & 0.969 \\
 \midrule
-MetaDiT-S~\cite{metadit} & A & 1.00 & none & 0.0549 & 0.0960 & 0.986 & 0.739 \\
+MetaDiT-S~\cite{metadit} & A & 1.00 & none & 0.0549 & 0.0961 & 0.986 & 0.739 \\
 \botrule
 \end{tabular}
 \end{table}
@@ -829,7 +830,8 @@ the same ten held-out samples and the same three regimes. All three models follo
 in the pure inverse regime, with spectral correlations between $0.986$ and $0.992$, so the
 difference between them is not whether the spectrum is reproduced but how much of the
 geometry is recovered: on these samples the occupancy IoU is $0.79$ for the base model and
-$0.74$ for MetaDiT, while the two agree closely on the spectral error. In partial and retrofit
+$0.74$ for MetaDiT, while the two agree closely on the spectral error. Correlations run from
+$0.981$ to $0.997$ across all arms. In partial and retrofit
 the supplied information dominates and the errors fall, as expected; MetaDiT has no entry
 there because it is conditioned on the spectrum alone and receives neither a visible region
 nor any parameter.

@@ -793,7 +793,10 @@ these numbers are illustrative and not the ranking basis, which is
 Table~\ref{tab:benchmark}. The spectral error is the standard-deviation-normalised $L_1$
 distance between the surrogate response of the decoded design and the target, and the
 spectral correlation is taken over the $602$ real and imaginary components. MetaDiT-S is
-conditioned on the spectrum alone, so it has no partial or retrofit entry.}
+conditioned on the spectrum alone, so it has no partial or retrofit entry. The two of our
+models are the same single checkpoints as in Fig.~\ref{fig:designs}: the variant is its
+seed-0 run and the base model is a separate 70\,000-step run trained with internal seed 42,
+so these are not the three-seed means of Table~\ref{tab:benchmark}.}
 \label{tab:scenarios}
 \footnotesize
 \begin{tabular}{@{}llccc ccc@{}}
@@ -906,8 +909,11 @@ column is one test item and white denotes occupied material. The pure inverse ro
 compromise shapes that a deterministic decoder returns where several designs fit; the
 partial and retrofit rows recover the visible region because it is retained, and the
 baseline's row is visibly more blocky, a consequence of its $32\times32$ quadrant. The
-masked samples of regimes B and C are drawn once for this figure; the metric tables come
-from the recorded benchmark run.}\label{fig:designs}
+masked samples of regimes B and C are drawn once for this figure. Each model is a single
+checkpoint: the symmetry variant is its seed-0 run, while the base model is a separate
+70\,000-step base-architecture run whose internal training seed is 42, not one of the three
+seeds behind Table~\ref{tab:benchmark}; the same applies to the metric tables quoted for
+these particular panels.}\label{fig:designs}
 \end{figure}
 
 \begin{figure}[H]
@@ -918,7 +924,9 @@ decoded design in regime A, the pure inverse case with a full occupancy mask and
 parameters unknown, and its response is plotted against the target spectrum for three
 held-out items, real part above and imaginary part below. This is the only regime in which
 the released baseline is defined, and no gate statistic is plotted here: the curves show
-the spectra, not the paired win fractions of Table~\ref{tab:gates}. All three
+the spectra, not the paired win fractions of Table~\ref{tab:gates}. The base curve comes
+from the seed-42 base-architecture checkpoint and the variant curve from its seed-0 run, the
+same checkpoints as in Fig.~\ref{fig:designs}. All three
 models reproduce the broad shape, and all three smooth over the narrow resonances, which are
 the features that carry the phase information the designs are supposed to set. MetaDiT-S
 departs most at the sharp dips. This is a consistency measurement against the surrogate that
